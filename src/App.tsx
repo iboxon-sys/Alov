@@ -713,8 +713,12 @@ export default function App() {
   const handleGoogleLogin = async () => {
     try {
       setErrorMsg('');
+      googleProvider.setCustomParameters({ prompt: 'select_account' });
       await signInWithPopup(auth, googleProvider);
     } catch (err: any) {
+      if (err.code === 'auth/popup-closed-by-user') {
+        return; // User intentionally closed the popup
+      }
       setErrorMsg(err.message || "Google orqali kirishda xatolik yuz berdi.");
     }
   };

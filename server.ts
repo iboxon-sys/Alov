@@ -14,6 +14,17 @@ async function startServer() {
   const app = express();
   app.use(express.json());
 
+  // Dynamic CORS & Cross-Origin support for Render and local deployments
+  app.use((req, res, next) => {
+    res.header('Access-Control-Allow-Origin', '*');
+    res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
+    res.header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept, Authorization');
+    if (req.method === 'OPTIONS') {
+      return res.sendStatus(200);
+    }
+    next();
+  });
+
   // Initialize Gemini AI SDK
   const geminiApiKey = process.env.GEMINI_API_KEY || process.env.API_KEY || '';
   const ai = new GoogleGenAI({ apiKey: geminiApiKey });

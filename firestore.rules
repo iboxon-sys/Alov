@@ -6,8 +6,11 @@ service cloud.firestore {
     }
 
     match /users/{userId} {
-      allow read: if request.auth != null;
+      // Allow reading user profiles so all connected users can see each other on the live map
+      allow read: if true;
+      // Enforce that users can only create or update their own profile and location
       allow create, update: if request.auth != null && request.auth.uid == userId;
     }
   }
 }
+

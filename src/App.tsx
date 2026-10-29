@@ -17,6 +17,7 @@ import {
   doc, setDoc, getDoc, collection, onSnapshot, setPersistence, browserLocalPersistence, User,
   RecaptchaVerifier, signInWithPhoneNumber
 } from './firebase';
+import { getApiUrl } from './config/api';
 
 // High Precision GPS Options: Forces device physical GPS chip rather than coarse IP
 const GPS_OPTIONS = {
@@ -215,6 +216,7 @@ export default function App() {
   // Firebase Auth State
   const [firebaseUser, setFirebaseUser] = useState<User | null>(null);
   const [currentUser, setCurrentUser] = useState<any>(null);
+  const [isAuthChecking, setIsAuthChecking] = useState<boolean>(true);
   const [showAuthModal, setShowAuthModal] = useState(false);
   const [showProfileModal, setShowProfileModal] = useState(false);
   const [errorMsg, setErrorMsg] = useState('');
@@ -320,7 +322,7 @@ export default function App() {
     };
   }, []);
 
-  // Foydalanuvchi hisobini Firestore bilan sinxronizatsiya qilish (avtomatik yangi hisob ochish)
+  // Foydalanuvchi hisobini Firestore bilan sinxronizatsiya qilish (avtomatik yangi hisob ochish yoki mavjud hisobga ulanish)
   const syncUserWithFirestore = async (user: User) => {
     try {
       const userRef = doc(db, 'users', user.uid);
@@ -328,12 +330,25 @@ export default function App() {
       let userData: any;
 
       if (userSnap.exists()) {
-        userData = userSnap.data();
+        // AYNAN SHU user.uid li mavjud profil topildi - yangi profil ochilmaydi!
+        const existingData = userSnap.data();
+        userData = {
+          ...existingData,
+          uid: user.uid,
+          id: existingData.id || `ALOV-${user.uid.slice(0, 5).toUpperCase()}`,
+          email: user.email || existingData.email || '',
+          name: existingData.name || user.displayName || 'Alov Foydalanuvchisi',
+          avatar: existingData.avatar || user.photoURL || 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&q=80&w=600',
+          photoURL: user.photoURL || existingData.photoURL || '',
+          isOnline: true
+        };
+        // merge: true orqali mavjud profil ustiga yozilmaydi, faqat zarur maydonlar yangilanadi
+        await setDoc(userRef, { isOnline: true }, { merge: true });
       } else {
-        // Yangi hisob ochish (foydalanuvchi birinchi marta kirayotgan bo'lsa)
+        // Yangi hisob ochish (faqatgina ushbu Google account birinchi marta kirayotgan bo'lsa)
         userData = {
           uid: user.uid,
-          id: `ALOV-${Math.floor(1000 + Math.random() * 9000)}`,
+          id: `ALOV-${user.uid.slice(0, 5).toUpperCase()}`,
           name: user.displayName || 'Alov Foydalanuvchisi',
           email: user.email || '',
           photoURL: user.photoURL || '',
@@ -353,9 +368,12 @@ export default function App() {
           followingCount: 1,
           likesCount: 10,
           isOnline: true,
-          isLocationEnabled: false,
-          locationVisibility: 'mutual',
-          location: { lat: null, lng: null },
+          isLocationEnabled: true,
+          locationVisibility: 'everyone',
+          location: { 
+            lat: userCoords?.lat || 41.311081, 
+            lng: userCoords?.lng || 69.240562 
+          },
           createdAt: serverTimestamp()
         };
         await setDoc(userRef, userData, { merge: true });
@@ -384,7 +402,12 @@ export default function App() {
         setUserCoords(userData.location);
       }
 
-      setUsersList(prev => [userData, ...prev.filter(u => u.id !== userData.id && u.uid !== userData.uid)]);
+      setUsersList(prev => {
+        const unique = new Map<string, any>();
+        prev.forEach(u => unique.set(u.uid || u.id, u));
+        unique.set(user.uid, userData);
+        return Array.from(unique.values());
+      });
       setShowAuthModal(false);
       setShowProfileModal(false);
       setActiveTab('discover');
@@ -427,6 +450,7 @@ export default function App() {
         setCurrentUser(null);
         setActiveTab('landing');
       }
+      setIsAuthChecking(false);
     });
     return () => unsubscribe();
   }, []);
@@ -478,9 +502,15 @@ export default function App() {
             accuracy: pos.coords.accuracy 
           };
           setUserCoords(coords);
+          setIsLocationEnabled(true);
           setGpsStatusMsg('');
           if (firebaseUser) {
-            setDoc(doc(db, 'users', firebaseUser.uid), { location: coords }, { merge: true }).catch(() => {});
+            setDoc(doc(db, 'users', firebaseUser.uid), { 
+              location: coords,
+              isLocationEnabled: true,
+              isOnline: true,
+              lastSeen: serverTimestamp()
+            }, { merge: true }).catch(() => {});
           }
         },
         (err) => {
@@ -498,8 +528,14 @@ export default function App() {
             accuracy: pos.coords.accuracy 
           };
           setUserCoords(coords);
+          setIsLocationEnabled(true);
           if (firebaseUser) {
-            setDoc(doc(db, 'users', firebaseUser.uid), { location: coords }, { merge: true }).catch(() => {});
+            setDoc(doc(db, 'users', firebaseUser.uid), { 
+              location: coords,
+              isLocationEnabled: true,
+              isOnline: true,
+              lastSeen: serverTimestamp()
+            }, { merge: true }).catch(() => {});
           }
         },
         (err) => {
@@ -512,6 +548,7 @@ export default function App() {
       setGpsStatusMsg("Qurilmangiz geolokatsiyani (GPS) qo'llab-quvvatlamaydi.");
     }
   }, [firebaseUser]);
+
 
   // Handle Privacy-Protected Route Calculation to a target user
   const handleDrawRouteToUser = (targetUser: any) => {
@@ -617,13 +654,22 @@ export default function App() {
     const unsub = onSnapshot(collection(db, 'users'), (snapshot) => {
       const fetchedUsers: any[] = [];
       snapshot.forEach(docSnap => {
-        fetchedUsers.push(docSnap.data());
+        const data = docSnap.data();
+        const docUid = docSnap.id;
+        fetchedUsers.push({
+          ...data,
+          uid: data.uid || docUid,
+          id: data.id || `ALOV-${docUid.slice(0, 5).toUpperCase()}`
+        });
       });
       if (fetchedUsers.length > 0) {
-        setUsersList(prev => {
-          const userMap = new Map();
-          INITIAL_USERS.forEach(u => userMap.set(u.id, u));
-          fetchedUsers.forEach(u => userMap.set(u.id || u.uid, u));
+        setUsersList(() => {
+          const userMap = new Map<string, any>();
+          INITIAL_USERS.forEach(u => userMap.set(u.id, { ...u, uid: u.id }));
+          fetchedUsers.forEach(u => {
+            const key = u.uid || u.id;
+            userMap.set(key, u);
+          });
           return Array.from(userMap.values());
         });
       }
@@ -631,7 +677,90 @@ export default function App() {
       console.warn("Firestore snapshot listener error:", err);
     });
     return () => unsub();
-  }, []);
+  }, [firebaseUser]);
+
+  // Real-time Leaflet Map Marker Sync Effect
+  useEffect(() => {
+    if (activeTab !== 'map' || !mapInstanceRef.current) return;
+
+    import('leaflet').then(L => {
+      const map = mapInstanceRef.current;
+      if (!map) return;
+
+      // 1. Sync User Marker ('me')
+      if (userCoords?.lat && userCoords?.lng && isLocationEnabled) {
+        const userIcon = L.divIcon({
+          className: 'custom-user-marker',
+          html: `<div style="background:#E8474A;width:38px;height:38px;border-radius:50%;border:3px solid white;box-shadow:0 4px 14px rgba(232,71,74,0.6);display:flex;align-items:center;justify-content:center;color:white;font-weight:bold;font-size:16px;">📍</div>`,
+          iconSize: [38, 38]
+        });
+
+        if (!markersRef.current['me']) {
+          markersRef.current['me'] = L.marker([userCoords.lat, userCoords.lng], { icon: userIcon }).addTo(map);
+        } else {
+          markersRef.current['me'].setLatLng([userCoords.lat, userCoords.lng]);
+        }
+      } else if (markersRef.current['me']) {
+        markersRef.current['me'].remove();
+        delete markersRef.current['me'];
+      }
+
+      // 2. Sync Other Users
+      const myUid = currentUser?.uid || firebaseUser?.uid;
+      const myId = currentUser?.id;
+      const activeUsers = usersList.filter(u => {
+        const isSelf = (myUid && (u.uid === myUid || u.id === myUid)) || (myId && u.id === myId);
+        if (isSelf) return false;
+        const hasCoords = u.location && u.location.lat != null && u.location.lng != null;
+        const isNotGhost = u.locationVisibility !== 'ghost';
+        const isLocOn = u.isLocationEnabled !== false;
+        return hasCoords && isNotGhost && isLocOn;
+      });
+
+      // Remove markers no longer active
+      Object.keys(markersRef.current).forEach(id => {
+        if (id !== 'me' && !activeUsers.find(u => (u.uid === id || u.id === id))) {
+          markersRef.current[id].remove();
+          delete markersRef.current[id];
+        }
+      });
+
+      // Add/Update markers
+      activeUsers.forEach(u => {
+        const markerKey = u.uid || u.id;
+        const lat = Number(u.location.lat);
+        const lng = Number(u.location.lng);
+        if (isNaN(lat) || isNaN(lng)) return;
+
+        const userAvatar = u.avatar || 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&q=80&w=600';
+        const otherIcon = L.divIcon({
+          className: 'custom-other-marker',
+          html: `<div style="background:#1C1C1C;width:38px;height:38px;border-radius:50%;border:2px solid white;box-shadow:0 4px 12px rgba(0,0,0,0.3);overflow:hidden;position:relative;">
+            <img src="${userAvatar}" style="width:100%;height:100%;object-fit:cover;" onerror="this.src='https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&q=80&w=600'"/>
+            <span style="position:absolute;bottom:0;right:0;width:10px;height:10px;background:#10B981;border:2px solid white;border-radius:50%;"></span>
+          </div>`,
+          iconSize: [38, 38]
+        });
+
+        if (!markersRef.current[markerKey]) {
+          const marker = L.marker([lat, lng], { icon: otherIcon }).addTo(map);
+          marker.bindPopup(`
+            <div style="font-family: Inter, sans-serif; text-align: center; width: 170px; padding: 4px;">
+              <img src="${userAvatar}" style="width:48px;height:48px;border-radius:50%;object-fit:cover;margin:0 auto 6px;border:2px solid #E8474A;" />
+              <b style="font-size: 13px; display:block; color:#1C1C1C;">${u.name || 'Foydalanuvchi'}</b>
+              <p style="font-size: 10px; color: #666; margin: 2px 0 6px;">${u.district || u.region || 'Toshkent'}</p>
+              <button onclick="window.dispatchEvent(new CustomEvent('alov-open-user-profile', { detail: '${markerKey}' }))" style="background:#E8474A;color:white;border:none;padding:6px 12px;border-radius:12px;font-size:11px;font-weight:bold;cursor:pointer;margin-bottom:4px;width:100%;box-shadow:0 2px 6px rgba(232,71,74,0.3);">Profilni ko'rish 👤</button>
+              <button onclick="window.dispatchEvent(new CustomEvent('alov-draw-route-to-user', { detail: '${markerKey}' }))" style="background:#1C1C1C;color:white;border:none;padding:6px 12px;border-radius:12px;font-size:11px;font-weight:bold;cursor:pointer;width:100%;box-shadow:0 2px 6px rgba(0,0,0,0.2);">Yo'l (Marshrut) 🚗</button>
+            </div>
+          `);
+          markersRef.current[markerKey] = marker;
+        } else {
+          markersRef.current[markerKey].setLatLng([lat, lng]);
+        }
+      });
+    });
+  }, [activeTab, usersList, userCoords, isLocationEnabled, currentUser, firebaseUser]);
+
 
   // Device Image File Upload Handler -> Opens Avatar Image Crop Modal
   const handleImageUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -812,7 +941,8 @@ export default function App() {
     try {
       const userRef = doc(db, 'users', firebaseUser.uid);
       const newUserData = {
-        id: currentUser?.id || `ALOV-${Math.floor(1000 + Math.random() * 9000)}`,
+        ...currentUser,
+        id: currentUser?.id || `ALOV-${firebaseUser.uid.slice(0, 5).toUpperCase()}`,
         uid: firebaseUser.uid,
         name: regName || firebaseUser.displayName || 'Alov Foydalanuvchisi',
         age: Number(regAge),
@@ -825,7 +955,7 @@ export default function App() {
         instagram: regInstagram || '@user_insta',
         bio: regBio,
         avatar: regAvatar || firebaseUser.photoURL || 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&q=80&w=600',
-        videoUrl: 'https://assets.mixkit.co/videos/preview/mixkit-young-woman-looking-at-camera-in-a-park-41686-large.mp4',
+        videoUrl: currentUser?.videoUrl || 'https://assets.mixkit.co/videos/preview/mixkit-young-woman-looking-at-camera-in-a-park-41686-large.mp4',
         followersCount: currentUser?.followersCount || 1,
         followingCount: currentUser?.followingCount || 1,
         likesCount: currentUser?.likesCount || 5,
@@ -836,7 +966,12 @@ export default function App() {
       };
       await setDoc(userRef, newUserData, { merge: true });
       setCurrentUser(newUserData);
-      setUsersList(prev => [newUserData, ...prev.filter(u => u.id !== newUserData.id)]);
+      setUsersList(prev => {
+        const userMap = new Map<string, any>();
+        prev.forEach(u => userMap.set(u.uid || u.id, u));
+        userMap.set(firebaseUser.uid, newUserData);
+        return Array.from(userMap.values());
+      });
       setShowProfileModal(false);
       setActiveTab('discover');
     } catch (err: any) {
@@ -947,7 +1082,14 @@ export default function App() {
   };
 
   const handleLogout = async () => {
+    if (firebaseUser) {
+      try {
+        await setDoc(doc(db, 'users', firebaseUser.uid), { isOnline: false }, { merge: true });
+      } catch (e) {}
+    }
     await signOut(auth);
+    setFirebaseUser(null);
+    setCurrentUser(null);
     setActiveTab('landing');
   };
 
@@ -961,7 +1103,7 @@ export default function App() {
 
   const handleCreateMeetLink = async () => {
     try {
-      const res = await fetch('/api/meet/create-link', {
+      const res = await fetch(getApiUrl('/api/meet/create-link'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ title: `${currentUser?.name} va ${selectedChatUser.name} Google Meet Qo'ng'irog'i` })
@@ -1021,7 +1163,9 @@ export default function App() {
 
   const targetGender = currentUser?.gender === 'male' ? 'female' : 'male';
   const filteredCandidates = usersList.filter(u => {
-    if (!currentUser || u.id === currentUser.id) return false;
+    if (!currentUser) return false;
+    if (currentUser.uid && (u.uid === currentUser.uid || u.id === currentUser.uid)) return false;
+    if (currentUser.id && (u.id === currentUser.id || u.uid === currentUser.id)) return false;
     if (u.gender !== targetGender) return false;
     if (filterRegion !== 'Barchasi' && u.region !== filterRegion) return false;
     if (filterDistrict !== 'Barchasi' && u.district !== filterDistrict) return false;
@@ -1540,80 +1684,35 @@ export default function App() {
             
             {/* Map Container */}
             <div className="flex-1 relative z-10 w-full h-full" id="alov-leaflet-map" ref={(node) => {
-              if (node && !node.dataset.mapInitialized) {
-                node.dataset.mapInitialized = "true";
-                import('leaflet').then(L => {
-                  const map = L.map(node).setView([userCoords.lat, userCoords.lng], 16);
-                  mapInstanceRef.current = map;
-                  L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-                    maxZoom: 19,
-                    attribution: '© OpenStreetMap Alov.uz GPS'
-                  }).addTo(map);
-                });
-              }
-            }}></div>
-
-            {/* Real-time Marker Synchronization Effect */}
-            <div className="hidden" ref={(node) => {
-              if (mapInstanceRef.current && (window as any).L) {
-                const L = (window as any).L;
-                const map = mapInstanceRef.current;
-                
-                // 1. Sync User Marker
-                if (isLocationEnabled) {
-                  const userIcon = L.divIcon({
-                    className: 'custom-user-marker',
-                    html: `<div style="background:#E8474A;width:38px;height:38px;border-radius:50%;border:3px solid white;box-shadow:0 4px 14px rgba(232,71,74,0.6);display:flex;align-items:center;justify-content:center;color:white;font-weight:bold;font-size:16px;">📍</div>`,
-                    iconSize: [38, 38]
+              if (node) {
+                if (!mapInstanceRef.current) {
+                  import('leaflet').then(L => {
+                    if (!node || mapInstanceRef.current) return;
+                    const initialLat = userCoords?.lat || 41.311081;
+                    const initialLng = userCoords?.lng || 69.240562;
+                    const map = L.map(node).setView([initialLat, initialLng], 15);
+                    mapInstanceRef.current = map;
+                    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+                      maxZoom: 19,
+                      attribution: '© OpenStreetMap Alov.uz GPS'
+                    }).addTo(map);
+                    setTimeout(() => {
+                      if (mapInstanceRef.current) {
+                        mapInstanceRef.current.invalidateSize();
+                      }
+                    }, 250);
                   });
-                  
-                  if (!markersRef.current['me']) {
-                    markersRef.current['me'] = L.marker([userCoords.lat, userCoords.lng], { icon: userIcon }).addTo(map);
-                  } else {
-                    markersRef.current['me'].setLatLng([userCoords.lat, userCoords.lng]);
-                  }
-                } else if (markersRef.current['me']) {
-                  markersRef.current['me'].remove();
-                  delete markersRef.current['me'];
                 }
-
-                // 2. Sync Other Users
-                const activeUsers = usersList.filter(u => u.id !== currentUser?.id && u.isLocationEnabled === true && u.locationVisibility !== 'ghost' && u.location?.lat && u.location?.lng);
-                
-                // Remove markers no longer active
-                Object.keys(markersRef.current).forEach(id => {
-                  if (id !== 'me' && !activeUsers.find(u => u.id === id)) {
-                    markersRef.current[id].remove();
-                    delete markersRef.current[id];
-                  }
-                });
-
-                // Add/Update markers
-                activeUsers.forEach(u => {
-                  if (!markersRef.current[u.id]) {
-                    const otherIcon = L.divIcon({
-                      className: 'custom-other-marker',
-                      html: `<div style="background:#1C1C1C;width:36px;height:36px;border-radius:50%;border:2px solid white;box-shadow:0 4px 12px rgba(0,0,0,0.3);overflow:hidden;"><img src="${u.avatar}" style="width:100%;height:100%;object-fit:cover;"/></div>`,
-                      iconSize: [36, 36]
-                    });
-                    const marker = L.marker([u.location.lat, u.location.lng], { icon: otherIcon }).addTo(map);
-                    marker.bindPopup(`
-                      <div style="font-family: Inter, sans-serif; text-align: center; width: 160px; padding: 2px;">
-                        <img src="${u.avatar}" style="width:44px;height:44px;border-radius:50%;object-fit:cover;margin:0 auto 4px;" />
-                        <b style="font-size: 12px; display:block;">${u.name}</b>
-                        <p style="font-size: 10px; color: #666; margin: 2px 0;">${u.district || u.region}</p>
-                        <button onclick="window.dispatchEvent(new CustomEvent('alov-open-user-profile', { detail: '${u.id}' }))" style="background:#E8474A;color:white;border:none;padding:5px 12px;border-radius:14px;font-size:10px;font-weight:bold;cursor:pointer;margin-top:4px;width:100%;box-shadow:0 2px 6px rgba(232,71,74,0.3);">Profil 👤</button>
-                        <button onclick="window.dispatchEvent(new CustomEvent('alov-draw-route-to-user', { detail: '${u.id}' }))" style="background:#1C1C1C;color:white;border:none;padding:5px 12px;border-radius:14px;font-size:10px;font-weight:bold;cursor:pointer;margin-top:4px;width:100%;box-shadow:0 2px 6px rgba(0,0,0,0.2);">Marshrut 🚗</button>
-                      </div>
-                    `);
-                    markersRef.current[u.id] = marker;
-                  } else {
-                    markersRef.current[u.id].setLatLng([u.location.lat, u.location.lng]);
-                  }
-                });
+              } else {
+                if (mapInstanceRef.current) {
+                  mapInstanceRef.current.remove();
+                  mapInstanceRef.current = null;
+                  markersRef.current = {};
+                }
               }
             }}></div>
           </div>
+
         )}
 
       </div>
@@ -1650,6 +1749,21 @@ export default function App() {
 
     </div>
   );
+
+  if (isAuthChecking) {
+    return (
+      <div className="min-h-screen bg-[#FFFDF9] flex flex-col items-center justify-center space-y-4">
+        <div className="relative">
+          <div className="w-12 h-12 rounded-full border-4 border-rose-200 border-t-[#E8474A] animate-spin" />
+          <Flame className="w-5 h-5 text-[#E8474A] absolute inset-0 m-auto animate-pulse" />
+        </div>
+        <div className="text-2xl font-black tracking-tight text-slate-900">
+          alov<span className="text-[#E8474A]">.uz</span>
+        </div>
+        <p className="text-xs text-slate-500 font-medium">Sessiya tiklanmoqda...</p>
+      </div>
+    );
+  }
 
   return (
     <div className="min-h-screen bg-[#FAFAFB] text-[#1C1C1C] font-sans selection:bg-[#E8474A] selection:text-white">

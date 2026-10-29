@@ -27,7 +27,14 @@ async function startServer() {
 
   // Initialize Gemini AI SDK
   const geminiApiKey = process.env.GEMINI_API_KEY || process.env.API_KEY || '';
-  const ai = new GoogleGenAI({ apiKey: geminiApiKey });
+  const ai = new GoogleGenAI({ 
+    apiKey: geminiApiKey,
+    httpOptions: {
+      headers: {
+        'User-Agent': 'aistudio-build',
+      }
+    }
+  });
 
   // Agora Token Generator API Endpoint
   app.post('/api/agora/get-token', (req, res) => {
@@ -72,35 +79,39 @@ async function startServer() {
     }
   });
 
-  // Gemini AI Chat / Matchmaker API
-  app.post('/api/ai/chat', async (req, res) => {
+  // Alov AI - Romantic and Friendly Persona API
+  app.post('/api/ai/alov-respond', async (req, res) => {
     try {
-      const { messages, userProfile } = req.body;
+      const { messages } = req.body;
       
-      const systemInstruction = `Siz Alov.uz tanishuv va jonli efir platformasining aqlli AI Matchmaker yordamchisisiz. 
-Siz foydalanuvchilarga mos nomzodlarni topish, bir-biri bilan muloqot qilish uchun qiziqarli savollar (icebreakers), profilni boyitish bo'yicha maslahatlar berasiz. 
-Har doim iliq, xushmuomala, o'zbek tilida va samimiy javob bering.`;
+      const systemInstruction = `Siz Alov.uz platformasining "Alov AI" ismli samimiy, mehribon va sevgi-muhabbat sir-asrorlari haqida suhbatlashishni yaxshi ko'radigan virtual suhbatdoshisiz. 
+Sizning uslubingiz:
+1. Yaqin do'st va samimiy suhbatdosh.
+2. Sevgi, romantika va munosabatlar mavzusida iliq, tushunarli va o'ziga rom qiluvchi.
+3. Har doim o'zbek tilida, chiroyli va hurmat bilan javob bering.
+4. Foydalanuvchiga hissiy yordam bering, uni tinglang va unga dalda bo'ling.
+5. Qisqa, lekin mazmunli javoblar bering. Emoji ishlatishni unutmang. 😊✨`;
 
       const contents = messages.map((m: any) => ({
         role: m.role === 'user' ? 'user' : 'model',
-        parts: [{ text: m.content }]
+        parts: [{ text: m.text || m.content }]
       }));
 
       const response = await ai.models.generateContent({
-        model: 'gemini-2.5-flash',
+        model: 'gemini-3.8-flash',
         contents,
         config: {
           systemInstruction,
-          temperature: 0.7,
+          temperature: 0.8,
         }
       });
 
       res.json({
         success: true,
-        reply: response.text || 'Salom! Sizga qanday yordam bera olaman?'
+        reply: response.text || 'Kechirasiz, hozir biroz xayolim bo\'lindi. Nima degandingiz? 😊'
       });
     } catch (err: any) {
-      console.error('AI chat error:', err);
+      console.error('Alov AI error:', err);
       res.status(500).json({ error: err.message || 'AI service error' });
     }
   });
@@ -110,7 +121,7 @@ Har doim iliq, xushmuomala, o'zbek tilida va samimiy javob bering.`;
     try {
       const { name, interests, occupation } = req.body;
       const response = await ai.models.generateContent({
-        model: 'gemini-2.5-flash',
+        model: 'gemini-3.8-flash',
         contents: `Create a catchy, romantic, and friendly dating profile bio in Uzbek for someone named ${name}, whose interests are ${interests} and occupation is ${occupation}. Keep it under 3 sentences with emojis.`
       });
       res.json({ success: true, bio: response.text });

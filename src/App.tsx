@@ -5,19 +5,31 @@
 
 import React, { useState, useEffect, useRef } from 'react';
 import { 
-  Heart, Flame, Radio, MessageCircle, User as UserIcon, Sparkles, Phone, Video, 
+  Heart, Flame, Radio, MessageCircle, User as UserIcon, Sparkles, Video, 
   MapPin, Send, Mic, Play, Plus, Users, Eye, ThumbsUp, Smartphone, 
   ChevronRight, X, ArrowUpRight, ShieldCheck, Globe, LogIn, LogOut, CheckCircle2, Edit3, ArrowLeft, VideoOff,
   ZoomIn, ZoomOut, Move, Crop, AlertTriangle, RefreshCw, Navigation, Shield, Lock, EyeOff, Car, Upload
 } from 'lucide-react';
+import { motion, AnimatePresence } from 'framer-motion';
+import { clsx, type ClassValue } from 'clsx';
+import { twMerge } from 'tailwind-merge';
 import { LandingPage } from './LandingPage';
+import { LiveStreamModal } from './components/LiveStreamModal';
+import { VideoPlayer, VoiceMessage } from './components/ChatMedia';
+import { CandidateSkeleton, ChatSkeleton } from './components/Skeleton';
 import { 
-  auth, db, googleProvider, GoogleAuthProvider, serverTimestamp,
+  auth, db, storage, googleProvider, GoogleAuthProvider, serverTimestamp,
   signInWithPopup, signInWithRedirect, getRedirectResult, signOut, onAuthStateChanged, 
-  doc, setDoc, getDoc, collection, onSnapshot, setPersistence, browserLocalPersistence, User,
-  RecaptchaVerifier, signInWithPhoneNumber
+  doc, setDoc, getDoc, collection, getDocs, onSnapshot, setPersistence, browserLocalPersistence, User,
+  addDoc, query, orderBy, limit, where, updateDoc,
+  ref, uploadBytesResumable, getDownloadURL
 } from './firebase';
 import { getApiUrl } from './config/api';
+
+/** Utility for Tailwind class merging */
+function cn(...inputs: ClassValue[]) {
+  return twMerge(clsx(inputs));
+}
 
 // High Precision GPS Options: Forces device physical GPS chip rather than coarse IP
 const GPS_OPTIONS = {
@@ -87,108 +99,18 @@ const UZ_LOCATIONS: Record<string, string[]> = {
   ]
 };
 
-const INITIAL_USERS = [
-  {
-    id: "ALOV-1001",
-    name: "Madina Karimova",
-    age: 22,
-    gender: "female",
-    region: "Toshkent shahri",
-    district: "Yunusobod tumani",
-    neighborhood: "Bodomzor",
-    phone: "+998901234567",
-    telegram: "@madina_k",
-    instagram: "@madina.official",
-    bio: "San'at va dizaynni yaxshi ko'raman. Hayotni sevaman! ✨🌹",
-    avatar: "https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&q=80&w=600",
-    videoUrl: "https://youtube.com/shorts/viPxdYURlaI?si=Ql6xrB_GCYr87lEw",
-    followersCount: 1420,
-    followingCount: 310,
-    likesCount: 5600,
-    isOnline: true,
-    isLocationEnabled: true,
-    locationVisibility: "everyone",
-    location: { lat: 41.3111, lng: 69.2797, accuracy: 15 }
-  },
-  {
-    id: "ALOV-1002",
-    name: "Javohirbek Toshpo'latov",
-    age: 25,
-    gender: "male",
-    region: "Toshkent shahri",
-    district: "Chilonzor tumani",
-    neighborhood: "Novza",
-    phone: "+998939876543",
-    telegram: "@javohir_dev",
-    instagram: "@javohir.t",
-    bio: "Dasturchi va tadbirkor. Sport va kitoblar olami. 🚀",
-    avatar: "https://images.unsplash.com/photo-1507003211169-0a1dd7228f2d?auto=format&fit=crop&q=80&w=600",
-    videoUrl: "https://assets.mixkit.co/videos/preview/mixkit-man-holding-smartphone-while-smiling-41221-large.mp4",
-    followersCount: 980,
-    followingCount: 240,
-    likesCount: 3400,
-    isOnline: true,
-    isLocationEnabled: true,
-    locationVisibility: "everyone",
-    location: { lat: 41.2856, lng: 69.2034, accuracy: 10 }
-  },
-  {
-    id: "ALOV-1003",
-    name: "Zarnigor Aliyeva",
-    age: 21,
-    gender: "female",
-    region: "Samarqand viloyati",
-    district: "Samarqand shahri",
-    neighborhood: "Registon",
-    phone: "+998915554433",
-    telegram: "@zarnigor_a",
-    instagram: "@zarnigor.live",
-    bio: "Vokal va jonli efirlar qirolichasi. Musiqa - mening nafasim. 🎶",
-    avatar: "https://images.unsplash.com/photo-1494790108377-be9c29b29330?auto=format&fit=crop&q=80&w=600",
-    videoUrl: "https://assets.mixkit.co/videos/preview/mixkit-woman-singing-with-a-microphone-in-a-studio-42861-large.mp4",
-    followersCount: 3850,
-    followingCount: 520,
-    likesCount: 18200,
-    isOnline: true,
-    isLocationEnabled: true,
-    locationVisibility: "everyone",
-    location: { lat: 41.3289, lng: 69.2401, accuracy: 20 }
-  }
-];
+const ALOV_AI_USER = {
+  uid: 'alov_ai_bot',
+  id: 'ALOV-AI',
+  name: 'Alov AI',
+  avatar: 'https://cdn-icons-png.flaticon.com/512/4712/4712035.png',
+  bio: 'Sizning samimiy va mehribon virtual suhbatdoshingiz. Sevgi va munosabatlar haqida gaplashamizmi? 😊✨',
+  status: 'online',
+  isAI: true
+};
 
-interface CountryInfo {
-  code: string;
-  name: string;
-  flag: string;
-  dialCode: string;
-}
-
-const COUNTRY_CODES: CountryInfo[] = [
-  { code: 'UZ', name: "O'zbekiston", flag: '🇺🇿', dialCode: '+998' },
-  { code: 'KZ', name: "Qozog'iston", flag: '🇰🇿', dialCode: '+77' },
-  { code: 'KG', name: "Qirg'iziston", flag: '🇰🇬', dialCode: '+996' },
-  { code: 'TJ', name: "Tojikiston", flag: '🇹🇯', dialCode: '+992' },
-  { code: 'TM', name: "Turkmaniston", flag: '🇹🇲', dialCode: '+993' },
-  { code: 'RU', name: "Rossiya", flag: '🇷🇺', dialCode: '+7' },
-  { code: 'TR', name: "Turkiya", flag: '🇹🇷', dialCode: '+90' },
-  { code: 'KR', name: "Janubiy Koreya", flag: '🇰🇷', dialCode: '+82' },
-  { code: 'US', name: "AQSh / Kanada", flag: '🇺🇸', dialCode: '+1' },
-  { code: 'GB', name: "Buyuk Britaniya", flag: '🇬🇧', dialCode: '+44' },
-  { code: 'DE', name: "Olmanya (Germaniya)", flag: '🇩🇪', dialCode: '+49' },
-  { code: 'AE', name: "Birlashgan Arab Amirliklari", flag: '🇦🇪', dialCode: '+971' },
-  { code: 'AZ', name: "Ozarbayjon", flag: '🇦🇿', dialCode: '+994' },
-];
-
-function detectCountry(phoneInput: string): CountryInfo {
-  const clean = phoneInput.trim();
-  if (!clean.startsWith('+')) {
-    return { code: 'UZ', name: "O'zbekiston", flag: '🇺🇿', dialCode: '+998' };
-  }
-  const sorted = [...COUNTRY_CODES].sort((a, b) => b.dialCode.length - a.dialCode.length);
-  const found = sorted.find(c => clean.startsWith(c.dialCode));
-  if (found) return found;
-  return { code: 'WORLD', name: "Xalqaro raqam", flag: '🌐', dialCode: '+' };
-}
+const APP_VERSION = '1.1.1';
+const LATEST_VERSION = '1.1.1';
 
 function getYouTubeEmbedUrl(url: string): string | null {
   if (!url) return null;
@@ -210,6 +132,19 @@ function getYouTubeEmbedUrl(url: string): string | null {
   return null;
 }
 
+function getGpsErrorMessage(error: any): string {
+  switch (error.code) {
+    case error.PERMISSION_DENIED:
+      return "Iltimos, brauzer va telefoningiz sozlamalarida GPS/Lokatsiyaga ruxsat bering!";
+    case error.POSITION_UNAVAILABLE:
+      return "GPS ma'lumotlarini olish imkoni bo'lmadi.";
+    case error.TIMEOUT:
+      return "GPS so'rovi vaqti tugadi.";
+    default:
+      return "GPS xatoligi yuz berdi.";
+  }
+}
+
 export default function App() {
   const [activeTab, setActiveTab] = useState<string>('landing');
 
@@ -220,16 +155,6 @@ export default function App() {
   const [showAuthModal, setShowAuthModal] = useState(false);
   const [showProfileModal, setShowProfileModal] = useState(false);
   const [errorMsg, setErrorMsg] = useState('');
-
-  // Phone Auth State
-  const [authMethod, setAuthMethod] = useState<'options' | 'phone'>('options');
-  const [phoneNumberInput, setPhoneNumberInput] = useState('+998');
-  const [phoneStep, setPhoneStep] = useState<'input' | 'otp'>('input');
-  const [otpCode, setOtpCode] = useState('');
-  const [phoneLoading, setPhoneLoading] = useState(false);
-  const [phoneError, setPhoneError] = useState('');
-  const [confirmationResult, setConfirmationResult] = useState<any>(null);
-  const recaptchaVerifierRef = useRef<any>(null);
 
   // Profile Form Fields (including Avatar URL and Location Visibility)
   const [regName, setRegName] = useState('');
@@ -259,7 +184,8 @@ export default function App() {
   const dragStartRef = useRef<{ x: number; y: number }>({ x: 0, y: 0 });
   const commentsEndRef = useRef<HTMLDivElement>(null);
 
-  const [usersList, setUsersList] = useState<any[]>(INITIAL_USERS);
+  const [usersList, setUsersList] = useState<any[]>([]);
+  const [chatsList, setChatsList] = useState<any[]>([]);
   const [filterRegion, setFilterRegion] = useState('Barchasi');
   const [filterDistrict, setFilterDistrict] = useState('Barchasi');
   const [searchQuery, setSearchQuery] = useState('');
@@ -276,37 +202,35 @@ export default function App() {
   // Chat view substate: 'list' or 'conversation'
   const [chatView, setChatView] = useState<'list' | 'conversation'>('list');
 
-  const [activeRoom, setActiveRoom] = useState<any | null>(null);
-  const [roomList, setRoomList] = useState([
-    { id: 'room-1', title: '💖 Kechki romantik suhbatlar va qo\'shiqlar', host: INITIAL_USERS[2], listenersCount: 48, chairs: [
-      { id: 1, user: INITIAL_USERS[2], isMuted: false, isTalking: true },
-      { id: 2, user: null, isMuted: true, isTalking: false }
-    ]}
-  ]);
+  // Live Stream (Jonli Efir) states
+  const [showLiveModal, setShowLiveModal] = useState(false);
+  const [liveModalMode, setLiveModalMode] = useState<'broadcaster' | 'viewer'>('broadcaster');
+  const [activeLiveStreamId, setActiveLiveStreamId] = useState<string | undefined>(undefined);
+  const [activeLiveHostUser, setActiveLiveHostUser] = useState<any | undefined>(undefined);
 
-  const [selectedChatUser, setSelectedChatUser] = useState<any>(INITIAL_USERS[0]);
-  const [chatMessages, setChatMessages] = useState<Record<string, Array<{id: string, senderId: string, text?: string, type?: 'text' | 'meet', meetUrl?: string, time: string}>>>({
-    "ALOV-1001": [
-      { id: 'm1', senderId: "ALOV-1001", text: "Salom! Alov.uz platformasiga xush kelibsiz! 👋", type: 'text', time: '14:20' }
-    ]
-  });
+  const [activeRoom, setActiveRoom] = useState<any | null>(null);
+  const [roomList, setRoomList] = useState<any[]>([]);
+
+  const [selectedChatUser, setSelectedChatUser] = useState<any>(null);
+  const [chatMessages, setChatMessages] = useState<Record<string, any[]>>({});
   const [inputMessage, setInputMessage] = useState('');
+  const [isTyping, setIsTyping] = useState(false);
+  const typingTimeoutRef = useRef<any>(null);
 
   // Reels / Efirlar feed index & Touch Swipe & Live Chat
   const [currentReelIndex, setCurrentReelIndex] = useState(0);
   const [touchStartY, setTouchStartY] = useState<number | null>(null);
   const [showFilterModal, setShowFilterModal] = useState(false);
-  const [reelComments, setReelComments] = useState<Record<string, Array<{id: string, name: string, text: string}>>>({
-    "ALOV-1001": [
-      { id: 'c1', name: "Sardor", text: "Jonli efir super! 🔥" },
-      { id: 'c2', name: "Madina", text: "Salom hammaga! ✨" },
-      { id: 'c3', name: "Diyorbek", text: "Ovozingiz juda chiroyli 👏" }
-    ],
-    "ALOV-1002": [
-      { id: 'c1', name: "Lobar", text: "Omad loyihaga! 🚀" }
-    ]
-  });
+  const [reelComments, setReelComments] = useState<Record<string, any[]>>({});
   const [reelCommentInput, setReelCommentInput] = useState('');
+  const [isOtherTyping, setIsOtherTyping] = useState<boolean>(false);
+  const [isRecording, setIsRecording] = useState(false);
+  const [mediaRecorder, setMediaRecorder] = useState<MediaRecorder | null>(null);
+  const [audioChunks, setAudioChunks] = useState<Blob[]>([]);
+  const [isLoadingCandidates, setIsLoadingCandidates] = useState(true);
+  const [isLoadingChats, setIsLoadingChats] = useState(true);
+  const [showUpdateBanner, setShowUpdateBanner] = useState(false);
+  const [isAiTyping, setIsAiTyping] = useState(false);
 
   // Real GPS Geolocation & Ghost Mode state
   const [isLocationEnabled, setIsLocationEnabled] = useState<boolean>(false);
@@ -316,13 +240,25 @@ export default function App() {
 
   // Ensure persistent Auth session across browser reloads
   useEffect(() => {
-    setPersistence(auth, browserLocalPersistence).catch(console.error);
+    // Check version for backward compatibility
+    if (APP_VERSION !== LATEST_VERSION) {
+      setShowUpdateBanner(true);
+    }
+
+    setPersistence(auth, browserLocalPersistence)
+      .then(() => {
+        console.log("Auth persistence set to local");
+      })
+      .catch((err) => {
+        console.warn("Auth persistence error:", err);
+      });
+
     return () => {
       if (timerRef.current) clearInterval(timerRef.current);
     };
   }, []);
 
-  // Foydalanuvchi hisobini Firestore bilan sinxronizatsiya qilish (avtomatik yangi hisob ochish yoki mavjud hisobga ulanish)
+  // Foydalanuvchi hisobini Firestore bilan sinxronizatsiya qilish
   const syncUserWithFirestore = async (user: User) => {
     try {
       const userRef = doc(db, 'users', user.uid);
@@ -330,91 +266,58 @@ export default function App() {
       let userData: any;
 
       if (userSnap.exists()) {
-        // AYNAN SHU user.uid li mavjud profil topildi - yangi profil ochilmaydi!
-        const existingData = userSnap.data();
+        // GET EXISTING USER: Only update presence and lastSeen
         userData = {
-          ...existingData,
+          ...userSnap.data(),
           uid: user.uid,
-          id: existingData.id || `ALOV-${user.uid.slice(0, 5).toUpperCase()}`,
-          email: user.email || existingData.email || '',
-          name: existingData.name || user.displayName || 'Alov Foydalanuvchisi',
-          avatar: existingData.avatar || user.photoURL || 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&q=80&w=600',
-          photoURL: user.photoURL || existingData.photoURL || '',
-          isOnline: true
+          status: 'online',
+          lastSeen: serverTimestamp()
         };
-        // merge: true orqali mavjud profil ustiga yozilmaydi, faqat zarur maydonlar yangilanadi
-        await setDoc(userRef, { isOnline: true }, { merge: true });
+        await updateDoc(userRef, { 
+          status: 'online', 
+          lastSeen: serverTimestamp() 
+        });
       } else {
-        // Yangi hisob ochish (faqatgina ushbu Google account birinchi marta kirayotgan bo'lsa)
+        // CREATE NEW USER: Initial setup
         userData = {
           uid: user.uid,
           id: `ALOV-${user.uid.slice(0, 5).toUpperCase()}`,
           name: user.displayName || 'Alov Foydalanuvchisi',
           email: user.email || '',
-          photoURL: user.photoURL || '',
           avatar: user.photoURL || 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&q=80&w=600',
           role: 'user',
           age: 22,
           gender: 'female',
           region: 'Toshkent shahri',
           district: 'Yunusobod tumani',
-          neighborhood: 'Bodomzor',
-          phone: user.phoneNumber || '+99890',
-          telegram: '',
-          instagram: '',
-          bio: "Alov.uz da yangi tanishuvlar va suhbatlar uchun.",
-          videoUrl: 'https://assets.mixkit.co/videos/preview/mixkit-young-woman-looking-at-camera-in-a-park-41686-large.mp4',
-          followersCount: 1,
-          followingCount: 1,
-          likesCount: 10,
-          isOnline: true,
+          status: 'online',
+          lastSeen: serverTimestamp(),
+          createdAt: serverTimestamp(),
           isLocationEnabled: true,
           locationVisibility: 'everyone',
-          location: { 
-            lat: userCoords?.lat || 41.311081, 
-            lng: userCoords?.lng || 69.240562 
-          },
-          createdAt: serverTimestamp()
+          location: { lat: 41.3111, lng: 69.2797 }
         };
-        await setDoc(userRef, userData, { merge: true });
+        await setDoc(userRef, userData);
       }
 
       setCurrentUser(userData);
-      setRegName(userData.name || user.displayName || '');
-      setRegPhone(userData.phone || user.phoneNumber || '+99890');
-      setRegAvatar(userData.avatar || user.photoURL || 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&q=80&w=600');
-      if (userData.age) setRegAge(String(userData.age));
-      if (userData.gender) setRegGender(userData.gender);
-      if (userData.region) setRegRegion(userData.region);
-      if (userData.district) setRegDistrict(userData.district);
-      if (userData.neighborhood) setRegNeighborhood(userData.neighborhood);
-      if (userData.telegram) setRegTelegram(userData.telegram);
-      if (userData.instagram) setRegInstagram(userData.instagram);
-      if (userData.bio) setRegBio(userData.bio);
+      
+      // Update form fields for editing
+      setRegName(userData.name || '');
+      setRegAge(String(userData.age || 22));
+      setRegGender(userData.gender || 'female');
+      setRegRegion(userData.region || 'Toshkent shahri');
+      setRegDistrict(userData.district || 'Yunusobod tumani');
+      setRegBio(userData.bio || '');
+      setRegAvatar(userData.avatar || '');
+      setRegLocationVisibility(userData.locationVisibility || 'everyone');
+      setIsLocationEnabled(userData.isLocationEnabled !== false);
 
-      if (userData.isLocationEnabled !== undefined) {
-        setIsLocationEnabled(userData.isLocationEnabled);
-      }
-      if (userData.locationVisibility) {
-        setRegLocationVisibility(userData.locationVisibility);
-      }
-      if (userData.location?.lat && userData.location?.lng) {
-        setUserCoords(userData.location);
-      }
-
-      setUsersList(prev => {
-        const unique = new Map<string, any>();
-        prev.forEach(u => unique.set(u.uid || u.id, u));
-        unique.set(user.uid, userData);
-        return Array.from(unique.values());
-      });
-      setShowAuthModal(false);
-      setShowProfileModal(false);
-      setActiveTab('discover');
+      setIsAuthChecking(false);
+      setShowAuthModal(false); // Close auth modal on success
       return userData;
     } catch (err: any) {
       console.error("Firestore user sync error:", err);
-      setErrorMsg("Foydalanuvchi ma'lumotlarini yuklashda xatolik yuz berdi: " + (err.message || String(err)));
     }
   };
 
@@ -441,55 +344,149 @@ export default function App() {
     }
   }, [reelComments]);
 
+  // Synchronize Auth State & Real-time Presence
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, async (user) => {
       setFirebaseUser(user);
       if (user) {
         await syncUserWithFirestore(user);
+        
+        // Update to offline when closing tab
+        const handleOffline = () => {
+          if (auth.currentUser) {
+            setDoc(doc(db, 'users', auth.currentUser.uid), { 
+              status: 'offline', 
+              lastSeen: serverTimestamp() 
+            }, { merge: true });
+          }
+        };
+        window.addEventListener('beforeunload', handleOffline);
+        return () => {
+          window.removeEventListener('beforeunload', handleOffline);
+          handleOffline();
+        };
       } else {
         setCurrentUser(null);
-        setActiveTab('landing');
+        setIsAuthChecking(false);
       }
-      setIsAuthChecking(false);
     });
     return () => unsubscribe();
   }, []);
 
-  // Handle Location Visibility selector with 10s countdown disclaimer when selecting 'everyone'
-  const handleLocationVisibilityChange = (val: 'everyone' | 'mutual' | 'ghost') => {
-    if (val === 'everyone') {
-      setRegLocationVisibility('everyone');
-      setShowLiabilityModal(true);
-      setLiabilityCountdown(10);
-      if (timerRef.current) clearInterval(timerRef.current);
-      timerRef.current = setInterval(() => {
-        setLiabilityCountdown(prev => {
-          if (prev <= 1) {
-            clearInterval(timerRef.current);
-            return 0;
-          }
-          return prev - 1;
+  // Real-time Firestore users listener (Production optimized)
+  useEffect(() => {
+    const unsub = onSnapshot(collection(db, 'users'), (snapshot) => {
+      const fetchedUsers: any[] = [];
+      snapshot.forEach(docSnap => {
+        const data = docSnap.data();
+        const docUid = docSnap.id;
+        fetchedUsers.push({
+          ...data,
+          uid: data.uid || docUid,
+          id: data.id || `ALOV-${docUid.slice(0, 5).toUpperCase()}`
         });
-      }, 1000);
-    } else {
-      setRegLocationVisibility(val);
-    }
-  };
+      });
+      setUsersList(fetchedUsers);
+      setIsLoadingCandidates(false);
+    }, (err) => {
+      console.warn("Firestore snapshot listener error:", err);
+      setIsLoadingCandidates(false);
+    });
+    return () => unsub();
+  }, []);
 
-  // Format user-friendly Uzbek error message for GPS errors
-  const getGpsErrorMessage = (err: any): string => {
-    if (!err) return "GPS xatoligi yuz berdi.";
-    switch (err.code) {
-      case 1: // PERMISSION_DENIED
-        return "Iltimos, brauzer va telefoningiz sozlamalarida GPS/Lokatsiyaga ruxsat bering!";
-      case 2: // POSITION_UNAVAILABLE
-        return "Telefoningizda GPS modul/xizmati o'chirilgan. Iltimos, telefoningiz sozlamalaridan GPS/Lokatsiyani yoqing!";
-      case 3: // TIMEOUT
-        return "GPS signalini aniqlash vaqti tugadi. Qaytadan urinib ko'ring yoki ochiqroq joyga chiqing.";
-      default:
-        return "Haqiqiy GPS lokatsiyasini aniqlab bo'lmadi. GPS va internet aloqasini tekshiring.";
-    }
-  };
+  // Real-time Firestore 1-on-1 Chat Subscriptions (Filtered for active dialogues only)
+  useEffect(() => {
+    if (!firebaseUser) return;
+    const myUid = firebaseUser.uid;
+    const q = query(
+      collection(db, 'chats'), 
+      where('participants', 'array-contains', myUid),
+      orderBy('updatedAt', 'desc')
+    );
+
+    const unsubChats = onSnapshot(q, (snapshot) => {
+      const chats: any[] = [];
+      snapshot.forEach(docSnap => {
+        const data = docSnap.data();
+        if (data.lastMessage) { // Only show chats with actual messages
+          chats.push({ id: docSnap.id, ...data });
+        }
+      });
+
+      // Always prepend Alov AI to the chat list for every user
+      const aiChatId = [firebaseUser.uid, ALOV_AI_USER.uid].sort().join('_');
+      const hasAiChat = chats.some(c => c.id === aiChatId);
+      
+      let finalChats = [...chats];
+      if (!hasAiChat) {
+        finalChats.unshift({
+          id: aiChatId,
+          participants: [firebaseUser.uid, ALOV_AI_USER.uid],
+          lastMessage: "Salom! Men Alov AI. Suhbatlashamizmi? 😊",
+          updatedAt: serverTimestamp(),
+          isAI: true
+        });
+      } else {
+        // Move existing AI chat to top
+        const aiIndex = finalChats.findIndex(c => c.id === aiChatId);
+        const aiChat = finalChats.splice(aiIndex, 1)[0];
+        finalChats.unshift({ ...aiChat, isAI: true });
+      }
+
+      setChatsList(finalChats);
+      setIsLoadingChats(false);
+    }, (err) => {
+      console.warn("Chats snapshot error:", err);
+      setIsLoadingChats(false);
+    });
+    return () => unsubChats();
+  }, [firebaseUser]);
+
+  // Real-time messages listener for the selected conversation
+  useEffect(() => {
+    if (!firebaseUser || !selectedChatUser || chatView !== 'conversation') return;
+    const myUid = firebaseUser.uid;
+    const otherUid = selectedChatUser.uid || selectedChatUser.id;
+    const chatId = [myUid, otherUid].sort().join('_');
+
+    // Reset unread count when opening the conversation
+    resetUnreadCount(chatId);
+
+    const q = query(
+      collection(db, 'chats', chatId, 'messages'),
+      orderBy('createdAt', 'asc')
+    );
+
+    const unsubMessages = onSnapshot(q, (snapshot) => {
+      const msgs: any[] = [];
+      snapshot.forEach(docSnap => {
+        const d = docSnap.data();
+        msgs.push({
+          id: docSnap.id,
+          ...d,
+          time: d.createdAt?.toDate ? d.createdAt.toDate().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : ''
+        });
+      });
+      setChatMessages(prev => ({
+        ...prev,
+        [selectedChatUser.id]: msgs
+      }));
+    });
+
+    // Also listen to chat metadata for "typing" status
+    const unsubMeta = onSnapshot(doc(db, 'chats', chatId), (snap) => {
+      if (snap.exists()) {
+        const data = snap.data();
+        setIsOtherTyping(!!data.isTyping?.[otherUid]);
+      }
+    });
+
+    return () => {
+      unsubMessages();
+      unsubMeta();
+    };
+  }, [firebaseUser, selectedChatUser, chatView]);
 
   // MANDATORY Physical GPS Detection & High Precision Tracking
   useEffect(() => {
@@ -595,12 +592,24 @@ export default function App() {
         handleDrawRouteToUser(found);
       }
     };
+    const handleWatchLive = (e: any) => {
+      const userId = e.detail;
+      const found = usersList.find(u => u.id === userId || u.uid === userId);
+      if (found) {
+        setActiveLiveHostUser(found);
+        setActiveLiveStreamId(found.liveStreamId || ('stream_' + (found.uid || found.id)));
+        setLiveModalMode('viewer');
+        setShowLiveModal(true);
+      }
+    };
 
     window.addEventListener('alov-open-user-profile', handleOpenProfile);
     window.addEventListener('alov-draw-route-to-user', handleDrawRoute);
+    window.addEventListener('alov-watch-live-stream', handleWatchLive);
     return () => {
       window.removeEventListener('alov-open-user-profile', handleOpenProfile);
       window.removeEventListener('alov-draw-route-to-user', handleDrawRoute);
+      window.removeEventListener('alov-watch-live-stream', handleWatchLive);
     };
   }, [usersList, followingIds, userCoords, isLocationEnabled]);
 
@@ -665,7 +674,6 @@ export default function App() {
       if (fetchedUsers.length > 0) {
         setUsersList(() => {
           const userMap = new Map<string, any>();
-          INITIAL_USERS.forEach(u => userMap.set(u.id, { ...u, uid: u.id }));
           fetchedUsers.forEach(u => {
             const key = u.uid || u.id;
             userMap.set(key, u);
@@ -679,7 +687,7 @@ export default function App() {
     return () => unsub();
   }, [firebaseUser]);
 
-  // Real-time Leaflet Map Marker Sync Effect
+  // Real-time Leaflet Map Marker Sync Effect (Flicker-free Optimization)
   useEffect(() => {
     if (activeTab !== 'map' || !mapInstanceRef.current) return;
 
@@ -691,7 +699,10 @@ export default function App() {
       if (userCoords?.lat && userCoords?.lng && isLocationEnabled) {
         const userIcon = L.divIcon({
           className: 'custom-user-marker',
-          html: `<div style="background:#E8474A;width:38px;height:38px;border-radius:50%;border:3px solid white;box-shadow:0 4px 14px rgba(232,71,74,0.6);display:flex;align-items:center;justify-content:center;color:white;font-weight:bold;font-size:16px;">📍</div>`,
+          html: `<div class="relative w-[38px] h-[38px] flex items-center justify-center">
+            <div class="pulse-ring"></div>
+            <div style="background:#E8474A;width:32px;height:32px;border-radius:50%;border:3px solid white;box-shadow:0 4px 14px rgba(232,71,74,0.6);display:flex;align-items:center;justify-center;color:white;font-weight:bold;font-size:14px;position:relative;z-index:2;">📍</div>
+          </div>`,
           iconSize: [38, 38]
         });
 
@@ -707,14 +718,10 @@ export default function App() {
 
       // 2. Sync Other Users
       const myUid = currentUser?.uid || firebaseUser?.uid;
-      const myId = currentUser?.id;
       const activeUsers = usersList.filter(u => {
-        const isSelf = (myUid && (u.uid === myUid || u.id === myUid)) || (myId && u.id === myId);
-        if (isSelf) return false;
+        if (myUid && (u.uid === myUid || u.id === myUid)) return false;
         const hasCoords = u.location && u.location.lat != null && u.location.lng != null;
-        const isNotGhost = u.locationVisibility !== 'ghost';
-        const isLocOn = u.isLocationEnabled !== false;
-        return hasCoords && isNotGhost && isLocOn;
+        return hasCoords && u.locationVisibility !== 'ghost' && u.isLocationEnabled !== false;
       });
 
       // Remove markers no longer active
@@ -733,29 +740,53 @@ export default function App() {
         if (isNaN(lat) || isNaN(lng)) return;
 
         const userAvatar = u.avatar || 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&q=80&w=600';
+        const isLive = u.isLive === true;
+        const isOnline = u.status === 'online';
+
         const otherIcon = L.divIcon({
-          className: 'custom-other-marker',
-          html: `<div style="background:#1C1C1C;width:38px;height:38px;border-radius:50%;border:2px solid white;box-shadow:0 4px 12px rgba(0,0,0,0.3);overflow:hidden;position:relative;">
-            <img src="${userAvatar}" style="width:100%;height:100%;object-fit:cover;" onerror="this.src='https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&q=80&w=600'"/>
-            <span style="position:absolute;bottom:0;right:0;width:10px;height:10px;background:#10B981;border:2px solid white;border-radius:50%;"></span>
-          </div>`,
-          iconSize: [38, 38]
+          className: isLive ? 'custom-live-marker' : 'custom-other-marker',
+          html: `
+            <div style="position:relative;width:44px;height:44px;display:flex;align-items:center;justify-content:center;">
+              ${(isLive || isOnline) ? '<div class="pulse-ring" style="background-color:' + (isLive ? '#EF4444' : '#10B981') + '"></div>' : ''}
+              <div style="background:#1C1C1C;width:38px;height:38px;border-radius:50%;border:2px solid ${isLive ? '#EF4444' : 'white'};box-shadow:0 4px 12px rgba(0,0,0,0.3);overflow:hidden;position:relative;z-index:2;">
+                <img src="${userAvatar}" style="width:100%;height:100%;object-fit:cover;" onerror="this.src='https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&q=80&w=600'"/>
+                ${isOnline ? '<span style="position:absolute;bottom:1px;right:1px;width:9px;height:9px;background:#10B981;border:1.5px solid white;border-radius:50%;"></span>' : ''}
+              </div>
+              ${isLive ? '<span style="position:absolute;top:-4px;left:50%;transform:translateX(-50%);background:#EF4444;color:white;font-size:7px;font-weight:900;padding:0.5px 5px;border-radius:999px;z-index:10;white-space:nowrap;">● LIVE</span>' : ''}
+            </div>
+          `,
+          iconSize: [44, 44]
         });
+
+        const popupContent = `
+          <div style="font-family: Inter, sans-serif; text-align: center; width: 175px; padding: 4px;">
+            <div style="position:relative; width:48px; margin: 0 auto 6px;">
+              <img src="${userAvatar}" style="width:48px;height:48px;border-radius:50%;object-fit:cover;border:2px solid ${isLive ? '#EF4444' : '#E8474A'};" />
+              ${isLive ? '<span style="position:absolute;bottom:-4px;left:50%;transform:translateX(-50%);background:#EF4444;color:white;font-size:8px;font-weight:900;padding:1px 5px;border-radius:6px;">LIVE</span>' : ''}
+              ${isOnline ? '<span style="position:absolute;top:0;right:0;width:12px;height:12px;background:#10B981;border:2px solid white;border-radius:50%;"></span>' : ''}
+            </div>
+            <b style="font-size: 13px; display:block; color:#1C1C1C;">${u.name || 'Foydalanuvchi'}</b>
+            <p style="font-size: 10px; color: #666; margin: 2px 0 6px;">${u.district || u.region || 'Toshkent'}</p>
+            ${isLive ? `<button onclick="window.dispatchEvent(new CustomEvent('alov-watch-live-stream', { detail: '${markerKey}' }))" style="background:#EF4444;color:white;border:none;padding:7px 12px;border-radius:12px;font-size:11px;font-weight:bold;cursor:pointer;margin-bottom:4px;width:100%;box-shadow:0 2px 8px rgba(239,68,68,0.4);">🎥 Efirni ko'rish (LIVE)</button>` : ''}
+            <button onclick="window.dispatchEvent(new CustomEvent('alov-open-user-profile', { detail: '${markerKey}' }))" style="background:#E8474A;color:white;border:none;padding:6px 12px;border-radius:12px;font-size:11px;font-weight:bold;cursor:pointer;margin-bottom:4px;width:100%;box-shadow:0 2px 6px rgba(232,71,74,0.3);">Profilni ko'rish 👤</button>
+            <button onclick="window.dispatchEvent(new CustomEvent('alov-draw-route-to-user', { detail: '${markerKey}' }))" style="background:#1C1C1C;color:white;border:none;padding:6px 12px;border-radius:12px;font-size:11px;font-weight:bold;cursor:pointer;width:100%;box-shadow:0 2px 6px rgba(0,0,0,0.2);">Yo'l (Marshrut) 🚗</button>
+          </div>
+        `;
 
         if (!markersRef.current[markerKey]) {
           const marker = L.marker([lat, lng], { icon: otherIcon }).addTo(map);
-          marker.bindPopup(`
-            <div style="font-family: Inter, sans-serif; text-align: center; width: 170px; padding: 4px;">
-              <img src="${userAvatar}" style="width:48px;height:48px;border-radius:50%;object-fit:cover;margin:0 auto 6px;border:2px solid #E8474A;" />
-              <b style="font-size: 13px; display:block; color:#1C1C1C;">${u.name || 'Foydalanuvchi'}</b>
-              <p style="font-size: 10px; color: #666; margin: 2px 0 6px;">${u.district || u.region || 'Toshkent'}</p>
-              <button onclick="window.dispatchEvent(new CustomEvent('alov-open-user-profile', { detail: '${markerKey}' }))" style="background:#E8474A;color:white;border:none;padding:6px 12px;border-radius:12px;font-size:11px;font-weight:bold;cursor:pointer;margin-bottom:4px;width:100%;box-shadow:0 2px 6px rgba(232,71,74,0.3);">Profilni ko'rish 👤</button>
-              <button onclick="window.dispatchEvent(new CustomEvent('alov-draw-route-to-user', { detail: '${markerKey}' }))" style="background:#1C1C1C;color:white;border:none;padding:6px 12px;border-radius:12px;font-size:11px;font-weight:bold;cursor:pointer;width:100%;box-shadow:0 2px 6px rgba(0,0,0,0.2);">Yo'l (Marshrut) 🚗</button>
-            </div>
-          `);
+          marker.bindPopup(popupContent);
           markersRef.current[markerKey] = marker;
         } else {
-          markersRef.current[markerKey].setLatLng([lat, lng]);
+          const existingMarker = markersRef.current[markerKey];
+          existingMarker.setLatLng([lat, lng]);
+          // Only update icon/popup if data actually changed (to prevent flickering)
+          if (existingMarker.options.icon.options.html !== otherIcon.options.html) {
+            existingMarker.setIcon(otherIcon);
+          }
+          if (existingMarker.getPopup().getContent() !== popupContent) {
+            existingMarker.setPopupContent(popupContent);
+          }
         }
       });
     });
@@ -979,6 +1010,15 @@ export default function App() {
     }
   };
 
+  const handleLocationVisibilityChange = (value: 'everyone' | 'mutual' | 'ghost') => {
+    setRegLocationVisibility(value);
+    if (firebaseUser) {
+      setDoc(doc(db, 'users', firebaseUser.uid), {
+        locationVisibility: value
+      }, { merge: true }).catch(console.error);
+    }
+  };
+
   const handleGoogleLogin = async () => {
     try {
       setErrorMsg('');
@@ -1007,79 +1047,7 @@ export default function App() {
     }
   };
 
-  const detectedCountry = detectCountry(phoneNumberInput);
 
-  const handleSendPhoneCode = async (e?: React.FormEvent) => {
-    if (e) e.preventDefault();
-    setPhoneError('');
-
-    const cleanPhone = phoneNumberInput.replace(/\s+/g, '');
-    if (!cleanPhone.startsWith('+') || cleanPhone.length < 8) {
-      setPhoneError("Iltimos, telefon raqamini to'liq xalqaro formatda kiriting! (Masalan: +998901234567)");
-      return;
-    }
-
-    setPhoneLoading(true);
-    try {
-      if (!recaptchaVerifierRef.current) {
-        recaptchaVerifierRef.current = new RecaptchaVerifier(auth, 'recaptcha-container', {
-          size: 'invisible',
-          callback: () => {}
-        });
-      }
-      const confirmation = await signInWithPhoneNumber(auth, cleanPhone, recaptchaVerifierRef.current);
-      setConfirmationResult(confirmation);
-      setPhoneStep('otp');
-    } catch (err: any) {
-      console.error("SMS Error:", err);
-      if (recaptchaVerifierRef.current) {
-        try { recaptchaVerifierRef.current.clear(); } catch(e) {}
-        recaptchaVerifierRef.current = null;
-      }
-      if (err.code === 'auth/invalid-phone-number') {
-        setPhoneError("Kiritilgan telefon raqami formati noto'g'ri. Iltimos tekshirib qaytadan kiriting.");
-      } else if (err.code === 'auth/too-many-requests') {
-        setPhoneError("Juda ko'p so'rov yuborildi. Iltimos birozdan so'ng qayta urinib ko'ring.");
-      } else {
-        setPhoneError(err.message || "SMS kod yuborishda xatolik yuz berdi. Qaytadan urinib ko'ring.");
-      }
-    } finally {
-      setPhoneLoading(false);
-    }
-  };
-
-  const handleVerifyPhoneCode = async (e?: React.FormEvent) => {
-    if (e) e.preventDefault();
-    setPhoneError('');
-    if (!otpCode || otpCode.trim().length < 6) {
-      setPhoneError("Iltimos, SMS orqali kelgan 6 xonali tasdiqlash kodini kiriting!");
-      return;
-    }
-
-    setPhoneLoading(true);
-    try {
-      if (!confirmationResult) {
-        throw new Error("Sessiya eskirgan. Iltimos, kodni qaytadan yuboring.");
-      }
-      const userCred = await confirmationResult.confirm(otpCode.trim());
-      if (userCred?.user) {
-        await syncUserWithFirestore(userCred.user);
-      }
-      setShowAuthModal(false);
-      setAuthMethod('options');
-      setPhoneStep('input');
-      setOtpCode('');
-    } catch (err: any) {
-      console.error("OTP Verify Error:", err);
-      if (err.code === 'auth/invalid-verification-code') {
-        setPhoneError("Kiritilgan tasdiqlash kodi noto'g'ri! Iltimos qaytadan tekshiring.");
-      } else {
-        setPhoneError(err.message || "Kodni tasdiqlashda xatolik yuz berdi.");
-      }
-    } finally {
-      setPhoneLoading(false);
-    }
-  };
 
   const handleLogout = async () => {
     if (firebaseUser) {
@@ -1101,64 +1069,292 @@ export default function App() {
     }
   };
 
+  // Real-time Firestore 1-on-1 Chat Subscription
+  useEffect(() => {
+    if (activeTab !== 'chats' || chatView !== 'conversation' || !selectedChatUser) return;
+    const myUid = currentUser?.uid || firebaseUser?.uid;
+    const otherUid = selectedChatUser.uid || selectedChatUser.id;
+    if (!myUid || !otherUid) return;
+
+    const chatId = [myUid, otherUid].sort().join('_');
+    const messagesRef = collection(db, 'chats', chatId, 'messages');
+    const q = query(messagesRef, orderBy('createdAt', 'asc'));
+
+    const unsubscribe = onSnapshot(q, (snapshot) => {
+      const msgs: any[] = [];
+      snapshot.forEach((docSnap) => {
+        const data = docSnap.data();
+        msgs.push({
+          id: docSnap.id,
+          senderId: data.senderId === myUid ? 'me' : data.senderId,
+          text: data.text,
+          type: data.type || 'text',
+          meetUrl: data.meetUrl,
+          time: data.createdAt?.toDate 
+            ? data.createdAt.toDate().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) 
+            : (data.time || new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }))
+        });
+      });
+      setChatMessages(prev => ({
+        ...prev,
+        [selectedChatUser.id]: msgs
+      }));
+    }, (err) => {
+      console.warn("Real-time chat snapshot error:", err);
+    });
+
+    return () => unsubscribe();
+  }, [activeTab, chatView, selectedChatUser, currentUser, firebaseUser]);
+
   const handleCreateMeetLink = async () => {
+    let meetUrl = 'https://meet.google.com/abc-defg-hij';
     try {
       const res = await fetch(getApiUrl('/api/meet/create-link'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ title: `${currentUser?.name} va ${selectedChatUser.name} Google Meet Qo'ng'irog'i` })
+        body: JSON.stringify({ title: `${currentUser?.name} va ${selectedChatUser?.name} Google Meet Qo'ng'irog'i` })
       });
       const data = await res.json();
-      if (data.success) {
-        const meetMsg = {
-          id: 'meet-' + Date.now(),
-          senderId: 'me',
-          type: 'meet' as const,
-          meetUrl: data.meetUrl,
-          time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
-        };
-        const list = chatMessages[selectedChatUser.id] || [];
-        setChatMessages({ ...chatMessages, [selectedChatUser.id]: [...list, meetMsg] });
+      if (data.success && data.meetUrl) {
+        meetUrl = data.meetUrl;
       }
     } catch (e) {
-      const meetMsg = {
-        id: 'meet-' + Date.now(),
-        senderId: 'me',
-        type: 'meet' as const,
-        meetUrl: 'https://meet.google.com/abc-defg-hij',
-        time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
-      };
-      const list = chatMessages[selectedChatUser.id] || [];
-      setChatMessages({ ...chatMessages, [selectedChatUser.id]: [...list, meetMsg] });
+      console.warn("Meet link API fallback used");
     }
-  };
 
-  const handleSendChatMessage = () => {
-    if (!inputMessage.trim()) return;
-    const newMsg = {
-      id: 'msg-' + Date.now(),
+    const myUid = currentUser?.uid || firebaseUser?.uid;
+    const otherUid = selectedChatUser?.uid || selectedChatUser?.id;
+
+    if (myUid && otherUid) {
+      try {
+        const chatId = [myUid, otherUid].sort().join('_');
+        const messagesRef = collection(db, 'chats', chatId, 'messages');
+        await addDoc(messagesRef, {
+          senderId: myUid,
+          senderName: currentUser?.name || firebaseUser?.displayName || 'Foydalanuvchi',
+          type: 'meet',
+          text: "Google Meet Havolasi",
+          meetUrl,
+          createdAt: serverTimestamp()
+        });
+        await setDoc(doc(db, 'chats', chatId), {
+          lastMessage: "Google Meet Havolasi 📹",
+          lastSenderId: myUid,
+          updatedAt: serverTimestamp(),
+          participants: [myUid, otherUid]
+        }, { merge: true });
+        return;
+      } catch (err) {
+        console.error("Error sending meet link to Firestore:", err);
+      }
+    }
+
+    const meetMsg = {
+      id: 'meet-' + Date.now(),
       senderId: 'me',
-      text: inputMessage,
-      type: 'text' as const,
+      type: 'meet' as const,
+      meetUrl,
       time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
     };
     const list = chatMessages[selectedChatUser.id] || [];
-    setChatMessages({ ...chatMessages, [selectedChatUser.id]: [...list, newMsg] });
-    setInputMessage('');
+    setChatMessages({ ...chatMessages, [selectedChatUser.id]: [...list, meetMsg] });
+  };
 
-    setTimeout(() => {
-      const replyMsg = {
-        id: 'reply-' + Date.now(),
-        senderId: selectedChatUser.id,
-        text: `Tushunarli! 😊 Ajoyib suhbat uchun rahmat.`,
-        type: 'text' as const,
-        time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+  const handleTyping = () => {
+    if (!firebaseUser || !selectedChatUser) return;
+    const myUid = firebaseUser.uid;
+    const otherUid = selectedChatUser.uid || selectedChatUser.id;
+    const chatId = [myUid, otherUid].sort().join('_');
+
+    if (typingTimeoutRef.current) clearTimeout(typingTimeoutRef.current);
+
+    updateDoc(doc(db, 'chats', chatId), {
+      [`isTyping.${myUid}`]: true
+    }).catch(() => {});
+
+    typingTimeoutRef.current = setTimeout(() => {
+      updateDoc(doc(db, 'chats', chatId), {
+        [`isTyping.${myUid}`]: false
+      }).catch(() => {});
+    }, 2000);
+  };
+
+  const handleSendChatMessage = async (type: 'text' | 'image' | 'video' | 'audio' | 'voice' = 'text', fileUrl?: string) => {
+    if (!selectedChatUser) return;
+    if (type === 'text' && !inputMessage.trim()) return;
+    
+    const text = type === 'text' ? inputMessage.trim() : (type === 'image' ? "Rasm 🖼️" : (type === 'video' ? "Video 🎥" : (type === 'voice' ? "Ovozli xabar 🎤" : "Fayl 📎")));
+    if (type === 'text') setInputMessage('');
+
+    const myUid = currentUser?.uid || firebaseUser?.uid;
+    const otherUid = selectedChatUser.uid || selectedChatUser.id;
+    const isAIBot = selectedChatUser.uid === ALOV_AI_USER.uid;
+
+    if (!myUid) return;
+
+    try {
+      const chatId = [myUid, otherUid].sort().join('_');
+      const messagesRef = collection(db, 'chats', chatId, 'messages');
+      
+      // Stop typing status immediately
+      if (typingTimeoutRef.current) clearTimeout(typingTimeoutRef.current);
+      if (!isAIBot) {
+        updateDoc(doc(db, 'chats', chatId), {
+          [`isTyping.${myUid}`]: false
+        }).catch(() => {});
+      }
+
+      await addDoc(messagesRef, {
+        senderId: myUid,
+        senderName: currentUser?.name || firebaseUser?.displayName || 'Foydalanuvchi',
+        text,
+        type,
+        fileUrl: fileUrl || null,
+        createdAt: serverTimestamp(),
+        read: false
+      });
+
+      // Update chat metadata with unread count for the other person
+      const chatDocRef = doc(db, 'chats', chatId);
+      const chatSnap = await getDoc(chatDocRef);
+      let unreadCount = 0;
+      if (chatSnap.exists()) {
+        const data = chatSnap.data();
+        unreadCount = (data.unreadCount?.[otherUid] || 0) + 1;
+      } else {
+        unreadCount = 1;
+      }
+
+      await setDoc(chatDocRef, {
+        lastMessage: text,
+        lastSenderId: myUid,
+        updatedAt: serverTimestamp(),
+        participants: [myUid, otherUid],
+        [`unreadCount.${otherUid}`]: isAIBot ? 0 : unreadCount
+      }, { merge: true });
+
+      // Handle AI Bot response
+      if (isAIBot && type === 'text') {
+        setIsAiTyping(true);
+        
+        // Fetch last few messages for context
+        const q = query(messagesRef, orderBy('createdAt', 'desc'), limit(5));
+        const historySnap = await getDocs(q);
+        const history = historySnap.docs.map(d => {
+          const data = d.data();
+          return {
+            role: data.senderId === myUid ? 'user' : 'model',
+            text: data.text
+          };
+        }).reverse();
+
+        try {
+          const res = await fetch(getApiUrl('/api/ai/alov-respond'), {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ messages: history })
+          });
+          const data = await res.json();
+          
+          if (data.reply) {
+            await addDoc(messagesRef, {
+              senderId: ALOV_AI_USER.uid,
+              senderName: ALOV_AI_USER.name,
+              text: data.reply,
+              type: 'text',
+              createdAt: serverTimestamp(),
+              read: true
+            });
+
+            await updateDoc(chatDocRef, {
+              lastMessage: data.reply,
+              lastSenderId: ALOV_AI_USER.uid,
+              updatedAt: serverTimestamp()
+            });
+          }
+        } catch (e) {
+          console.error("AI response error:", e);
+        } finally {
+          setIsAiTyping(false);
+        }
+      }
+
+    } catch (err) {
+      console.error("Error sending chat message:", err);
+    }
+  };
+
+  const handleMediaUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file || !firebaseUser || !selectedChatUser) return;
+
+    const type = file.type.startsWith('image/') ? 'image' : (file.type.startsWith('video/') ? 'video' : 'audio');
+    const storageRef = ref(storage, `chats/${firebaseUser.uid}/${Date.now()}_${file.name}`);
+    const uploadTask = uploadBytesResumable(storageRef, file);
+
+    uploadTask.on('state_changed', 
+      (snapshot) => {
+        // Progress can be tracked if needed
+      }, 
+      (error) => {
+        console.error("Upload error:", error);
+      }, 
+      async () => {
+        const downloadURL = await getDownloadURL(uploadTask.snapshot.ref);
+        handleSendChatMessage(type, downloadURL);
+      }
+    );
+  };
+
+  const startRecording = async () => {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const recorder = new MediaRecorder(stream);
+      const chunks: Blob[] = [];
+
+      recorder.ondataavailable = (e) => {
+        if (e.data.size > 0) chunks.push(e.data);
       };
-      setChatMessages(prev => ({
-        ...prev,
-        [selectedChatUser.id]: [...(prev[selectedChatUser.id] || []), replyMsg]
-      }));
-    }, 1500);
+
+      recorder.onstop = async () => {
+        const blob = new Blob(chunks, { type: 'audio/webm' });
+        const file = new File([blob], "voice_message.webm", { type: 'audio/webm' });
+        
+        const storageRef = ref(storage, `chats/${firebaseUser?.uid}/voice_${Date.now()}.webm`);
+        const uploadTask = uploadBytesResumable(storageRef, file);
+        
+        uploadTask.on('state_changed', null, (err) => console.error(err), async () => {
+          const downloadURL = await getDownloadURL(uploadTask.snapshot.ref);
+          handleSendChatMessage('voice', downloadURL);
+        });
+        
+        stream.getTracks().forEach(t => t.stop());
+      };
+
+      recorder.start();
+      setMediaRecorder(recorder);
+      setAudioChunks(chunks);
+      setIsRecording(true);
+    } catch (err) {
+      console.error("Mic error:", err);
+    }
+  };
+
+  const stopRecording = () => {
+    if (mediaRecorder && isRecording) {
+      mediaRecorder.stop();
+      setIsRecording(false);
+      setMediaRecorder(null);
+    }
+  };
+
+  const resetUnreadCount = async (chatId: string) => {
+    if (!firebaseUser) return;
+    try {
+      await updateDoc(doc(db, 'chats', chatId), {
+        [`unreadCount.${firebaseUser.uid}`]: 0
+      });
+    } catch (e) {}
   };
 
   const targetGender = currentUser?.gender === 'male' ? 'female' : 'male';
@@ -1210,6 +1406,32 @@ export default function App() {
         {/* --- DISCOVER TAB --- */}
         {activeTab === 'discover' && (
           <div className="space-y-3">
+            {/* Live Stream Go Live Promo Banner */}
+            <div className="bg-gradient-to-r from-red-600 to-rose-600 rounded-[20px] p-3.5 text-white shadow-xl shadow-red-500/20 flex items-center justify-between border border-white/10">
+              <div className="flex items-center space-x-2.5">
+                <div className="p-2.5 bg-white/20 backdrop-blur-md rounded-full shadow-inner">
+                  <Radio className="w-5 h-5 text-white animate-pulse" />
+                </div>
+                <div>
+                  <h3 className="font-bold text-xs tracking-wide">JONLI EFIR (LIVE)</h3>
+                  <p className="text-[10px] text-white/80">Kamerangizni yoqing va barcha bilan muloqot qiling</p>
+                </div>
+              </div>
+              <button
+                onClick={() => {
+                  if (!firebaseUser && !currentUser) {
+                    setShowAuthModal(true);
+                    return;
+                  }
+                  setLiveModalMode('broadcaster');
+                  setShowLiveModal(true);
+                }}
+                className="bg-white text-red-600 px-3 py-1.5 rounded-full text-xs font-black shadow-md shrink-0 hover:bg-slate-50 transition active:scale-95"
+              >
+                Efir boshlash 🔴
+              </button>
+            </div>
+
             <div className="bg-white p-3 rounded-[16px] card-shadow space-y-2">
               <h2 className="text-lg font-editorial">Nomzodlar</h2>
               <select 
@@ -1225,10 +1447,23 @@ export default function App() {
             </div>
 
             <div className="space-y-3">
-              {filteredCandidates.map(user => (
+              {isLoadingCandidates ? (
+                <>
+                  <CandidateSkeleton />
+                  <CandidateSkeleton />
+                </>
+              ) : filteredCandidates.map(user => (
                 <div key={user.id} className="bg-white rounded-[20px] p-3 card-shadow space-y-2.5">
                   <div className="relative h-56 rounded-[14px] overflow-hidden">
                     <img src={user.avatar} alt={user.name} className="w-full h-full object-cover" />
+                    
+                    {user.isLive && (
+                      <div className="absolute top-2 left-2 px-2.5 py-1 rounded-full bg-red-600 text-white text-[9px] font-black flex items-center space-x-1.5 shadow-lg animate-pulse border border-white/30">
+                        <span className="w-2 h-2 rounded-full bg-white animate-ping" />
+                        <span>JONLI EFIR</span>
+                      </div>
+                    )}
+
                     <span className="absolute top-2 right-2 px-2.5 py-0.5 rounded-full bg-[#E8474A] text-white text-[9px] font-bold">
                       {user.id}
                     </span>
@@ -1237,6 +1472,22 @@ export default function App() {
                     <h3 className="text-xl font-editorial">{user.name}, {user.age}</h3>
                     <p className="text-[10px] text-[#6b635c]">{user.district}, {user.region}</p>
                   </div>
+
+                  {user.isLive && (
+                    <button
+                      onClick={() => {
+                        setActiveLiveHostUser(user);
+                        setActiveLiveStreamId(user.liveStreamId || ('stream_' + (user.uid || user.id)));
+                        setLiveModalMode('viewer');
+                        setShowLiveModal(true);
+                      }}
+                      className="w-full py-2.5 rounded-full bg-red-600 hover:bg-red-500 text-white font-bold text-xs shadow-md shadow-red-600/30 flex items-center justify-center space-x-1.5 transition"
+                    >
+                      <Radio className="w-3.5 h-3.5" />
+                      <span>Efirni Tomosha Qilish (LIVE) 🎥</span>
+                    </button>
+                  )}
+
                   <div className="flex space-x-2">
                     <button onClick={() => setSelectedProfile(user)} className="flex-1 py-2 rounded-full bg-[#FCEAEA] text-[#E8474A] font-bold text-xs">
                       Profil
@@ -1425,77 +1676,224 @@ export default function App() {
 
         {/* --- CHATS TAB --- */}
         {activeTab === 'chats' && (
-          <div>
+          <div className="h-full flex flex-col">
             {chatView === 'list' ? (
-              <div className="bg-white rounded-[20px] card-shadow overflow-hidden flex flex-col pb-16">
-                <div className="p-3.5 border-b border-slate-100">
-                  <h2 className="font-editorial text-xl">Chatlar ro'yxati</h2>
+              <div className="bg-white rounded-[24px] card-shadow overflow-hidden flex flex-col h-full animate-fade-in-up">
+                <div className="p-4 border-b border-slate-100 flex items-center justify-between">
+                  <h2 className="font-editorial text-2xl">Xabarlar</h2>
+                  <div className="px-2.5 py-1 bg-rose-50 text-[#E8474A] rounded-full text-[10px] font-bold">
+                    {chatsList.length} faol
+                  </div>
                 </div>
-                <div className="divide-y divide-slate-100 overflow-y-auto">
-                  {usersList.filter(u => u.id !== currentUser?.id).map(user => (
-                    <div 
-                      key={user.id}
-                      onClick={() => { setSelectedChatUser(user); setChatView('conversation'); }}
-                      className="p-3 flex items-center space-x-3 cursor-pointer hover:bg-slate-50 transition-all"
-                    >
-                      <img src={user.avatar} alt={user.name} className="w-11 h-11 rounded-full object-cover shrink-0" />
-                      <div className="flex-1 min-w-0">
-                        <div className="flex items-center justify-between">
-                          <h4 className="font-bold text-xs text-slate-900 truncate">{user.name}</h4>
-                          <span className="text-[9px] text-slate-400">14:22</span>
-                        </div>
-                        <p className="text-[10px] text-slate-500 truncate mt-0.5">Xabar yuborish uchun bosing...</p>
+                <div className="divide-y divide-slate-50 overflow-y-auto pb-20">
+                  {isLoadingChats ? (
+                    <>
+                      <ChatSkeleton />
+                      <ChatSkeleton />
+                      <ChatSkeleton />
+                    </>
+                  ) : chatsList.length === 0 ? (
+                    <div className="p-10 text-center space-y-3">
+                      <div className="w-16 h-16 bg-slate-50 rounded-full flex items-center justify-center mx-auto">
+                        <MessageCircle className="w-8 h-8 text-slate-300" />
                       </div>
+                      <p className="text-xs text-slate-400 font-medium">Hozircha xabarlar yo'q. Nomzodlar bilan suhbatni boshlang!</p>
                     </div>
-                  ))}
+                  ) : chatsList.map(chat => {
+                    const otherUid = chat.participants.find((p: string) => p !== firebaseUser?.uid);
+                    const otherUser = usersList.find(u => u.uid === otherUid) || (otherUid === ALOV_AI_USER.uid ? ALOV_AI_USER : null);
+                    const unread = chat.unreadCount?.[firebaseUser?.uid || ''] || 0;
+                    
+                    return (
+                      <motion.div 
+                        key={chat.id}
+                        initial={{ opacity: 0, x: -10 }}
+                        animate={{ opacity: 1, x: 0 }}
+                        onClick={() => { 
+                          setSelectedChatUser(otherUser || { uid: otherUid, name: 'Foydalanuvchi' }); 
+                          setChatView('conversation'); 
+                        }}
+                        className={cn(
+                          "p-4 flex items-center space-x-3 cursor-pointer hover:bg-slate-50 transition-all relative",
+                          chat.isAI && "bg-rose-50/30 border-l-4 border-rose-500"
+                        )}
+                      >
+                        <div className="relative">
+                          <img src={otherUser?.avatar || 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&q=80&w=600'} alt="" className="w-12 h-12 rounded-full object-cover shrink-0 border border-slate-100" />
+                          {otherUser?.status === 'online' && (
+                            <span className="absolute bottom-0 right-0 w-3 h-3 bg-[#10B981] border-2 border-white rounded-full"></span>
+                          )}
+                          {chat.isAI && (
+                            <div className="absolute -top-1 -right-1 bg-rose-500 text-white p-0.5 rounded-full shadow-sm">
+                              <Sparkles className="w-2.5 h-2.5" />
+                            </div>
+                          )}
+                        </div>
+                        <div className="flex-1 min-w-0">
+                          <div className="flex items-center justify-between">
+                            <div className="flex items-center space-x-1.5">
+                              <h4 className="font-bold text-sm text-slate-900 truncate">{otherUser?.name || 'Foydalanuvchi'}</h4>
+                              {chat.isAI && <span className="bg-rose-100 text-rose-600 text-[8px] font-black px-1 rounded uppercase tracking-tighter">AI BOT</span>}
+                            </div>
+                            <span className="text-[10px] text-slate-400">
+                              {chat.updatedAt?.toDate ? chat.updatedAt.toDate().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : ''}
+                            </span>
+                          </div>
+                          <div className="flex items-center justify-between mt-0.5">
+                            <p className={cn("text-[11px] truncate flex-1 pr-2", unread > 0 ? "text-slate-900 font-bold" : "text-slate-500")}>
+                              {chat.isTyping?.[otherUid] || (chat.isAI && isAiTyping) ? (
+                                <span className="text-emerald-500 font-bold flex items-center">
+                                  yozmoqda... <motion.span animate={{ opacity: [0, 1, 0] }} transition={{ repeat: Infinity, duration: 1 }}>.</motion.span>
+                                </span>
+                              ) : chat.lastMessage}
+                            </p>
+                            {unread > 0 && (
+                              <span className="bg-[#E8474A] text-white text-[10px] font-bold min-w-[18px] h-[18px] rounded-full flex items-center justify-center px-1 animate-pulse">
+                                {unread}
+                              </span>
+                            )}
+                          </div>
+                        </div>
+                      </motion.div>
+                    );
+                  })}
                 </div>
               </div>
             ) : (
-              <div className="absolute inset-0 z-20 bg-white flex flex-col h-full">
-                <div className="p-3 border-b border-slate-100 flex items-center justify-between shrink-0 bg-white shadow-subtle">
+              <div className="absolute inset-0 z-50 bg-white flex flex-col h-full animate-in fade-in zoom-in-95 duration-200">
+                <div className="p-3 border-b border-slate-100 flex items-center justify-between shrink-0 bg-white shadow-subtle z-10">
                   <div className="flex items-center space-x-2">
-                    <button onClick={() => setChatView('list')} className="p-1.5 rounded-full hover:bg-slate-100 text-slate-700">
-                      <ArrowLeft className="w-4 h-4" />
+                    <button onClick={() => setChatView('list')} className="p-2 rounded-full hover:bg-slate-100 text-slate-700 transition active:scale-90">
+                      <ArrowLeft className="w-5 h-5" />
                     </button>
-                    <div className="flex items-center space-x-2">
-                      <img src={selectedChatUser?.avatar} alt={selectedChatUser?.name} className="w-7 h-7 rounded-full object-cover" />
-                      <h3 className="font-sans font-bold text-sm text-slate-900">{selectedChatUser?.name}</h3>
-                    </div>
-                  </div>
-                  <button onClick={handleCreateMeetLink} className="bg-[#E8474A] text-white px-3 py-1.5 rounded-full text-[10px] font-bold shadow-sm flex items-center space-x-1">
-                    <span>Meet</span>
-                    <Video className="w-3 h-3" />
-                  </button>
-                </div>
-                <div className="flex-1 p-3 overflow-y-auto space-y-2.5 bg-slate-50 text-xs">
-                  {(chatMessages[selectedChatUser?.id] || []).map(msg => (
-                    <div key={msg.id} className={`flex ${msg.senderId === 'me' ? 'justify-end' : 'justify-start'}`}>
-                      <div className={`max-w-[80%] rounded-[16px] p-3 ${msg.senderId === 'me' ? 'bg-[#E8474A] text-white shadow-subtle' : 'bg-white text-slate-900 border border-slate-200 shadow-subtle'}`}>
-                        {msg.type === 'meet' ? (
-                          <a href={msg.meetUrl} target="_blank" rel="noreferrer" className="underline font-bold flex items-center space-x-1">
-                            <span>Google Meet Qo'shilish</span>
-                            <ArrowUpRight className="w-3.5 h-3.5" />
-                          </a>
-                        ) : (
-                          <p className="leading-relaxed">{msg.text}</p>
+                    <div className="flex items-center space-x-2.5">
+                      <div className="relative">
+                        <img src={selectedChatUser?.avatar} alt="" className="w-9 h-9 rounded-full object-cover border border-slate-100" />
+                        {selectedChatUser?.status === 'online' && (
+                          <span className="absolute bottom-0 right-0 w-2.5 h-2.5 bg-[#10B981] border-2 border-white rounded-full"></span>
                         )}
-                        <span className={`block text-[9px] mt-1 text-right ${msg.senderId === 'me' ? 'text-rose-100' : 'text-slate-400'}`}>{msg.time}</span>
+                      </div>
+                      <div>
+                        <h3 className="font-sans font-bold text-sm text-slate-900 leading-none">{selectedChatUser?.name}</h3>
+                        <p className="text-[10px] text-slate-400 mt-1">
+                          {selectedChatUser?.status === 'online' ? 'tarmoqda' : 'yaqinda online edi'}
+                        </p>
                       </div>
                     </div>
-                  ))}
+                  </div>
+                  <div className="flex items-center space-x-1">
+                    <button onClick={handleCreateMeetLink} className="p-2 rounded-full hover:bg-rose-50 text-[#E8474A] transition active:scale-90">
+                      <Video className="w-5 h-5" />
+                    </button>
+                    {/* Phone button removed */}
+                  </div>
                 </div>
-                <div className="p-3 border-t bg-white flex items-center space-x-2 shrink-0">
-                  <input 
-                    type="text" 
-                    placeholder="Xabar yozing..." 
-                    value={inputMessage}
-                    onChange={(e) => setInputMessage(e.target.value)}
-                    onKeyDown={(e) => e.key === 'Enter' && handleSendChatMessage()}
-                    className="flex-1 px-3.5 py-2.5 rounded-[12px] bg-slate-100 text-xs text-slate-900 focus:outline-none focus:ring-2 focus:ring-[#E8474A]/20"
-                  />
-                  <button onClick={handleSendChatMessage} className="bg-[#E8474A] text-white p-2.5 rounded-full shadow-md hover:bg-[#CB2E31] transition-all">
-                    <Send className="w-3.5 h-3.5" />
-                  </button>
+
+                <div className="flex-1 p-4 overflow-y-auto space-y-3 bg-[#F8F9FA] scrollbar-none scroll-smooth">
+                  <AnimatePresence>
+                    {(chatMessages[selectedChatUser?.uid || selectedChatUser?.id] || []).map((msg, idx) => (
+                      <motion.div 
+                        key={msg.id || idx}
+                        initial={{ opacity: 0, y: 10, scale: 0.95 }}
+                        animate={{ opacity: 1, y: 0, scale: 1 }}
+                        className={cn("flex", msg.senderId === 'me' ? 'justify-end' : 'justify-start')}
+                      >
+                        <div className={cn(
+                          "max-w-[85%] rounded-[18px] px-4 py-2.5 shadow-subtle relative",
+                          msg.senderId === 'me' 
+                            ? 'bg-[#E8474A] text-white rounded-tr-none' 
+                            : 'bg-white text-slate-900 border border-slate-200/50 rounded-tl-none'
+                        )}>
+                          {msg.type === 'meet' ? (
+                            <a href={msg.meetUrl} target="_blank" rel="noreferrer" className="underline font-bold flex items-center space-x-2 py-1">
+                              <Video className="w-4 h-4" />
+                              <span>Google Meet Qo'shilish</span>
+                              <ArrowUpRight className="w-3.5 h-3.5" />
+                            </a>
+                          ) : msg.type === 'image' ? (
+                            <img src={msg.fileUrl} alt="" className="rounded-lg max-h-60 object-cover cursor-zoom-in" onClick={() => window.open(msg.fileUrl)} />
+                          ) : msg.type === 'video' ? (
+                            <VideoPlayer url={msg.fileUrl || ''} />
+                          ) : (msg.type === 'voice' || msg.type === 'audio') ? (
+                            <VoiceMessage url={msg.fileUrl || ''} senderId={msg.senderId} />
+                          ) : (
+                            <p className="text-[13px] leading-relaxed whitespace-pre-wrap break-words">{msg.text}</p>
+                          )}
+                          <div className="flex items-center justify-end space-x-1 mt-1">
+                            <span className={cn("text-[9px]", msg.senderId === 'me' ? 'text-rose-100' : 'text-slate-400')}>
+                              {msg.time}
+                            </span>
+                            {msg.senderId === 'me' && (
+                              <CheckCircle2 className={cn("w-2.5 h-2.5", msg.read ? "text-blue-300" : "text-rose-200")} />
+                            )}
+                          </div>
+                        </div>
+                      </motion.div>
+                    ))}
+                    {isOtherTyping || (selectedChatUser?.uid === ALOV_AI_USER.uid && isAiTyping) ? (
+                      <motion.div 
+                        initial={{ opacity: 0, y: 5 }}
+                        animate={{ opacity: 1, y: 0 }}
+                        className="flex justify-start"
+                      >
+                        <div className="bg-slate-100 text-slate-500 rounded-[18px] rounded-tl-none px-4 py-2 shadow-subtle flex items-center space-x-2">
+                          <span className="text-[11px] font-bold">{selectedChatUser?.uid === ALOV_AI_USER.uid ? 'Alov AI yozmoqda' : 'yozmoqda'}</span>
+                          <div className="flex space-x-1">
+                            <motion.div animate={{ opacity: [0.3, 1, 0.3] }} transition={{ repeat: Infinity, duration: 1, delay: 0 }} className="w-1 h-1 bg-slate-400 rounded-full" />
+                            <motion.div animate={{ opacity: [0.3, 1, 0.3] }} transition={{ repeat: Infinity, duration: 1, delay: 0.2 }} className="w-1 h-1 bg-slate-400 rounded-full" />
+                            <motion.div animate={{ opacity: [0.3, 1, 0.3] }} transition={{ repeat: Infinity, duration: 1, delay: 0.4 }} className="w-1 h-1 bg-slate-400 rounded-full" />
+                          </div>
+                        </div>
+                      </motion.div>
+                    ) : null}
+                  </AnimatePresence>
+                  <div ref={commentsEndRef} />
+                </div>
+
+                <div className="p-3 pb-6 bg-white border-t border-slate-100 flex items-end space-x-2 shrink-0 glass">
+                  <label aria-label="Media yuklash" className="p-2.5 rounded-full text-slate-400 hover:bg-slate-50 transition active:scale-90 cursor-pointer">
+                    <Plus className="w-5 h-5" />
+                    <input type="file" className="hidden" accept="image/*,video/*,audio/*" onChange={handleMediaUpload} />
+                  </label>
+                  <div className="flex-1 relative">
+                    <textarea 
+                      placeholder="Xabar yozing..." 
+                      rows={1}
+                      value={inputMessage}
+                      onChange={(e) => {
+                        setInputMessage(e.target.value);
+                        handleTyping();
+                      }}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter' && !e.shiftKey) {
+                          e.preventDefault();
+                          handleSendChatMessage();
+                        }
+                      }}
+                      className="w-full px-4 py-2.5 rounded-[20px] bg-slate-100 text-[13px] text-slate-900 focus:outline-none focus:ring-2 focus:ring-[#E8474A]/10 border-none resize-none max-h-32"
+                    />
+                  </div>
+                  {inputMessage.trim() ? (
+                    <button 
+                      onClick={() => handleSendChatMessage()} 
+                      className="bg-[#E8474A] text-white p-3 rounded-full shadow-lg hover:bg-[#CB2E31] transition-all active:scale-95 flex items-center justify-center"
+                    >
+                      <Send className="w-4.5 h-4.5" />
+                    </button>
+                  ) : (
+                    <button 
+                      onMouseDown={startRecording}
+                      onMouseUp={stopRecording}
+                      onTouchStart={startRecording}
+                      onTouchEnd={stopRecording}
+                      className={cn(
+                        "p-3 rounded-full transition-all active:scale-95 flex items-center justify-center",
+                        isRecording ? "bg-red-500 text-white animate-pulse" : "bg-slate-100 text-slate-500 hover:bg-slate-200"
+                      )}
+                    >
+                      <Mic className="w-5 h-5" />
+                    </button>
+                  )}
                 </div>
               </div>
             )}
@@ -1625,10 +2023,27 @@ export default function App() {
                 </button>
               </div>
             )}
+            {/* Live Stream Go Live Button on Map */}
+            <button
+              onClick={() => {
+                if (!firebaseUser && !currentUser) {
+                  setShowAuthModal(true);
+                  return;
+                }
+                setLiveModalMode('broadcaster');
+                setShowLiveModal(true);
+              }}
+              className="absolute top-3 right-3 z-40 bg-gradient-to-r from-red-600 to-rose-600 hover:from-red-500 hover:to-rose-500 text-white shadow-xl px-3.5 py-2 rounded-full flex items-center space-x-1.5 font-bold text-xs transition transform active:scale-95 border border-white/20"
+            >
+              <span className="w-2 h-2 rounded-full bg-white animate-ping" />
+              <Radio className="w-4 h-4" />
+              <span>Jonli Efir</span>
+            </button>
+
             {/* Filter Button */}
             <button
               onClick={() => setShowFilterModal(!showFilterModal)}
-              className="absolute top-16 right-3 z-40 bg-white shadow-lg p-3 rounded-full flex items-center space-x-2 border border-slate-200"
+              className="absolute top-14 right-3 z-40 bg-white shadow-lg p-3 rounded-full flex items-center space-x-2 border border-slate-200"
             >
               <div className="w-5 h-5 flex items-center justify-center bg-[#E8474A] rounded-full text-white font-bold text-[10px]">F</div>
             </button>
@@ -1828,7 +2243,25 @@ export default function App() {
 
       {/* Dashboard inside smartphone mockup */}
       {firebaseUser && activeTab !== 'landing' && (
-        <div className="min-h-screen bg-gradient-to-br from-slate-950 via-rose-950 to-purple-950 flex items-center justify-center p-0 md:p-6 overflow-hidden">
+        <div className="min-h-screen bg-gradient-to-br from-slate-950 via-rose-950 to-purple-950 flex flex-col items-center justify-center p-0 md:p-6 overflow-hidden">
+          {showUpdateBanner && (
+            <motion.div 
+              initial={{ y: -50, opacity: 0 }}
+              animate={{ y: 0, opacity: 1 }}
+              className="w-full max-w-[390px] bg-amber-50 border-b border-amber-200 p-3 flex items-center justify-between z-[60] shadow-md mb-2 rounded-xl"
+            >
+              <div className="flex items-center space-x-2">
+                <RefreshCw className="w-4 h-4 text-amber-600 animate-spin" />
+                <span className="text-[11px] font-bold text-amber-900">Yangi versiya mavjud! Iltimos, ilovani yangilang.</span>
+              </div>
+              <button 
+                onClick={() => window.location.reload()}
+                className="bg-amber-600 text-white px-3 py-1 rounded-full text-[10px] font-black shadow-sm"
+              >
+                YANGILASH
+              </button>
+            </motion.div>
+          )}
           <div className="w-full md:w-[390px] h-screen md:h-[780px] bg-[#FAFAFB] md:rounded-[40px] md:shadow-[0_25px_60px_-15px_rgba(0,0,0,0.7)] md:border-[6px] border-slate-900 relative overflow-hidden flex flex-col">
             {dashboardContent}
           </div>
@@ -1842,177 +2275,36 @@ export default function App() {
             <button 
               onClick={() => {
                 setShowAuthModal(false);
-                setAuthMethod('options');
-                setPhoneStep('input');
-                setPhoneError('');
               }} 
               className="absolute top-5 right-5 p-1.5 rounded-full text-slate-400 hover:text-slate-700 hover:bg-slate-100 transition"
             >
               <X className="w-4 h-4" />
             </button>
 
-            {authMethod === 'options' ? (
-              <div className="space-y-4 text-center">
-                <div className="space-y-1">
-                  <h2 className="text-xl font-black text-slate-900 tracking-tight">Alov.uz ga xush kelibsiz</h2>
-                  <p className="text-xs text-slate-500 font-medium">Platformaga kirish yoki ro'yxatdan o'tish usulini tanlang</p>
-                </div>
-
-                <div className="space-y-2.5 pt-2">
-                  <button 
-                    onClick={handleGoogleLogin}
-                    className="w-full flex items-center justify-center space-x-3 py-3.5 px-4 rounded-2xl border border-slate-200 hover:border-slate-300 hover:bg-slate-50 font-bold text-xs shadow-xs bg-white text-slate-800 active:scale-98 transition duration-200"
-                  >
-                    <svg className="w-4.5 h-4.5 shrink-0" viewBox="0 0 24 24">
-                      <path fill="#4285F4" d="M23.745 12.27c0-.7-.06-1.4-.19-2.07H12v4.51h6.6c-.29 1.52-1.14 2.82-2.4 3.68v3.05h3.88c2.27-2.09 3.665-5.17 3.665-9.17z"/>
-                      <path fill="#34A853" d="M12 24c3.24 0 5.95-1.08 7.93-2.91l-3.88-3.05c-1.08.72-2.45 1.16-4.05 1.16-3.13 0-5.78-2.11-6.73-4.96H1.18v3.15C3.165 21.33 7.21 24 12 24z"/>
-                      <path fill="#FBBC05" d="M5.27 14.24c-.25-.72-.38-1.49-.38-2.24s.13-1.52.38-2.24V6.61H1.18C.43 8.13 0 9.87 0 12s.43 3.87 1.18 5.39l4.09-3.15z"/>
-                      <path fill="#EA4335" d="M12 4.75c1.77 0 3.35.61 4.6 1.8l3.42-3.42C17.95 1.19 15.24 0 12 0 7.21 0 3.165 2.67 1.18 6.61l4.09 3.15c.95-2.85 3.6-4.96 6.73-4.96z"/>
-                    </svg>
-                    <span>Google bilan kirish</span>
-                  </button>
-
-                  <div className="relative flex items-center justify-center py-2">
-                    <div className="border-t border-slate-200 w-full" />
-                    <span className="bg-white px-3 text-[10px] font-bold text-slate-400 uppercase tracking-wider absolute">yoki</span>
-                  </div>
-
-                  <button 
-                    onClick={() => {
-                      setAuthMethod('phone');
-                      setPhoneStep('input');
-                      setPhoneError('');
-                    }}
-                    className="w-full flex items-center justify-center space-x-3 py-3.5 px-4 rounded-2xl bg-gradient-to-r from-red-500 via-pink-500 to-rose-600 hover:from-red-600 hover:to-pink-600 text-white font-bold text-xs shadow-md shadow-pink-500/20 active:scale-98 transition duration-200"
-                  >
-                    <Phone className="w-4 h-4 shrink-0" />
-                    <span>Telefon raqam orqali kirish</span>
-                  </button>
-                </div>
+            <div className="space-y-4 text-center">
+              <div className="space-y-1">
+                <h2 className="text-xl font-black text-slate-900 tracking-tight">Alov.uz ga xush kelibsiz</h2>
+                <p className="text-xs text-slate-500 font-medium">Platformaga kirish uchun Google akkauntingizdan foydalaning</p>
               </div>
-            ) : (
-              <div className="space-y-4">
-                <div className="flex items-center space-x-2">
-                  <button 
-                    onClick={() => {
-                      setAuthMethod('options');
-                      setPhoneStep('input');
-                      setPhoneError('');
-                    }} 
-                    className="p-1.5 rounded-full hover:bg-slate-100 text-slate-600 transition"
-                  >
-                    <ArrowLeft className="w-4 h-4" />
-                  </button>
-                  <h2 className="text-base font-extrabold text-slate-900">
-                    {phoneStep === 'input' ? "Telefon raqam kiritish" : "Kodni tasdiqlash"}
-                  </h2>
-                </div>
 
-                {/* Country Auto-detection badge */}
-                {phoneStep === 'input' && (
-                  <div className="flex items-center justify-between p-2.5 px-3.5 rounded-2xl bg-slate-50 border border-slate-200 text-xs">
-                    <div className="flex items-center space-x-2">
-                      <span className="text-lg leading-none">{detectedCountry.flag}</span>
-                      <span className="font-bold text-slate-800">{detectedCountry.name}</span>
-                    </div>
-                    <span className="font-mono text-xs font-semibold text-rose-500 bg-rose-50 px-2 py-0.5 rounded-lg border border-rose-100">
-                      {detectedCountry.dialCode}
-                    </span>
-                  </div>
-                )}
-
-                {/* Error Banner */}
-                {phoneError && (
-                  <div className="p-3 bg-rose-50 border border-rose-200 rounded-2xl text-[#E8474A] text-xs font-semibold flex items-center space-x-2 animate-shake">
-                    <AlertTriangle className="w-4 h-4 shrink-0" />
-                    <span>{phoneError}</span>
-                  </div>
-                )}
-
-                {/* Step 1: Input Phone Number */}
-                {phoneStep === 'input' && (
-                  <form onSubmit={handleSendPhoneCode} className="space-y-3">
-                    <div>
-                      <label className="block text-[11px] font-bold text-slate-700 mb-1">Telefon raqamingiz</label>
-                      <input 
-                        type="tel"
-                        value={phoneNumberInput}
-                        onChange={(e) => setPhoneNumberInput(e.target.value)}
-                        placeholder="+998901234567"
-                        className="w-full px-4 py-3 rounded-xl bg-white border border-gray-300 text-xs font-semibold text-gray-900 focus:border-red-500 focus:ring-1 focus:ring-red-500 transition-all outline-none"
-                        autoFocus
-                      />
-                      <p className="text-[10px] text-slate-500 mt-1">Format: Xalqaro kod bilan (+998 ...)</p>
-                    </div>
-
-                    {/* Invisible Recaptcha container */}
-                    <div id="recaptcha-container" className="flex justify-center my-1" />
-
-                    <button 
-                      type="submit"
-                      disabled={phoneLoading}
-                      className="w-full py-3.5 rounded-xl bg-gradient-to-r from-red-500 via-pink-500 to-rose-600 hover:from-red-600 hover:to-pink-600 text-white font-bold text-xs shadow-md shadow-pink-500/20 active:scale-95 transition flex items-center justify-center space-x-2 disabled:opacity-50"
-                    >
-                      {phoneLoading ? (
-                        <>
-                          <RefreshCw className="w-4 h-4 animate-spin" />
-                          <span>SMS Kod Yuborilmoqda...</span>
-                        </>
-                      ) : (
-                        <>
-                          <span>SMS Kod Yuborish</span>
-                          <ChevronRight className="w-4 h-4" />
-                        </>
-                      )}
-                    </button>
-                  </form>
-                )}
-
-                {/* Step 2: Input Verification Code */}
-                {phoneStep === 'otp' && (
-                  <form onSubmit={handleVerifyPhoneCode} className="space-y-3">
-                    <p className="text-xs text-slate-600 leading-relaxed">
-                      <span className="font-bold text-slate-900">{phoneNumberInput}</span> raqamiga yuborilgan 6 xonali tasdiqlash kodini kiriting:
-                    </p>
-
-                    <div>
-                      <input 
-                        type="text"
-                        maxLength={6}
-                        value={otpCode}
-                        onChange={(e) => setOtpCode(e.target.value.replace(/\D/g, ''))}
-                        placeholder="123456"
-                        className="w-full px-4 py-3 rounded-xl bg-white border border-gray-300 text-center font-mono text-lg font-bold tracking-widest text-gray-900 focus:border-red-500 focus:ring-1 focus:ring-red-500 transition-all outline-none"
-                        autoFocus
-                      />
-                    </div>
-
-                    <button 
-                      type="submit"
-                      disabled={phoneLoading || otpCode.length < 6}
-                      className="w-full py-3.5 rounded-xl bg-gradient-to-r from-red-500 via-pink-500 to-rose-600 hover:from-red-600 hover:to-pink-600 text-white font-bold text-xs shadow-md shadow-pink-500/20 active:scale-95 transition flex items-center justify-center space-x-2 disabled:opacity-50"
-                    >
-                      {phoneLoading ? (
-                        <>
-                          <RefreshCw className="w-4 h-4 animate-spin" />
-                          <span>Tekshirilmoqda...</span>
-                        </>
-                      ) : (
-                        <span>Kodni Tasdiqlash va Kirish ✨</span>
-                      )}
-                    </button>
-
-                    <button
-                      type="button"
-                      onClick={() => setPhoneStep('input')}
-                      className="w-full py-2 text-center text-xs font-bold text-slate-500 hover:text-rose-500 transition"
-                    >
-                      Raqamni qayta kiritish
-                    </button>
-                  </form>
-                )}
+              <div className="space-y-4 pt-2">
+                <button 
+                  onClick={handleGoogleLogin}
+                  className="w-full flex items-center justify-center space-x-3 py-4 px-4 rounded-2xl border border-slate-200 hover:border-slate-300 hover:bg-slate-50 font-bold text-sm shadow-xs bg-white text-slate-800 active:scale-98 transition duration-200"
+                >
+                  <svg className="w-5 h-5 shrink-0" viewBox="0 0 24 24">
+                    <path fill="#4285F4" d="M23.745 12.27c0-.7-.06-1.4-.19-2.07H12v4.51h6.6c-.29 1.52-1.14 2.82-2.4 3.68v3.05h3.88c2.27-2.09 3.665-5.17 3.665-9.17z"/>
+                    <path fill="#34A853" d="M12 24c3.24 0 5.95-1.08 7.93-2.91l-3.88-3.05c-1.08.72-2.45 1.16-4.05 1.16-3.13 0-5.78-2.11-6.73-4.96H1.18v3.15C3.165 21.33 7.21 24 12 24z"/>
+                    <path fill="#FBBC05" d="M5.27 14.24c-.25-.72-.38-1.49-.38-2.24s.13-1.52.38-2.24V6.61H1.18C.43 8.13 0 9.87 0 12s.43 3.87 1.18 5.39l4.09-3.15z"/>
+                    <path fill="#EA4335" d="M12 4.75c1.77 0 3.35.61 4.6 1.8l3.42-3.42C17.95 1.19 15.24 0 12 0 7.21 0 3.165 2.67 1.18 6.61l4.09 3.15c.95-2.85 3.6-4.96 6.73-4.96z"/>
+                  </svg>
+                  <span>Google orqali davom ettirish</span>
+                </button>
+                <p className="text-[10px] text-slate-400 text-center px-4">
+                  Kirish orqali siz foydalanish shartlari va maxfiylik siyosatiga rozilik bildirasiz.
+                </p>
               </div>
-            )}
+            </div>
           </div>
         </div>
       )}
@@ -2502,6 +2794,26 @@ export default function App() {
             </div>
           </div>
         </div>
+      )}
+
+      {/* --- LIVE STREAM (JONLI EFIR) MODAL --- */}
+      {showLiveModal && (
+        <LiveStreamModal
+          mode={liveModalMode}
+          streamId={activeLiveStreamId}
+          hostUser={activeLiveHostUser}
+          currentUser={{
+            uid: currentUser?.uid || firebaseUser?.uid,
+            id: currentUser?.id,
+            name: currentUser?.name || firebaseUser?.displayName || 'Alov Foydalanuvchisi',
+            avatar: currentUser?.avatar || firebaseUser?.photoURL || ''
+          }}
+          onClose={() => {
+            setShowLiveModal(false);
+            setActiveLiveStreamId(undefined);
+            setActiveLiveHostUser(undefined);
+          }}
+        />
       )}
 
     </div>

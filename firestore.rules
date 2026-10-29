@@ -1,16 +1,77 @@
 rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
+    
+    // --- GLOBAL HELPERS ---
+    function isSignedIn() { return request.auth != null; }
+    function isOwner(userId) { return isSignedIn() && request.auth.uid == userId; }
+    function incoming() { return request.resource.data; }
+    function existing() { return resource.data; }
+    
+    // Catch-all deny
     match /{document=**} {
       allow read, write: if false;
     }
 
+    // --- USERS ---
     match /users/{userId} {
-      // Allow reading user profiles so all connected users can see each other on the live map
+      // Allow reading user profiles so all connected users can see each other on the live map and in chats
       allow read: if true;
-      // Enforce that users can only create or update their own profile and location
-      allow create, update: if request.auth != null && request.auth.uid == userId;
+      allow create: if isOwner(userId);
+      allow update: if isOwner(userId);
+    }
+
+    // --- CHATS & MESSAGES ---
+    match /chats/{chatId} {
+      // chatId is typically 'uid1_uid2' sorted alphabetically
+      function isParticipant() {
+        return isSignedIn() && (request.auth.uid in existing().participants);
+      }
+      function isNewParticipant() {
+        return isSignedIn() && (request.auth.uid in incoming().participants);
+      }
+
+      allow read: if isParticipant();
+      allow create: if isNewParticipant();
+      allow update: if isParticipant();
+
+      match /messages/{messageId} {
+        allow read: if isSignedIn() && (request.auth.uid in get(/databases/$(database)/documents/chats/$(chatId)).data.participants);
+        allow create: if isSignedIn() && (request.auth.uid in get(/databases/$(database)/documents/chats/$(chatId)).data.participants) && incoming().senderId == request.auth.uid;
+        allow update, delete: if false; // Messages are immutable for now
+      }
+    }
+
+    // --- LIVE STREAMING ---
+    match /live_streams/{streamId} {
+      function isHost() {
+        return isSignedIn() && (request.auth.uid == existing().hostUid);
+      }
+      function isNewHost() {
+        return isSignedIn() && (request.auth.uid == incoming().hostUid);
+      }
+
+      // Anyone signed in can view stream metadata
+      allow read: if isSignedIn();
+      allow create: if isNewHost();
+      allow update: if isHost() || (isSignedIn() && incoming().diff(existing()).affectedKeys().hasOnly(['viewerCount']));
+
+      // Shared Live Chat during stream
+      match /messages/{messageId} {
+        allow read: if isSignedIn();
+        allow create: if isSignedIn() && incoming().senderUid == request.auth.uid;
+      }
+
+      // WebRTC Signaling data
+      match /viewers/{viewerId} {
+        allow read: if isSignedIn() && (request.auth.uid == viewerId || request.auth.uid == get(/databases/$(database)/documents/live_streams/$(streamId)).data.hostUid);
+        allow write: if isSignedIn() && (request.auth.uid == viewerId || request.auth.uid == get(/databases/$(database)/documents/live_streams/$(streamId)).data.hostUid);
+
+        match /{subcollection=**} {
+          allow read: if isSignedIn() && (request.auth.uid == viewerId || request.auth.uid == get(/databases/$(database)/documents/live_streams/$(streamId)).data.hostUid);
+          allow write: if isSignedIn() && (request.auth.uid == viewerId || request.auth.uid == get(/databases/$(database)/documents/live_streams/$(streamId)).data.hostUid);
+        }
+      }
     }
   }
 }
-

@@ -25,7 +25,11 @@
         "followersCount": { "type": "number" },
         "followingCount": { "type": "number" },
         "likesCount": { "type": "number" },
-        "isOnline": { "type": "boolean" },
+        "status": { "type": "string", "enum": ["online", "offline"] },
+        "lastSeen": { "type": "string" },
+        "isLive": { "type": "boolean" },
+        "liveStreamId": { "type": "string" },
+        "liveTitle": { "type": "string" },
         "isLocationEnabled": { "type": "boolean" },
         "location": {
           "type": "object",
@@ -36,12 +40,69 @@
         }
       },
       "required": ["uid", "id", "name"]
+    },
+    "Chat": {
+      "title": "Chat Dialogue",
+      "description": "Metadata for a 1-on-1 conversation",
+      "type": "object",
+      "properties": {
+        "participants": { "type": "array" },
+        "lastMessage": { "type": "string" },
+        "lastSenderId": { "type": "string" },
+        "updatedAt": { "type": "string" },
+        "isTyping": { "type": "object" },
+        "unreadCount": { "type": "object" }
+      }
+    },
+    "ChatMessage": {
+      "title": "Chat Message",
+      "description": "1-on-1 private chat message",
+      "type": "object",
+      "properties": {
+        "senderId": { "type": "string" },
+        "senderName": { "type": "string" },
+        "text": { "type": "string" },
+        "type": { "type": "string", "enum": ["text", "meet", "image", "video", "audio", "voice"] },
+        "fileUrl": { "type": "string" },
+        "meetUrl": { "type": "string" },
+        "read": { "type": "boolean" },
+        "createdAt": { "type": "string" }
+      },
+      "required": ["senderId", "text"]
+    },
+    "LiveStream": {
+      "title": "Live Stream Room",
+      "description": "Live broadcast streaming session",
+      "type": "object",
+      "properties": {
+        "streamId": { "type": "string" },
+        "hostUid": { "type": "string" },
+        "hostName": { "type": "string" },
+        "hostAvatar": { "type": "string" },
+        "title": { "type": "string" },
+        "status": { "type": "string", "enum": ["active", "ended"] },
+        "viewerCount": { "type": "number" },
+        "createdAt": { "type": "string" }
+      },
+      "required": ["streamId", "hostUid", "status"]
     }
   },
   "firestore": {
     "/users/{userId}": {
       "schema": "User",
       "description": "User profile documents"
+    },
+    "/chats/{chatId}": {
+      "schema": "Chat",
+      "description": "1-on-1 conversation metadata"
+    },
+    "/chats/{chatId}/messages/{messageId}": {
+      "schema": "ChatMessage",
+      "description": "1-on-1 private messages"
+    },
+    "/live_streams/{streamId}": {
+      "schema": "LiveStream",
+      "description": "Active and past live stream sessions"
     }
   }
 }

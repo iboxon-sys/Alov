@@ -13,8 +13,9 @@ import {
 import { LandingPage } from './LandingPage';
 import { 
   auth, db, googleProvider, 
-  signInWithPopup, signOut, onAuthStateChanged, 
-  doc, setDoc, getDoc, collection, onSnapshot, setPersistence, browserLocalPersistence, User 
+  signInWithPopup, signInWithRedirect, getRedirectResult, signOut, onAuthStateChanged, 
+  doc, setDoc, getDoc, collection, onSnapshot, setPersistence, browserLocalPersistence, User,
+  RecaptchaVerifier, signInWithPhoneNumber
 } from './firebase';
 
 // High Precision GPS Options: Forces device physical GPS chip rather than coarse IP
@@ -154,6 +155,40 @@ const INITIAL_USERS = [
   }
 ];
 
+interface CountryInfo {
+  code: string;
+  name: string;
+  flag: string;
+  dialCode: string;
+}
+
+const COUNTRY_CODES: CountryInfo[] = [
+  { code: 'UZ', name: "O'zbekiston", flag: '🇺🇿', dialCode: '+998' },
+  { code: 'KZ', name: "Qozog'iston", flag: '🇰🇿', dialCode: '+77' },
+  { code: 'KG', name: "Qirg'iziston", flag: '🇰🇬', dialCode: '+996' },
+  { code: 'TJ', name: "Tojikiston", flag: '🇹🇯', dialCode: '+992' },
+  { code: 'TM', name: "Turkmaniston", flag: '🇹🇲', dialCode: '+993' },
+  { code: 'RU', name: "Rossiya", flag: '🇷🇺', dialCode: '+7' },
+  { code: 'TR', name: "Turkiya", flag: '🇹🇷', dialCode: '+90' },
+  { code: 'KR', name: "Janubiy Koreya", flag: '🇰🇷', dialCode: '+82' },
+  { code: 'US', name: "AQSh / Kanada", flag: '🇺🇸', dialCode: '+1' },
+  { code: 'GB', name: "Buyuk Britaniya", flag: '🇬🇧', dialCode: '+44' },
+  { code: 'DE', name: "Olmanya (Germaniya)", flag: '🇩🇪', dialCode: '+49' },
+  { code: 'AE', name: "Birlashgan Arab Amirliklari", flag: '🇦🇪', dialCode: '+971' },
+  { code: 'AZ', name: "Ozarbayjon", flag: '🇦🇿', dialCode: '+994' },
+];
+
+function detectCountry(phoneInput: string): CountryInfo {
+  const clean = phoneInput.trim();
+  if (!clean.startsWith('+')) {
+    return { code: 'UZ', name: "O'zbekiston", flag: '🇺🇿', dialCode: '+998' };
+  }
+  const sorted = [...COUNTRY_CODES].sort((a, b) => b.dialCode.length - a.dialCode.length);
+  const found = sorted.find(c => clean.startsWith(c.dialCode));
+  if (found) return found;
+  return { code: 'WORLD', name: "Xalqaro raqam", flag: '🌐', dialCode: '+' };
+}
+
 export default function App() {
   const [activeTab, setActiveTab] = useState<string>('landing');
 
@@ -163,6 +198,16 @@ export default function App() {
   const [showAuthModal, setShowAuthModal] = useState(false);
   const [showProfileModal, setShowProfileModal] = useState(false);
   const [errorMsg, setErrorMsg] = useState('');
+
+  // Phone Auth State
+  const [authMethod, setAuthMethod] = useState<'options' | 'phone'>('options');
+  const [phoneNumberInput, setPhoneNumberInput] = useState('+998');
+  const [phoneStep, setPhoneStep] = useState<'input' | 'otp'>('input');
+  const [otpCode, setOtpCode] = useState('');
+  const [phoneLoading, setPhoneLoading] = useState(false);
+  const [phoneError, setPhoneError] = useState('');
+  const [confirmationResult, setConfirmationResult] = useState<any>(null);
+  const recaptchaVerifierRef = useRef<any>(null);
 
   // Profile Form Fields (including Avatar URL and Location Visibility)
   const [regName, setRegName] = useState('');
@@ -253,6 +298,22 @@ export default function App() {
     return () => {
       if (timerRef.current) clearInterval(timerRef.current);
     };
+  }, []);
+
+  // Listen for Google Sign In Redirect Result on page mount
+  useEffect(() => {
+    getRedirectResult(auth)
+      .then((result) => {
+        if (result?.user) {
+          setShowAuthModal(false);
+        }
+      })
+      .catch((err: any) => {
+        console.error("Get Redirect Result Error:", err);
+        if (err.code !== 'auth/popup-closed-by-user') {
+          setErrorMsg(err.message || "Google orqali kirishda xatolik yuz berdi.");
+        }
+      });
   }, []);
 
   // Synchronize Auth State & Firestore User Profile
@@ -714,12 +775,89 @@ export default function App() {
     try {
       setErrorMsg('');
       googleProvider.setCustomParameters({ prompt: 'select_account' });
-      await signInWithPopup(auth, googleProvider);
+      await signInWithRedirect(auth, googleProvider);
     } catch (err: any) {
-      if (err.code === 'auth/popup-closed-by-user') {
-        return; // User intentionally closed the popup
+      console.error("Google Redirect Error:", err);
+      try {
+        await signInWithPopup(auth, googleProvider);
+      } catch (popupErr: any) {
+        if (popupErr.code === 'auth/popup-closed-by-user') {
+          return;
+        }
+        console.error("Google Popup Error:", popupErr);
+        setErrorMsg(popupErr.message || "Google orqali kirishda xatolik yuz berdi.");
       }
-      setErrorMsg(err.message || "Google orqali kirishda xatolik yuz berdi.");
+    }
+  };
+
+  const detectedCountry = detectCountry(phoneNumberInput);
+
+  const handleSendPhoneCode = async (e?: React.FormEvent) => {
+    if (e) e.preventDefault();
+    setPhoneError('');
+
+    const cleanPhone = phoneNumberInput.replace(/\s+/g, '');
+    if (!cleanPhone.startsWith('+') || cleanPhone.length < 8) {
+      setPhoneError("Iltimos, telefon raqamini to'liq xalqaro formatda kiriting! (Masalan: +998901234567)");
+      return;
+    }
+
+    setPhoneLoading(true);
+    try {
+      if (!recaptchaVerifierRef.current) {
+        recaptchaVerifierRef.current = new RecaptchaVerifier(auth, 'recaptcha-container', {
+          size: 'invisible',
+          callback: () => {}
+        });
+      }
+      const confirmation = await signInWithPhoneNumber(auth, cleanPhone, recaptchaVerifierRef.current);
+      setConfirmationResult(confirmation);
+      setPhoneStep('otp');
+    } catch (err: any) {
+      console.error("SMS Error:", err);
+      if (recaptchaVerifierRef.current) {
+        try { recaptchaVerifierRef.current.clear(); } catch(e) {}
+        recaptchaVerifierRef.current = null;
+      }
+      if (err.code === 'auth/invalid-phone-number') {
+        setPhoneError("Kiritilgan telefon raqami formati noto'g'ri. Iltimos tekshirib qaytadan kiriting.");
+      } else if (err.code === 'auth/too-many-requests') {
+        setPhoneError("Juda ko'p so'rov yuborildi. Iltimos birozdan so'ng qayta urinib ko'ring.");
+      } else {
+        setPhoneError(err.message || "SMS kod yuborishda xatolik yuz berdi. Qaytadan urinib ko'ring.");
+      }
+    } finally {
+      setPhoneLoading(false);
+    }
+  };
+
+  const handleVerifyPhoneCode = async (e?: React.FormEvent) => {
+    if (e) e.preventDefault();
+    setPhoneError('');
+    if (!otpCode || otpCode.trim().length < 6) {
+      setPhoneError("Iltimos, SMS orqali kelgan 6 xonali tasdiqlash kodini kiriting!");
+      return;
+    }
+
+    setPhoneLoading(true);
+    try {
+      if (!confirmationResult) {
+        throw new Error("Sessiya eskirgan. Iltimos, kodni qaytadan yuboring.");
+      }
+      await confirmationResult.confirm(otpCode.trim());
+      setShowAuthModal(false);
+      setAuthMethod('options');
+      setPhoneStep('input');
+      setOtpCode('');
+    } catch (err: any) {
+      console.error("OTP Verify Error:", err);
+      if (err.code === 'auth/invalid-verification-code') {
+        setPhoneError("Kiritilgan tasdiqlash kodi noto'g'ri! Iltimos qaytadan tekshiring.");
+      } else {
+        setPhoneError(err.message || "Kodni tasdiqlashda xatolik yuz berdi.");
+      }
+    } finally {
+      setPhoneLoading(false);
     }
   };
 
@@ -1468,7 +1606,7 @@ export default function App() {
                 <div className="bg-white p-6 rounded-[28px] card-shadow border w-full max-w-md relative overflow-hidden">
                   <div className="relative h-[480px] rounded-[20px] overflow-hidden bg-gradient-to-tr from-rose-100 to-pink-50">
                     <img 
-                      src="https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&q=80&w=800" 
+                      src="https://i.pinimg.com/1200x/eb/4a/a1/eb4aa118874bc604a71c71165ca4bed8.jpg" 
                       alt="Alov.uz" 
                       className="w-full h-full object-cover"
                     />
@@ -1489,26 +1627,184 @@ export default function App() {
         </div>
       )}
 
-      {/* --- GOOGLE LOGIN MODAL --- */}
+      {/* --- AUTHENTICATION MODAL (Google & Phone SMS Auth) --- */}
       {showAuthModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-md animate-fadeIn">
-          <div className="bg-white rounded-[28px] max-w-xs w-full p-6 text-center space-y-4 relative shadow-2xl">
-            <button onClick={() => setShowAuthModal(false)} className="absolute top-4 right-4 text-slate-500">
+          <div className="bg-white rounded-[32px] max-w-sm w-full p-6 text-left space-y-4 relative shadow-2xl border border-slate-100">
+            <button 
+              onClick={() => {
+                setShowAuthModal(false);
+                setAuthMethod('options');
+                setPhoneStep('input');
+                setPhoneError('');
+              }} 
+              className="absolute top-5 right-5 p-1.5 rounded-full text-slate-400 hover:text-slate-700 hover:bg-slate-100 transition"
+            >
               <X className="w-4 h-4" />
             </button>
-            <h2 className="text-xl font-editorial">Alov.uz ga kirish</h2>
-            <button 
-              onClick={handleGoogleLogin}
-              className="w-full flex items-center justify-center space-x-2 py-3 px-4 rounded-full border border-slate-200 hover:bg-slate-50 font-bold text-xs shadow-subtle bg-white text-slate-800"
-            >
-              <svg className="w-4 h-4" viewBox="0 0 24 24">
-                <path fill="#4285F4" d="M23.745 12.27c0-.7-.06-1.4-.19-2.07H12v4.51h6.6c-.29 1.52-1.14 2.82-2.4 3.68v3.05h3.88c2.27-2.09 3.665-5.17 3.665-9.17z"/>
-                <path fill="#34A853" d="M12 24c3.24 0 5.95-1.08 7.93-2.91l-3.88-3.05c-1.08.72-2.45 1.16-4.05 1.16-3.13 0-5.78-2.11-6.73-4.96H1.18v3.15C3.165 21.33 7.21 24 12 24z"/>
-                <path fill="#FBBC05" d="M5.27 14.24c-.25-.72-.38-1.49-.38-2.24s.13-1.52.38-2.24V6.61H1.18C.43 8.13 0 9.87 0 12s.43 3.87 1.18 5.39l4.09-3.15z"/>
-                <path fill="#EA4335" d="M12 4.75c1.77 0 3.35.61 4.6 1.8l3.42-3.42C17.95 1.19 15.24 0 12 0 7.21 0 3.165 2.67 1.18 6.61l4.09 3.15c.95-2.85 3.6-4.96 6.73-4.96z"/>
-              </svg>
-              <span>Google bilan kirish</span>
-            </button>
+
+            {authMethod === 'options' ? (
+              <div className="space-y-4 text-center">
+                <div className="space-y-1">
+                  <h2 className="text-xl font-black text-slate-900 tracking-tight">Alov.uz ga xush kelibsiz</h2>
+                  <p className="text-xs text-slate-500 font-medium">Platformaga kirish yoki ro'yxatdan o'tish usulini tanlang</p>
+                </div>
+
+                <div className="space-y-2.5 pt-2">
+                  <button 
+                    onClick={handleGoogleLogin}
+                    className="w-full flex items-center justify-center space-x-3 py-3.5 px-4 rounded-2xl border border-slate-200 hover:border-slate-300 hover:bg-slate-50 font-bold text-xs shadow-xs bg-white text-slate-800 active:scale-98 transition duration-200"
+                  >
+                    <svg className="w-4.5 h-4.5 shrink-0" viewBox="0 0 24 24">
+                      <path fill="#4285F4" d="M23.745 12.27c0-.7-.06-1.4-.19-2.07H12v4.51h6.6c-.29 1.52-1.14 2.82-2.4 3.68v3.05h3.88c2.27-2.09 3.665-5.17 3.665-9.17z"/>
+                      <path fill="#34A853" d="M12 24c3.24 0 5.95-1.08 7.93-2.91l-3.88-3.05c-1.08.72-2.45 1.16-4.05 1.16-3.13 0-5.78-2.11-6.73-4.96H1.18v3.15C3.165 21.33 7.21 24 12 24z"/>
+                      <path fill="#FBBC05" d="M5.27 14.24c-.25-.72-.38-1.49-.38-2.24s.13-1.52.38-2.24V6.61H1.18C.43 8.13 0 9.87 0 12s.43 3.87 1.18 5.39l4.09-3.15z"/>
+                      <path fill="#EA4335" d="M12 4.75c1.77 0 3.35.61 4.6 1.8l3.42-3.42C17.95 1.19 15.24 0 12 0 7.21 0 3.165 2.67 1.18 6.61l4.09 3.15c.95-2.85 3.6-4.96 6.73-4.96z"/>
+                    </svg>
+                    <span>Google bilan kirish</span>
+                  </button>
+
+                  <div className="relative flex items-center justify-center py-2">
+                    <div className="border-t border-slate-200 w-full" />
+                    <span className="bg-white px-3 text-[10px] font-bold text-slate-400 uppercase tracking-wider absolute">yoki</span>
+                  </div>
+
+                  <button 
+                    onClick={() => {
+                      setAuthMethod('phone');
+                      setPhoneStep('input');
+                      setPhoneError('');
+                    }}
+                    className="w-full flex items-center justify-center space-x-3 py-3.5 px-4 rounded-2xl bg-gradient-to-r from-red-500 via-pink-500 to-rose-600 hover:from-red-600 hover:to-pink-600 text-white font-bold text-xs shadow-md shadow-pink-500/20 active:scale-98 transition duration-200"
+                  >
+                    <Phone className="w-4 h-4 shrink-0" />
+                    <span>Telefon raqam orqali kirish</span>
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <div className="space-y-4">
+                <div className="flex items-center space-x-2">
+                  <button 
+                    onClick={() => {
+                      setAuthMethod('options');
+                      setPhoneStep('input');
+                      setPhoneError('');
+                    }} 
+                    className="p-1.5 rounded-full hover:bg-slate-100 text-slate-600 transition"
+                  >
+                    <ArrowLeft className="w-4 h-4" />
+                  </button>
+                  <h2 className="text-base font-extrabold text-slate-900">
+                    {phoneStep === 'input' ? "Telefon raqam kiritish" : "Kodni tasdiqlash"}
+                  </h2>
+                </div>
+
+                {/* Country Auto-detection badge */}
+                {phoneStep === 'input' && (
+                  <div className="flex items-center justify-between p-2.5 px-3.5 rounded-2xl bg-slate-50 border border-slate-200 text-xs">
+                    <div className="flex items-center space-x-2">
+                      <span className="text-lg leading-none">{detectedCountry.flag}</span>
+                      <span className="font-bold text-slate-800">{detectedCountry.name}</span>
+                    </div>
+                    <span className="font-mono text-xs font-semibold text-rose-500 bg-rose-50 px-2 py-0.5 rounded-lg border border-rose-100">
+                      {detectedCountry.dialCode}
+                    </span>
+                  </div>
+                )}
+
+                {/* Error Banner */}
+                {phoneError && (
+                  <div className="p-3 bg-rose-50 border border-rose-200 rounded-2xl text-[#E8474A] text-xs font-semibold flex items-center space-x-2 animate-shake">
+                    <AlertTriangle className="w-4 h-4 shrink-0" />
+                    <span>{phoneError}</span>
+                  </div>
+                )}
+
+                {/* Step 1: Input Phone Number */}
+                {phoneStep === 'input' && (
+                  <form onSubmit={handleSendPhoneCode} className="space-y-3">
+                    <div>
+                      <label className="block text-[11px] font-bold text-slate-700 mb-1">Telefon raqamingiz</label>
+                      <input 
+                        type="tel"
+                        value={phoneNumberInput}
+                        onChange={(e) => setPhoneNumberInput(e.target.value)}
+                        placeholder="+998901234567"
+                        className="w-full px-4 py-3 rounded-xl bg-white border border-gray-300 text-xs font-semibold text-gray-900 focus:border-red-500 focus:ring-1 focus:ring-red-500 transition-all outline-none"
+                        autoFocus
+                      />
+                      <p className="text-[10px] text-slate-500 mt-1">Format: Xalqaro kod bilan (+998 ...)</p>
+                    </div>
+
+                    {/* Invisible Recaptcha container */}
+                    <div id="recaptcha-container" className="flex justify-center my-1" />
+
+                    <button 
+                      type="submit"
+                      disabled={phoneLoading}
+                      className="w-full py-3.5 rounded-xl bg-gradient-to-r from-red-500 via-pink-500 to-rose-600 hover:from-red-600 hover:to-pink-600 text-white font-bold text-xs shadow-md shadow-pink-500/20 active:scale-95 transition flex items-center justify-center space-x-2 disabled:opacity-50"
+                    >
+                      {phoneLoading ? (
+                        <>
+                          <RefreshCw className="w-4 h-4 animate-spin" />
+                          <span>SMS Kod Yuborilmoqda...</span>
+                        </>
+                      ) : (
+                        <>
+                          <span>SMS Kod Yuborish</span>
+                          <ChevronRight className="w-4 h-4" />
+                        </>
+                      )}
+                    </button>
+                  </form>
+                )}
+
+                {/* Step 2: Input Verification Code */}
+                {phoneStep === 'otp' && (
+                  <form onSubmit={handleVerifyPhoneCode} className="space-y-3">
+                    <p className="text-xs text-slate-600 leading-relaxed">
+                      <span className="font-bold text-slate-900">{phoneNumberInput}</span> raqamiga yuborilgan 6 xonali tasdiqlash kodini kiriting:
+                    </p>
+
+                    <div>
+                      <input 
+                        type="text"
+                        maxLength={6}
+                        value={otpCode}
+                        onChange={(e) => setOtpCode(e.target.value.replace(/\D/g, ''))}
+                        placeholder="123456"
+                        className="w-full px-4 py-3 rounded-xl bg-white border border-gray-300 text-center font-mono text-lg font-bold tracking-widest text-gray-900 focus:border-red-500 focus:ring-1 focus:ring-red-500 transition-all outline-none"
+                        autoFocus
+                      />
+                    </div>
+
+                    <button 
+                      type="submit"
+                      disabled={phoneLoading || otpCode.length < 6}
+                      className="w-full py-3.5 rounded-xl bg-gradient-to-r from-red-500 via-pink-500 to-rose-600 hover:from-red-600 hover:to-pink-600 text-white font-bold text-xs shadow-md shadow-pink-500/20 active:scale-95 transition flex items-center justify-center space-x-2 disabled:opacity-50"
+                    >
+                      {phoneLoading ? (
+                        <>
+                          <RefreshCw className="w-4 h-4 animate-spin" />
+                          <span>Tekshirilmoqda...</span>
+                        </>
+                      ) : (
+                        <span>Kodni Tasdiqlash va Kirish ✨</span>
+                      )}
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() => setPhoneStep('input')}
+                      className="w-full py-2 text-center text-xs font-bold text-slate-500 hover:text-rose-500 transition"
+                    >
+                      Raqamni qayta kiritish
+                    </button>
+                  </form>
+                )}
+              </div>
+            )}
           </div>
         </div>
       )}

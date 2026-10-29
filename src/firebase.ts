@@ -4,6 +4,8 @@ import {
   GoogleAuthProvider, 
   OAuthProvider, 
   signInWithPopup, 
+  signInWithRedirect,
+  getRedirectResult,
   signInWithEmailAndPassword, 
   createUserWithEmailAndPassword, 
   signOut, 
@@ -27,6 +29,8 @@ export const appleProvider = new OAuthProvider('apple.com');
 
 export { 
   signInWithPopup, 
+  signInWithRedirect,
+  getRedirectResult,
   signInWithEmailAndPassword, 
   createUserWithEmailAndPassword, 
   signOut, 

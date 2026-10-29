@@ -1,0 +1,43 @@
+{
+  "entities": {
+    "User": {
+      "title": "User Profile",
+      "description": "User profile data stored in Firestore",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string" },
+        "id": { "type": "string" },
+        "name": { "type": "string", "maxLength": 100 },
+        "age": { "type": "number" },
+        "gender": { "type": "string", "enum": ["male", "female"] },
+        "region": { "type": "string" },
+        "district": { "type": "string" },
+        "neighborhood": { "type": "string" },
+        "phone": { "type": "string", "maxLength": 20 },
+        "telegram": { "type": "string", "maxLength": 50 },
+        "instagram": { "type": "string", "maxLength": 50 },
+        "bio": { "type": "string", "maxLength": 500 },
+        "avatar": { "type": "string" },
+        "followersCount": { "type": "number" },
+        "followingCount": { "type": "number" },
+        "likesCount": { "type": "number" },
+        "isOnline": { "type": "boolean" },
+        "isLocationEnabled": { "type": "boolean" },
+        "location": {
+          "type": "object",
+          "properties": {
+            "lat": { "type": "number" },
+            "lng": { "type": "number" }
+          }
+        }
+      },
+      "required": ["uid", "id", "name", "gender"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": "User",
+      "description": "User profile documents"
+    }
+  }
+}

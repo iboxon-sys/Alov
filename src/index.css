@@ -1,0 +1,58 @@
+@import "tailwindcss";
+
+@layer base {
+  :root {
+    --bg: #FAFAFB;
+    --bg-soft: #FCEAEA;
+    --surface: #FFFFFF;
+    --ink: #1C1C1C;
+    --ink-2: #2A2522;
+    --muted: #6b635c;
+    --body-2: #57534E;
+    --body-3: #78716C;
+    --hairline: #F1F5F9;
+    --line: rgba(28, 28, 28, .06);
+    --pom: #E8474A;
+    --pom-deep: #CB2E31;
+    --pom-soft: #FDEAEA;
+    --grad-from: #E8474A;
+    --grad-to: #CB2E31;
+    --pom-glow: rgba(232, 71, 74, .3);
+  }
+
+  body {
+    background-color: var(--bg);
+    color: var(--ink);
+    font-family: 'Inter', sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  h1, h2, h3, .font-editorial {
+    font-family: 'Instrument Serif', serif;
+  }
+}
+
+.font-serif-custom {
+  font-family: 'Instrument Serif', serif;
+}
+
+.shadow-subtle {
+  box-shadow: rgba(0, 0, 0, 0.03) 0px 1px 2px 0px;
+}
+
+.shadow-medium {
+  box-shadow: rgba(0, 0, 0, 0.05) 0px 10px 30px 0px;
+}
+
+.card-shadow {
+  box-shadow: 0 10px 30px rgba(0,0,0,.05);
+}
+
+.card-shadow-hover {
+  transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.card-shadow-hover:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 18px 40px rgba(232, 71, 74, 0.12);
+}

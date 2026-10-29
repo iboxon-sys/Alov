@@ -1,0 +1,6 @@
+{
+  "name": "Alov.uz - Zamonaviy Tanishuv va Jonli Efir Platformasi",
+  "description": "O'zbekistondagi eng zamonaviy tanishuv, obuna tizimi, jonli ovozli xonalar va video/audio qo'ng'iroqlar platformasi",
+  "requestFramePermissions": ["camera", "microphone"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

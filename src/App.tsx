@@ -12,7 +12,7 @@ import {
 } from 'lucide-react';
 import { LandingPage } from './LandingPage';
 import { 
-  auth, db, googleProvider, 
+  auth, db, googleProvider, GoogleAuthProvider, serverTimestamp,
   signInWithPopup, signInWithRedirect, getRedirectResult, signOut, onAuthStateChanged, 
   doc, setDoc, getDoc, collection, onSnapshot, setPersistence, browserLocalPersistence, User,
   RecaptchaVerifier, signInWithPhoneNumber
@@ -189,6 +189,26 @@ function detectCountry(phoneInput: string): CountryInfo {
   return { code: 'WORLD', name: "Xalqaro raqam", flag: '🌐', dialCode: '+' };
 }
 
+function getYouTubeEmbedUrl(url: string): string | null {
+  if (!url) return null;
+  if (url.includes('youtube.com/shorts/')) {
+    const id = url.split('youtube.com/shorts/')[1]?.split('?')[0];
+    if (id) return `https://www.youtube.com/embed/${id}?autoplay=1&loop=1&playlist=${id}&controls=0&modestbranding=1&rel=0&playsinline=1`;
+  }
+  if (url.includes('youtu.be/')) {
+    const id = url.split('youtu.be/')[1]?.split('?')[0];
+    if (id) return `https://www.youtube.com/embed/${id}?autoplay=1&loop=1&playlist=${id}&controls=0&modestbranding=1&rel=0&playsinline=1`;
+  }
+  if (url.includes('youtube.com/watch')) {
+    try {
+      const urlObj = new URL(url);
+      const id = urlObj.searchParams.get('v');
+      if (id) return `https://www.youtube.com/embed/${id}?autoplay=1&loop=1&playlist=${id}&controls=0&modestbranding=1&rel=0&playsinline=1`;
+    } catch(e) {}
+  }
+  return null;
+}
+
 export default function App() {
   const [activeTab, setActiveTab] = useState<string>('landing');
 
@@ -300,12 +320,87 @@ export default function App() {
     };
   }, []);
 
+  // Foydalanuvchi hisobini Firestore bilan sinxronizatsiya qilish (avtomatik yangi hisob ochish)
+  const syncUserWithFirestore = async (user: User) => {
+    try {
+      const userRef = doc(db, 'users', user.uid);
+      const userSnap = await getDoc(userRef);
+      let userData: any;
+
+      if (userSnap.exists()) {
+        userData = userSnap.data();
+      } else {
+        // Yangi hisob ochish (foydalanuvchi birinchi marta kirayotgan bo'lsa)
+        userData = {
+          uid: user.uid,
+          id: `ALOV-${Math.floor(1000 + Math.random() * 9000)}`,
+          name: user.displayName || 'Alov Foydalanuvchisi',
+          email: user.email || '',
+          photoURL: user.photoURL || '',
+          avatar: user.photoURL || 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&q=80&w=600',
+          role: 'user',
+          age: 22,
+          gender: 'female',
+          region: 'Toshkent shahri',
+          district: 'Yunusobod tumani',
+          neighborhood: 'Bodomzor',
+          phone: user.phoneNumber || '+99890',
+          telegram: '',
+          instagram: '',
+          bio: "Alov.uz da yangi tanishuvlar va suhbatlar uchun.",
+          videoUrl: 'https://assets.mixkit.co/videos/preview/mixkit-young-woman-looking-at-camera-in-a-park-41686-large.mp4',
+          followersCount: 1,
+          followingCount: 1,
+          likesCount: 10,
+          isOnline: true,
+          isLocationEnabled: false,
+          locationVisibility: 'mutual',
+          location: { lat: null, lng: null },
+          createdAt: serverTimestamp()
+        };
+        await setDoc(userRef, userData, { merge: true });
+      }
+
+      setCurrentUser(userData);
+      setRegName(userData.name || user.displayName || '');
+      setRegPhone(userData.phone || user.phoneNumber || '+99890');
+      setRegAvatar(userData.avatar || user.photoURL || 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&q=80&w=600');
+      if (userData.age) setRegAge(String(userData.age));
+      if (userData.gender) setRegGender(userData.gender);
+      if (userData.region) setRegRegion(userData.region);
+      if (userData.district) setRegDistrict(userData.district);
+      if (userData.neighborhood) setRegNeighborhood(userData.neighborhood);
+      if (userData.telegram) setRegTelegram(userData.telegram);
+      if (userData.instagram) setRegInstagram(userData.instagram);
+      if (userData.bio) setRegBio(userData.bio);
+
+      if (userData.isLocationEnabled !== undefined) {
+        setIsLocationEnabled(userData.isLocationEnabled);
+      }
+      if (userData.locationVisibility) {
+        setRegLocationVisibility(userData.locationVisibility);
+      }
+      if (userData.location?.lat && userData.location?.lng) {
+        setUserCoords(userData.location);
+      }
+
+      setUsersList(prev => [userData, ...prev.filter(u => u.id !== userData.id && u.uid !== userData.uid)]);
+      setShowAuthModal(false);
+      setShowProfileModal(false);
+      setActiveTab('discover');
+      return userData;
+    } catch (err: any) {
+      console.error("Firestore user sync error:", err);
+      setErrorMsg("Foydalanuvchi ma'lumotlarini yuklashda xatolik yuz berdi: " + (err.message || String(err)));
+    }
+  };
+
   // Listen for Google Sign In Redirect Result on page mount
   useEffect(() => {
     getRedirectResult(auth)
-      .then((result) => {
+      .then(async (result) => {
         if (result?.user) {
-          setShowAuthModal(false);
+          await syncUserWithFirestore(result.user);
         }
       })
       .catch((err: any) => {
@@ -327,29 +422,7 @@ export default function App() {
     const unsubscribe = onAuthStateChanged(auth, async (user) => {
       setFirebaseUser(user);
       if (user) {
-        const userRef = doc(db, 'users', user.uid);
-        const userSnap = await getDoc(userRef);
-        if (userSnap.exists()) {
-          const data = userSnap.data();
-          setCurrentUser(data);
-          if (data.isLocationEnabled !== undefined) {
-            setIsLocationEnabled(data.isLocationEnabled);
-          }
-          if (data.locationVisibility) {
-            setRegLocationVisibility(data.locationVisibility);
-          }
-          if (data.location?.lat && data.location?.lng) {
-            setUserCoords(data.location);
-          }
-          setUsersList(prev => [data, ...prev.filter(u => u.id !== data.id)]);
-        } else {
-          setRegName(user.displayName || '');
-          setRegPhone(user.phoneNumber || '');
-          setRegAvatar(user.photoURL || 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&q=80&w=600');
-          setShowProfileModal(true);
-        }
-        setShowAuthModal(false);
-        setActiveTab('discover');
+        await syncUserWithFirestore(user);
       } else {
         setCurrentUser(null);
         setActiveTab('landing');
@@ -774,19 +847,28 @@ export default function App() {
   const handleGoogleLogin = async () => {
     try {
       setErrorMsg('');
-      googleProvider.setCustomParameters({ prompt: 'select_account' });
-      await signInWithRedirect(auth, googleProvider);
-    } catch (err: any) {
-      console.error("Google Redirect Error:", err);
-      try {
-        await signInWithPopup(auth, googleProvider);
-      } catch (popupErr: any) {
-        if (popupErr.code === 'auth/popup-closed-by-user') {
-          return;
-        }
-        console.error("Google Popup Error:", popupErr);
-        setErrorMsg(popupErr.message || "Google orqali kirishda xatolik yuz berdi.");
+      const provider = new GoogleAuthProvider();
+      provider.setCustomParameters({ prompt: 'select_account' });
+      const result = await signInWithPopup(auth, provider);
+      if (result?.user) {
+        await syncUserWithFirestore(result.user);
       }
+    } catch (err: any) {
+      console.error("Google Login Error:", err);
+      if (err.code === 'auth/popup-closed-by-user' || err.code === 'auth/cancelled-popup-request') {
+        return; // User intentionally closed the popup
+      }
+      if (err.code === 'auth/popup-blocked') {
+        try {
+          const provider = new GoogleAuthProvider();
+          provider.setCustomParameters({ prompt: 'select_account' });
+          await signInWithRedirect(auth, provider);
+          return;
+        } catch (redirectErr: any) {
+          console.error("Google Redirect Error:", redirectErr);
+        }
+      }
+      setErrorMsg(err.message || "Google orqali kirishda xatolik yuz berdi.");
     }
   };
 
@@ -844,7 +926,10 @@ export default function App() {
       if (!confirmationResult) {
         throw new Error("Sessiya eskirgan. Iltimos, kodni qaytadan yuboring.");
       }
-      await confirmationResult.confirm(otpCode.trim());
+      const userCred = await confirmationResult.confirm(otpCode.trim());
+      if (userCred?.user) {
+        await syncUserWithFirestore(userCred.user);
+      }
       setShowAuthModal(false);
       setAuthMethod('options');
       setPhoneStep('input');
@@ -1078,7 +1163,16 @@ export default function App() {
               const comments = reelComments[currentReelUser.id] || [];
               return (
                 <div className="relative w-full h-full flex flex-col justify-between overflow-hidden">
-                  <video src={currentReelUser.videoUrl} className="absolute inset-0 w-full h-full object-cover" autoPlay loop muted />
+                  {getYouTubeEmbedUrl(currentReelUser.videoUrl) ? (
+                    <iframe 
+                      src={getYouTubeEmbedUrl(currentReelUser.videoUrl)!} 
+                      className="absolute inset-0 w-full h-full object-cover pointer-events-none border-0" 
+                      allow="autoplay; encrypted-media" 
+                      allowFullScreen
+                    />
+                  ) : (
+                    <video src={currentReelUser.videoUrl} className="absolute inset-0 w-full h-full object-cover" autoPlay loop muted playsInline />
+                  )}
                   <div className="absolute inset-0 bg-gradient-to-b from-black/60 via-transparent to-black/80 pointer-events-none" />
 
                   {/* Top Header - Profile & Title */}

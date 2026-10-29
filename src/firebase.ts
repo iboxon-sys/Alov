@@ -16,7 +16,7 @@ import {
   browserLocalPersistence,
   User 
 } from 'firebase/auth';
-import { getFirestore, doc, setDoc, getDoc, collection, getDocs, onSnapshot } from 'firebase/firestore';
+import { getFirestore, doc, setDoc, getDoc, collection, getDocs, onSnapshot, serverTimestamp } from 'firebase/firestore';
 import firebaseConfig from '../firebase-applet-config.json';
 
 const app = initializeApp(firebaseConfig);
@@ -28,6 +28,8 @@ googleProvider.setCustomParameters({ prompt: 'select_account' });
 export const appleProvider = new OAuthProvider('apple.com');
 
 export { 
+  GoogleAuthProvider,
+  serverTimestamp,
   signInWithPopup, 
   signInWithRedirect,
   getRedirectResult,

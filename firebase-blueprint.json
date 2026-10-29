@@ -18,6 +18,10 @@
         "instagram": { "type": "string", "maxLength": 50 },
         "bio": { "type": "string", "maxLength": 500 },
         "avatar": { "type": "string" },
+        "email": { "type": "string" },
+        "photoURL": { "type": "string" },
+        "role": { "type": "string" },
+        "createdAt": { "type": "string" },
         "followersCount": { "type": "number" },
         "followingCount": { "type": "number" },
         "likesCount": { "type": "number" },
@@ -31,7 +35,7 @@
           }
         }
       },
-      "required": ["uid", "id", "name", "gender"]
+      "required": ["uid", "id", "name"]
     }
   },
   "firestore": {

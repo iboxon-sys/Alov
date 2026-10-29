@@ -100,7 +100,7 @@ const INITIAL_USERS = [
     instagram: "@madina.official",
     bio: "San'at va dizaynni yaxshi ko'raman. Hayotni sevaman! ✨🌹",
     avatar: "https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&q=80&w=600",
-    videoUrl: "https://assets.mixkit.co/videos/preview/mixkit-young-woman-looking-at-camera-in-a-park-41686-large.mp4",
+    videoUrl: "https://youtube.com/shorts/viPxdYURlaI?si=Ql6xrB_GCYr87lEw",
     followersCount: 1420,
     followingCount: 310,
     likesCount: 5600,
@@ -1606,7 +1606,7 @@ export default function App() {
                 <div className="bg-white p-6 rounded-[28px] card-shadow border w-full max-w-md relative overflow-hidden">
                   <div className="relative h-[480px] rounded-[20px] overflow-hidden bg-gradient-to-tr from-rose-100 to-pink-50">
                     <img 
-                      src="https://i.pinimg.com/1200x/eb/4a/a1/eb4aa118874bc604a71c71165ca4bed8.jpg" 
+                      src="https://i.pinimg.com/1200x/76/ef/1d/76ef1d3d0a406603cfbdd02b21d2a23c.jpg" 
                       alt="Alov.uz" 
                       className="w-full h-full object-cover"
                     />

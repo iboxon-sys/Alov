@@ -30,4 +30,22 @@ window.addEventListener('unhandledrejection', (event) => {
   }
 });
 
+// Prevent mobile pull-to-refresh browser page reload gesture
+let lastTouchY = 0;
+document.addEventListener('touchstart', (e) => {
+  if (e.touches.length === 1) {
+    lastTouchY = e.touches[0].clientY;
+  }
+}, { passive: true });
+
+document.addEventListener('touchmove', (e) => {
+  const touchY = e.touches[0].clientY;
+  const touchDiff = touchY - lastTouchY;
+  if (window.scrollY === 0 && touchDiff > 0) {
+    if (e.cancelable) {
+      e.preventDefault();
+    }
+  }
+}, { passive: false });
+
 createRoot(document.getElementById('root')!).render(<App />);

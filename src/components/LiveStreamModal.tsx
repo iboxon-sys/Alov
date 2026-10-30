@@ -14,6 +14,8 @@ import {
   query, 
   orderBy 
 } from '../firebase';
+import { getBaseUrl } from '../config/api';
+import { io, Socket } from 'socket.io-client';
 import { 
   createLiveStream, 
   stopLiveStream, 
@@ -94,12 +96,22 @@ export const LiveStreamModal: React.FC<LiveStreamModalProps> = ({
     return `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
   };
 
+  // Effect to attach camera stream to video element when live becomes active
+  useEffect(() => {
+    if (isLiveActive && localVideoRef.current && localStreamRef.current) {
+      const videoEl = localVideoRef.current;
+      videoEl.srcObject = localStreamRef.current;
+      videoEl.muted = true; // prevent audio feedback loop locally
+      videoEl.play().catch(err => console.warn("Local video play error:", err));
+    }
+  }, [isLiveActive, isVideoDisabled]);
+
   // 1. BROADCASTER INITIALIZATION FLOW
   const startBroadcast = async () => {
     setPermissionError(null);
     try {
       if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-        throw new Error("Brauzeringiz kamera va mikrofondan foydalanishni (getUserMedia) qo'llab-quvvatlamaydi. HTTPS yoki havfsiz ulanishni tekshiring.");
+        throw new Error("Brauzeringiz kamera va mikrofondan foydalanishni (getUserMedia) qo'llab-quvvatlamaydi. HTTPS yoki xavfsiz ulanishni tekshiring.");
       }
 
       let stream: MediaStream;
@@ -122,11 +134,8 @@ export const LiveStreamModal: React.FC<LiveStreamModalProps> = ({
       }
 
       localStreamRef.current = stream;
-      if (localVideoRef.current) {
-        localVideoRef.current.srcObject = stream;
-      }
 
-      // Create Live Stream in Firestore
+      // Create Live Stream record
       const newStreamId = await createLiveStream(currentUser, streamTitle);
       setActiveStreamId(newStreamId);
       setIsLiveActive(true);
@@ -164,6 +173,7 @@ export const LiveStreamModal: React.FC<LiveStreamModalProps> = ({
       localStreamRef.current = newStream;
       if (localVideoRef.current) {
         localVideoRef.current.srcObject = newStream;
+        localVideoRef.current.play().catch(console.warn);
       }
     } catch (e) {
       console.warn("Could not switch camera:", e);
@@ -221,9 +231,6 @@ export const LiveStreamModal: React.FC<LiveStreamModalProps> = ({
         if (data.status === 'ended') {
           setStreamEnded(true);
         }
-        if (data.viewerCount) {
-          setViewerCount(data.viewerCount);
-        }
       });
 
       // 2. Initialize WebRTC connection to receive Host's live video
@@ -235,6 +242,7 @@ export const LiveStreamModal: React.FC<LiveStreamModalProps> = ({
           setRemoteStream(stream);
           if (remoteVideoRef.current) {
             remoteVideoRef.current.srcObject = stream;
+            remoteVideoRef.current.play().catch(console.warn);
           }
         }
       );
@@ -263,38 +271,49 @@ export const LiveStreamModal: React.FC<LiveStreamModalProps> = ({
     };
   }, []);
 
-  // 3. SHARED LIVE CHAT LISTENER (Firestore onSnapshot)
+  const liveSocketRef = useRef<Socket | null>(null);
+
+  // 3. SHARED LIVE CHAT & REAL-TIME VIEWER COUNTER LISTENER (Socket.io)
   useEffect(() => {
     if (!activeStreamId) return;
 
-    const messagesCol = collection(db, 'live_streams', activeStreamId, 'messages');
-    const q = query(messagesCol, orderBy('createdAt', 'asc'));
+    const socket = io(getBaseUrl());
+    liveSocketRef.current = socket;
 
-    const unsubChat = onSnapshot(q, (snapshot) => {
-      const msgs: LiveChatMessage[] = [];
-      snapshot.forEach(docSnap => {
-        const d = docSnap.data();
-        msgs.push({
-          id: docSnap.id,
-          senderUid: d.senderUid,
-          senderName: d.senderName || 'Mehmon',
-          senderAvatar: d.senderAvatar,
-          text: d.text,
-          createdAt: d.createdAt
-        });
+    socket.emit('join_live_stream', { streamId: activeStreamId, user: currentUser });
+
+    socket.on('live_stream_chat_history', (history: LiveChatMessage[]) => {
+      if (Array.isArray(history) && history.length > 0) {
+        setChatMessages(history);
+        setTimeout(() => {
+          chatBottomRef.current?.scrollIntoView({ behavior: 'smooth' });
+        }, 100);
+      }
+    });
+
+    socket.on('receive_live_chat_message', (msg: LiveChatMessage) => {
+      setChatMessages(prev => {
+        if (prev.some(m => m.id === msg.id)) return prev;
+        return [...prev, msg];
       });
-      setChatMessages(msgs);
       setTimeout(() => {
         chatBottomRef.current?.scrollIntoView({ behavior: 'smooth' });
       }, 100);
-    }, (err) => {
-      console.warn("Live chat snapshot error:", err);
     });
 
-    return () => unsubChat();
-  }, [activeStreamId]);
+    socket.on('live_stream_viewer_count', ({ count }: { count: number }) => {
+      if (typeof count === 'number') {
+        setViewerCount(count);
+      }
+    });
 
-  // Send message to shared live chat
+    return () => {
+      socket.emit('leave_live_stream', { streamId: activeStreamId });
+      socket.disconnect();
+    };
+  }, [activeStreamId, currentUser]);
+
+  // Send message to shared live chat via Socket.io
   const handleSendMessage = async (e?: React.FormEvent) => {
     if (e) e.preventDefault();
     if (!inputMessage.trim() || !activeStreamId) return;
@@ -302,18 +321,19 @@ export const LiveStreamModal: React.FC<LiveStreamModalProps> = ({
     const text = inputMessage.trim();
     setInputMessage('');
 
-    try {
-      const messagesCol = collection(db, 'live_streams', activeStreamId, 'messages');
-      await addDoc(messagesCol, {
-        senderUid: currentUser.uid,
-        senderName: currentUser.name || 'Mehmon',
-        senderAvatar: currentUser.avatar || '',
-        text,
-        createdAt: serverTimestamp()
-      });
-    } catch (err) {
-      console.error("Error sending live chat message:", err);
-    }
+    const msg: LiveChatMessage = {
+      id: 'live_msg_' + Date.now() + Math.random().toString(36).substring(2, 5),
+      senderUid: currentUser.uid,
+      senderName: currentUser.name || 'Mehmon',
+      senderAvatar: currentUser.avatar || '',
+      text,
+      createdAt: new Date().toISOString()
+    };
+
+    liveSocketRef.current?.emit('send_live_chat_message', {
+      streamId: activeStreamId,
+      message: msg
+    });
   };
 
   // Send Floating Heart Particle

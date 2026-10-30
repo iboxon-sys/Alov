@@ -20,6 +20,17 @@
     --pom-glow: rgba(232, 71, 74, .3);
   }
 
+  html, body, #root {
+    background-color: var(--bg);
+    color: var(--ink);
+    font-family: 'Inter', sans-serif;
+    -webkit-font-smoothing: antialiased;
+    overscroll-behavior-y: none;
+    overscroll-behavior: none;
+    touch-action: pan-x pan-y;
+    -webkit-overflow-scrolling: touch;
+  }
+
   body {
     background-color: var(--bg);
     color: var(--ink);

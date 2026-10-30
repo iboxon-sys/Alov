@@ -245,6 +245,7 @@ export default function App() {
   const [geoWatchId, setGeoWatchId] = useState<number | null>(null);
   const [userCoords, setUserCoords] = useState<{lat: number, lng: number, accuracy?: number}>({ lat: 41.2995, lng: 69.2401, accuracy: 20 });
   const [gpsStatusMsg, setGpsStatusMsg] = useState<string>('');
+  const [activeUsersCount, setActiveUsersCount] = useState<number>(1);
   const socketRef = useRef<Socket | null>(null);
 
   useEffect(() => {
@@ -255,6 +256,12 @@ export default function App() {
       const myUid = currentUser?.uid || firebaseUser?.uid;
       if (myUid) {
         socket.emit('register_user', myUid);
+      }
+    });
+
+    socket.on('active_users_count', ({ count }: { count: number }) => {
+      if (typeof count === 'number' && count > 0) {
+        setActiveUsersCount(count);
       }
     });
 
@@ -525,98 +532,101 @@ export default function App() {
     return () => unsub();
   }, []);
 
-  // Real-time Firestore 1-on-1 Chat Subscriptions (Filtered for active dialogues only)
+  // Load active 1-on-1 chats from Render API & localStorage (No Firestore)
   useEffect(() => {
-    if (!firebaseUser) return;
-    const myUid = firebaseUser.uid;
-    const q = query(
-      collection(db, 'chats'), 
-      where('participants', 'array-contains', myUid),
-      orderBy('updatedAt', 'desc')
-    );
+    const myUid = currentUser?.uid || firebaseUser?.uid;
+    if (!myUid) return;
 
-    const unsubChats = onSnapshot(q, (snapshot) => {
-      const chats: any[] = [];
-      snapshot.forEach(docSnap => {
-        const data = docSnap.data();
-        if (data.lastMessage) { // Only show chats with actual messages
-          chats.push({ id: docSnap.id, ...data });
+    const fetchChats = async () => {
+      let serverChats: any[] = [];
+      try {
+        const res = await fetch(getApiUrl(`/api/chats/user/${myUid}`));
+        const data = await res.json();
+        if (data.success && Array.isArray(data.chats)) {
+          serverChats = data.chats;
         }
-      });
+      } catch (e) {
+        console.warn("Could not fetch chats from server:", e);
+      }
 
-      // Always prepend Alov AI to the chat list for every user
-      const aiChatId = [firebaseUser.uid, ALOV_AI_USER.uid].sort().join('_');
-      const hasAiChat = chats.some(c => c.id === aiChatId);
-      
-      let finalChats = [...chats];
+      // Merge with cached local chats
+      let localChats: any[] = [];
+      try {
+        const cached = localStorage.getItem('alov_chats_' + myUid);
+        if (cached) localChats = JSON.parse(cached);
+      } catch (e) {}
+
+      const chatMap = new Map<string, any>();
+      [...localChats, ...serverChats].forEach(c => chatMap.set(c.id, c));
+      const combined = Array.from(chatMap.values());
+
+      // Always prepend Alov AI to the chat list
+      const aiChatId = [myUid, ALOV_AI_USER.uid].sort().join('_');
+      const hasAiChat = combined.some(c => c.id === aiChatId);
+
+      let finalChats = [...combined];
       if (!hasAiChat) {
         finalChats.unshift({
           id: aiChatId,
-          participants: [firebaseUser.uid, ALOV_AI_USER.uid],
+          participants: [myUid, ALOV_AI_USER.uid],
           lastMessage: "Salom! Men Alov AI. Suhbatlashamizmi? 😊",
-          updatedAt: serverTimestamp(),
+          updatedAt: new Date().toISOString(),
           isAI: true
         });
       } else {
-        // Move existing AI chat to top
         const aiIndex = finalChats.findIndex(c => c.id === aiChatId);
-        const aiChat = finalChats.splice(aiIndex, 1)[0];
-        finalChats.unshift({ ...aiChat, isAI: true });
+        if (aiIndex > -1) {
+          const aiChat = finalChats.splice(aiIndex, 1)[0];
+          finalChats.unshift({ ...aiChat, isAI: true });
+        }
       }
 
       setChatsList(finalChats);
       setIsLoadingChats(false);
-    }, (err) => {
-      console.warn("Chats snapshot error:", err);
-      setIsLoadingChats(false);
-    });
-    return () => unsubChats();
-  }, [firebaseUser]);
+    };
 
-  // Real-time messages listener for the selected conversation
+    fetchChats();
+  }, [firebaseUser, currentUser]);
+
+  // Load chat messages for the selected conversation from localStorage & Render API
   useEffect(() => {
-    if (!firebaseUser || !selectedChatUser || chatView !== 'conversation') return;
-    const myUid = firebaseUser.uid;
+    if (!selectedChatUser || chatView !== 'conversation') return;
+    const myUid = currentUser?.uid || firebaseUser?.uid;
     const otherUid = selectedChatUser.uid || selectedChatUser.id;
+    if (!myUid || !otherUid) return;
+
     const chatId = [myUid, otherUid].sort().join('_');
 
-    // Reset unread count when opening the conversation
-    resetUnreadCount(chatId);
+    // 1. Load from localStorage
+    let localMsgs: any[] = [];
+    try {
+      const cached = localStorage.getItem('alov_msgs_' + chatId);
+      if (cached) localMsgs = JSON.parse(cached);
+    } catch (e) {}
 
-    const q = query(
-      collection(db, 'chats', chatId, 'messages'),
-      orderBy('createdAt', 'asc')
-    );
+    if (localMsgs.length > 0) {
+      setChatMessages(prev => ({ ...prev, [selectedChatUser.id]: localMsgs }));
+    }
 
-    const unsubMessages = onSnapshot(q, (snapshot) => {
-      const msgs: any[] = [];
-      snapshot.forEach(docSnap => {
-        const d = docSnap.data();
-        msgs.push({
-          id: docSnap.id,
-          ...d,
-          time: d.createdAt?.toDate ? d.createdAt.toDate().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : ''
-        });
-      });
-      setChatMessages(prev => ({
-        ...prev,
-        [selectedChatUser.id]: msgs
-      }));
-    });
+    // 2. Sync from Render API
+    fetch(getApiUrl(`/api/chats/${chatId}/messages`))
+      .then(res => res.json())
+      .then(data => {
+        if (data.success && Array.isArray(data.messages)) {
+          const msgMap = new Map<string, any>();
+          [...localMsgs, ...data.messages].forEach(m => msgMap.set(m.id, m));
+          const merged = Array.from(msgMap.values()).sort((a, b) => 
+            new Date(a.createdAt || 0).getTime() - new Date(b.createdAt || 0).getTime()
+          );
+          setChatMessages(prev => ({ ...prev, [selectedChatUser.id]: merged }));
+          try {
+            localStorage.setItem('alov_msgs_' + chatId, JSON.stringify(merged));
+          } catch (e) {}
+        }
+      })
+      .catch(err => console.warn("Failed to sync chat messages from Render server:", err));
 
-    // Also listen to chat metadata for "typing" status
-    const unsubMeta = onSnapshot(doc(db, 'chats', chatId), (snap) => {
-      if (snap.exists()) {
-        const data = snap.data();
-        setIsOtherTyping(!!data.isTyping?.[otherUid]);
-      }
-    });
-
-    return () => {
-      unsubMessages();
-      unsubMeta();
-    };
-  }, [firebaseUser, selectedChatUser, chatView]);
+  }, [firebaseUser, currentUser, selectedChatUser, chatView]);
 
   // MANDATORY Physical GPS Detection & High Precision Tracking
   useEffect(() => {
@@ -1205,43 +1215,6 @@ export default function App() {
     }
   };
 
-  // Real-time Firestore 1-on-1 Chat Subscription
-  useEffect(() => {
-    if (activeTab !== 'chats' || chatView !== 'conversation' || !selectedChatUser) return;
-    const myUid = currentUser?.uid || firebaseUser?.uid;
-    const otherUid = selectedChatUser.uid || selectedChatUser.id;
-    if (!myUid || !otherUid) return;
-
-    const chatId = [myUid, otherUid].sort().join('_');
-    const messagesRef = collection(db, 'chats', chatId, 'messages');
-    const q = query(messagesRef, orderBy('createdAt', 'asc'));
-
-    const unsubscribe = onSnapshot(q, (snapshot) => {
-      const msgs: any[] = [];
-      snapshot.forEach((docSnap) => {
-        const data = docSnap.data();
-        msgs.push({
-          id: docSnap.id,
-          senderId: data.senderId === myUid ? 'me' : data.senderId,
-          text: data.text,
-          type: data.type || 'text',
-          meetUrl: data.meetUrl,
-          time: data.createdAt?.toDate 
-            ? data.createdAt.toDate().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) 
-            : (data.time || new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }))
-        });
-      });
-      setChatMessages(prev => ({
-        ...prev,
-        [selectedChatUser.id]: msgs
-      }));
-    }, (err) => {
-      console.warn("Real-time chat snapshot error:", err);
-    });
-
-    return () => unsubscribe();
-  }, [activeTab, chatView, selectedChatUser, currentUser, firebaseUser]);
-
   const handleCreateMeetLink = async () => {
     let meetUrl = 'https://meet.google.com/abc-defg-hij';
     try {
@@ -1261,39 +1234,38 @@ export default function App() {
     const myUid = currentUser?.uid || firebaseUser?.uid;
     const otherUid = selectedChatUser?.uid || selectedChatUser?.id;
 
-    if (myUid && otherUid) {
-      try {
-        const chatId = [myUid, otherUid].sort().join('_');
-        const messagesRef = collection(db, 'chats', chatId, 'messages');
-        await addDoc(messagesRef, {
-          senderId: myUid,
-          senderName: currentUser?.name || firebaseUser?.displayName || 'Foydalanuvchi',
-          type: 'meet',
-          text: "Google Meet Havolasi",
-          meetUrl,
-          createdAt: serverTimestamp()
-        });
-        await setDoc(doc(db, 'chats', chatId), {
-          lastMessage: "Google Meet Havolasi 📹",
-          lastSenderId: myUid,
-          updatedAt: serverTimestamp(),
-          participants: [myUid, otherUid]
-        }, { merge: true });
-        return;
-      } catch (err) {
-        console.error("Error sending meet link to Firestore:", err);
-      }
-    }
+    if (!myUid || !otherUid) return;
 
-    const meetMsg = {
-      id: 'meet-' + Date.now(),
-      senderId: 'me',
+    const chatId = [myUid, otherUid].sort().join('_');
+    const msgObj = {
+      id: 'meet_' + Date.now(),
+      senderId: myUid,
+      senderName: currentUser?.name || firebaseUser?.displayName || 'Foydalanuvchi',
       type: 'meet' as const,
+      text: "Google Meet Havolasi 📹",
       meetUrl,
+      createdAt: new Date().toISOString(),
       time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
     };
-    const list = chatMessages[selectedChatUser.id] || [];
-    setChatMessages({ ...chatMessages, [selectedChatUser.id]: [...list, meetMsg] });
+
+    socketRef.current?.emit('send_message', {
+      chatId,
+      senderId: myUid,
+      recipientId: otherUid,
+      message: msgObj
+    });
+
+    setChatMessages(prev => {
+      const currentMsgs = prev[selectedChatUser.id] || [];
+      const updatedMsgs = [...currentMsgs, msgObj];
+      try {
+        localStorage.setItem('alov_msgs_' + chatId, JSON.stringify(updatedMsgs));
+      } catch (e) {}
+      return {
+        ...prev,
+        [selectedChatUser.id]: updatedMsgs
+      };
+    });
   };
 
   const handleTyping = () => {
@@ -1339,25 +1311,13 @@ export default function App() {
     if (typingTimeoutRef.current) clearTimeout(typingTimeoutRef.current);
     socketRef.current?.emit('typing', { chatId, uid: myUid, isTyping: false });
 
-    // Send message via Socket.io bridge
+    // Send message via Socket.io bridge (Render server + memory store)
     socketRef.current?.emit('send_message', {
       chatId,
       senderId: myUid,
       recipientId: otherUid,
       message: msgObj
     });
-
-    // Save to Firestore for permanent persistence
-    try {
-      const messagesRef = collection(db, 'chats', chatId, 'messages');
-      addDoc(messagesRef, msgObj).catch(console.warn);
-      setDoc(doc(db, 'chats', chatId), {
-        lastMessage: text,
-        lastSenderId: myUid,
-        participants: [myUid, otherUid],
-        updatedAt: serverTimestamp()
-      }, { merge: true }).catch(console.warn);
-    } catch (e) {}
 
     // Optimistically update local chat messages & localStorage
     setChatMessages(prev => {
@@ -1474,6 +1434,10 @@ export default function App() {
           <span className="text-lg font-black tracking-tight text-[#1C1C1C]">
             alov<span className="text-[#E8474A]">.uz</span>
           </span>
+          <span className="text-[10px] font-bold text-emerald-600 bg-emerald-50 px-2 py-0.5 rounded-full flex items-center space-x-1 border border-emerald-200/60 shadow-xs">
+            <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-ping" />
+            <span>{activeUsersCount} onlayn</span>
+          </span>
         </div>
 
         <div className="flex items-center space-x-2">
@@ -1539,31 +1503,39 @@ export default function App() {
               </select>
             </div>
 
-            <div className="space-y-3">
+            <div className="grid grid-cols-2 gap-3">
               {isLoadingCandidates ? (
                 <>
                   <CandidateSkeleton />
                   <CandidateSkeleton />
                 </>
               ) : filteredCandidates.map(user => (
-                <div key={user.id} className="bg-white rounded-[20px] p-3 card-shadow space-y-2.5">
-                  <div className="relative h-56 rounded-[14px] overflow-hidden">
-                    <img src={user.avatar} alt={user.name} className="w-full h-full object-cover" />
+                <div key={user.id} className="bg-white rounded-[20px] p-2.5 card-shadow flex flex-col justify-between space-y-2 border border-slate-100 hover:shadow-md transition-all">
+                  <div className="relative aspect-[3/4] w-full rounded-[14px] overflow-hidden bg-slate-100">
+                    <img 
+                      src={user.avatar || 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&q=80&w=600'} 
+                      alt={user.name} 
+                      className="w-full h-full object-cover object-center transition-transform duration-300 hover:scale-105"
+                      onError={(e: any) => {
+                        e.target.src = 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&q=80&w=600';
+                      }}
+                    />
                     
                     {user.isLive && (
-                      <div className="absolute top-2 left-2 px-2.5 py-1 rounded-full bg-red-600 text-white text-[9px] font-black flex items-center space-x-1.5 shadow-lg animate-pulse border border-white/30">
-                        <span className="w-2 h-2 rounded-full bg-white animate-ping" />
-                        <span>JONLI EFIR</span>
+                      <div className="absolute top-2 left-2 px-2 py-0.5 rounded-full bg-red-600 text-white text-[8px] font-black flex items-center space-x-1 shadow-md animate-pulse border border-white/30">
+                        <span className="w-1.5 h-1.5 rounded-full bg-white animate-ping" />
+                        <span>LIVE</span>
                       </div>
                     )}
 
-                    <span className="absolute top-2 right-2 px-2.5 py-0.5 rounded-full bg-[#E8474A] text-white text-[9px] font-bold">
+                    <span className="absolute top-2 right-2 px-2 py-0.5 rounded-full bg-[#E8474A] text-white text-[8px] font-bold shadow-xs">
                       {user.id}
                     </span>
                   </div>
-                  <div>
-                    <h3 className="text-xl font-editorial">{user.name}, {user.age}</h3>
-                    <p className="text-[10px] text-[#6b635c]">{user.district}, {user.region}</p>
+
+                  <div className="min-w-0">
+                    <h3 className="text-sm font-bold font-editorial text-slate-900 truncate">{user.name}, {user.age}</h3>
+                    <p className="text-[10px] text-[#6b635c] truncate">{user.district || user.region}</p>
                   </div>
 
                   {user.isLive && (
@@ -1574,18 +1546,18 @@ export default function App() {
                         setLiveModalMode('viewer');
                         setShowLiveModal(true);
                       }}
-                      className="w-full py-2.5 rounded-full bg-red-600 hover:bg-red-500 text-white font-bold text-xs shadow-md shadow-red-600/30 flex items-center justify-center space-x-1.5 transition"
+                      className="w-full py-1.5 rounded-full bg-red-600 hover:bg-red-500 text-white font-bold text-[10px] shadow-sm flex items-center justify-center space-x-1 transition active:scale-95"
                     >
-                      <Radio className="w-3.5 h-3.5" />
-                      <span>Efirni Tomosha Qilish (LIVE) 🎥</span>
+                      <Radio className="w-3 h-3 animate-pulse" />
+                      <span>Efir (LIVE) 🎥</span>
                     </button>
                   )}
 
-                  <div className="flex space-x-2">
-                    <button onClick={() => setSelectedProfile(user)} className="flex-1 py-2 rounded-full bg-[#FCEAEA] text-[#E8474A] font-bold text-xs">
+                  <div className="flex space-x-1.5 pt-0.5">
+                    <button onClick={() => setSelectedProfile(user)} className="flex-1 py-1.5 rounded-full bg-[#FCEAEA] hover:bg-[#f8d7d7] text-[#E8474A] font-bold text-[10px] transition active:scale-95">
                       Profil
                     </button>
-                    <button onClick={() => { setSelectedChatUser(user); setChatView('conversation'); setActiveTab('chats'); }} className="flex-1 py-2 rounded-full bg-[#E8474A] text-white font-bold text-xs">
+                    <button onClick={() => { setSelectedChatUser(user); setChatView('conversation'); setActiveTab('chats'); }} className="flex-1 py-1.5 rounded-full bg-[#E8474A] hover:bg-[#CB2E31] text-white font-bold text-[10px] transition active:scale-95">
                       Chat
                     </button>
                   </div>
@@ -1954,45 +1926,55 @@ export default function App() {
 
                 <div className="flex-1 p-4 overflow-y-auto space-y-3 bg-[#F8F9FA] scrollbar-none scroll-smooth">
                   <AnimatePresence>
-                    {(chatMessages[selectedChatUser?.uid || selectedChatUser?.id] || []).map((msg, idx) => (
-                      <motion.div 
-                        key={msg.id || idx}
-                        initial={{ opacity: 0, y: 10, scale: 0.95 }}
-                        animate={{ opacity: 1, y: 0, scale: 1 }}
-                        className={cn("flex", msg.senderId === 'me' ? 'justify-end' : 'justify-start')}
-                      >
-                        <div className={cn(
-                          "max-w-[85%] rounded-[18px] px-4 py-2.5 shadow-subtle relative",
-                          msg.senderId === 'me' 
-                            ? 'bg-[#E8474A] text-white rounded-tr-none' 
-                            : 'bg-white text-slate-900 border border-slate-200/50 rounded-tl-none'
-                        )}>
-                          {msg.type === 'meet' ? (
-                            <a href={msg.meetUrl} target="_blank" rel="noreferrer" className="underline font-bold flex items-center space-x-2 py-1">
-                              <Video className="w-4 h-4" />
-                              <span>Google Meet Qo'shilish</span>
-                              <ArrowUpRight className="w-3.5 h-3.5" />
-                            </a>
-                          ) : msg.type === 'image' ? (
-                            <img src={msg.fileUrl} alt="" className="rounded-lg max-h-60 object-cover cursor-zoom-in" onClick={() => window.open(msg.fileUrl)} />
-                          ) : msg.type === 'video' ? (
-                            <VideoPlayer url={msg.fileUrl || ''} />
-                          ) : (msg.type === 'voice' || msg.type === 'audio') ? (
-                            <VoiceMessage url={msg.fileUrl || ''} senderId={msg.senderId} />
-                          ) : (
-                            <p className="text-[13px] leading-relaxed whitespace-pre-wrap break-words">{msg.text}</p>
-                          )}
-                          <div className="flex items-center justify-end space-x-1 mt-1">
-                            <span className={cn("text-[9px]", msg.senderId === 'me' ? 'text-rose-100' : 'text-slate-400')}>
-                              {msg.time}
-                            </span>
-                            {msg.senderId === 'me' && (
-                              <CheckCircle2 className={cn("w-2.5 h-2.5", msg.read ? "text-blue-300" : "text-rose-200")} />
-                            )}
-                          </div>
-                        </div>
-                      </motion.div>
-                    ))}
+                    {(() => {
+                      const myUid = currentUser?.uid || firebaseUser?.uid;
+                      const activeKey = selectedChatUser?.id || selectedChatUser?.uid;
+                      const messages = (activeKey ? (chatMessages[activeKey] || (selectedChatUser?.uid ? chatMessages[selectedChatUser.uid] : [])) : []) || [];
+
+                      return messages.map((msg, idx) => {
+                        const isMe = msg.senderId === 'me' || (myUid && (msg.senderId === myUid || msg.userId === myUid));
+
+                        return (
+                          <motion.div 
+                            key={msg.id || idx}
+                            initial={{ opacity: 0, y: 10, scale: 0.95 }}
+                            animate={{ opacity: 1, y: 0, scale: 1 }}
+                            className={cn("flex", isMe ? 'justify-end' : 'justify-start')}
+                          >
+                            <div className={cn(
+                              "max-w-[85%] rounded-[18px] px-4 py-2.5 shadow-subtle relative",
+                              isMe 
+                                ? 'bg-[#E8474A] text-white rounded-tr-none' 
+                                : 'bg-white text-slate-900 border border-slate-200/50 rounded-tl-none'
+                            )}>
+                              {msg.type === 'meet' ? (
+                                <a href={msg.meetUrl} target="_blank" rel="noreferrer" className="underline font-bold flex items-center space-x-2 py-1">
+                                  <Video className="w-4 h-4" />
+                                  <span>Google Meet Qo'shilish</span>
+                                  <ArrowUpRight className="w-3.5 h-3.5" />
+                                </a>
+                              ) : msg.type === 'image' ? (
+                                <img src={msg.fileUrl} alt="" className="rounded-lg max-h-60 object-cover cursor-zoom-in" onClick={() => window.open(msg.fileUrl)} />
+                              ) : msg.type === 'video' ? (
+                                <VideoPlayer url={msg.fileUrl || ''} />
+                              ) : (msg.type === 'voice' || msg.type === 'audio') ? (
+                                <VoiceMessage url={msg.fileUrl || ''} senderId={isMe ? 'me' : msg.senderId} />
+                              ) : (
+                                <p className="text-[13px] leading-relaxed whitespace-pre-wrap break-words">{msg.text}</p>
+                              )}
+                              <div className="flex items-center justify-end space-x-1 mt-1">
+                                <span className={cn("text-[9px]", isMe ? 'text-rose-100' : 'text-slate-400')}>
+                                  {msg.time}
+                                </span>
+                                {isMe && (
+                                  <CheckCircle2 className={cn("w-2.5 h-2.5", msg.read ? "text-blue-300" : "text-rose-200")} />
+                                )}
+                              </div>
+                            </div>
+                          </motion.div>
+                        );
+                      });
+                    })()}
                     {isOtherTyping || (selectedChatUser?.uid === ALOV_AI_USER.uid && isAiTyping) ? (
                       <motion.div 
                         initial={{ opacity: 0, y: 5 }}
@@ -2914,23 +2896,34 @@ export default function App() {
         </div>
       )}
 
-      {/* --- PUBLIC USER PROFILE MODAL (Triggered from Map or Candidate Cards) --- */}
+      {/* --- PUBLIC USER PROFILE POPUP MODAL (Triggered from Map or Candidate Cards) --- */}
       {selectedProfile && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-md animate-fadeIn">
-          <div className="bg-white rounded-[28px] max-w-sm w-full p-6 space-y-4 relative card-shadow max-h-[85vh] overflow-y-auto">
-            <button onClick={() => setSelectedProfile(null)} className="absolute top-4 right-4 p-1.5 rounded-full bg-slate-100 hover:bg-slate-200 text-slate-700">
+          <div className="bg-white rounded-[32px] max-w-sm w-full p-6 space-y-4 relative card-shadow max-h-[90vh] overflow-y-auto border border-slate-100 shadow-2xl text-slate-900">
+            <button 
+              onClick={() => setSelectedProfile(null)} 
+              className="absolute top-5 right-5 p-2 rounded-full bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold transition active:scale-90"
+            >
               <X className="w-4 h-4" />
             </button>
-            <div className="flex items-center space-x-4">
-              <img src={selectedProfile.avatar} alt={selectedProfile.name} className="w-16 h-16 rounded-full object-cover border-2 border-[#E8474A]" />
+
+            <div className="flex items-center space-x-4 pt-1">
+              <div className="relative w-18 h-18 rounded-full overflow-hidden border-2 border-[#E8474A] shrink-0 bg-slate-100 shadow-md">
+                <img 
+                  src={selectedProfile.avatar || 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&q=80&w=600'} 
+                  alt={selectedProfile.name} 
+                  className="w-full h-full object-cover object-center" 
+                  onError={(e: any) => { e.target.src = 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&q=80&w=600'; }}
+                />
+              </div>
               <div className="flex-1 min-w-0">
-                <h3 className="text-xl font-editorial truncate">{selectedProfile.name}, {selectedProfile.age}</h3>
+                <h3 className="text-xl font-editorial font-bold text-slate-900 truncate">{selectedProfile.name}, {selectedProfile.age}</h3>
                 <p className="text-[10px] font-bold text-[#E8474A]">ID: {selectedProfile.id}</p>
-                <p className="text-[10px] text-[#6b635c]">{selectedProfile.district}, {selectedProfile.region}</p>
+                <p className="text-[11px] text-slate-500 truncate">{selectedProfile.district}, {selectedProfile.region}</p>
               </div>
             </div>
 
-            <div className="grid grid-cols-3 gap-2 text-center bg-[#FAFAFB] p-3 rounded-[14px]">
+            <div className="grid grid-cols-3 gap-2 text-center bg-[#FAFAFB] p-3 rounded-[16px] border border-slate-100">
               <div>
                 <p className="text-sm font-black text-[#E8474A]">{selectedProfile.followersCount || 120}</p>
                 <p className="text-[9px] text-slate-500 font-bold">Obunachilar</p>
@@ -2945,26 +2938,39 @@ export default function App() {
               </div>
             </div>
 
-            <p className="text-xs text-[#57534E] bg-[#FAFAFB] p-3 rounded-[12px]">{selectedProfile.bio}</p>
+            <p className="text-xs text-slate-700 bg-[#FAFAFB] p-3.5 rounded-[14px] leading-relaxed border border-slate-100">{selectedProfile.bio || 'Alov.uz da yangi tanishuvlar va suhbatlar uchun.'}</p>
 
-            <div className="flex space-x-2">
+            <div className="flex space-x-2 pt-1">
               <button 
                 onClick={() => handleToggleFollow(selectedProfile.id)} 
-                className={`flex-1 py-2.5 rounded-full font-bold text-xs shadow-md transition-all ${followingIds.includes(selectedProfile.id) ? 'bg-slate-200 text-slate-800' : 'bg-[#E8474A] text-white'}`}
+                className={`flex-1 py-2.5 rounded-full font-bold text-xs shadow-sm transition-all active:scale-95 ${followingIds.includes(selectedProfile.id) ? 'bg-slate-200 text-slate-800' : 'bg-[#E8474A] text-white hover:bg-[#CB2E31]'}`}
               >
                 {followingIds.includes(selectedProfile.id) ? 'Obuna bo\'lingan' : '+ Obuna bo\'lish'}
               </button>
               <button 
                 onClick={() => {
-                  handleDrawRouteToUser(selectedProfile);
+                  setSelectedChatUser(selectedProfile);
+                  setChatView('conversation');
+                  setActiveTab('chats');
                   setSelectedProfile(null);
                 }} 
-                className="flex-1 py-2.5 rounded-full bg-slate-900 text-white font-bold text-xs shadow-md flex items-center justify-center space-x-1"
+                className="flex-1 py-2.5 rounded-full bg-[#E8474A] hover:bg-[#CB2E31] text-white font-bold text-xs shadow-sm flex items-center justify-center space-x-1 active:scale-95 transition-all"
               >
-                <Navigation className="w-3.5 h-3.5" />
-                <span>Marshrut 🚗</span>
+                <MessageCircle className="w-3.5 h-3.5" />
+                <span>Chat yozish</span>
               </button>
             </div>
+
+            <button 
+              onClick={() => {
+                handleDrawRouteToUser(selectedProfile);
+                setSelectedProfile(null);
+              }} 
+              className="w-full py-2.5 rounded-full bg-slate-900 hover:bg-slate-800 text-white font-bold text-xs shadow-md flex items-center justify-center space-x-1.5 active:scale-95 transition-all"
+            >
+              <Navigation className="w-3.5 h-3.5 text-rose-400" />
+              <span>Marshrut chizish (Yo'l) 🚗</span>
+            </button>
           </div>
         </div>
       )}

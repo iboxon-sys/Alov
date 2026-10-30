@@ -132,7 +132,35 @@ Sizning uslubingiz:
     }
   });
 
+  // --- In-Memory Chat Storage & Real-Time Presence ---
+  const chatMessagesStore: Record<string, any[]> = {};
+  const userChatsStore: Record<string, any> = {};
+  const liveStreamChatStore: Record<string, any[]> = {};
+  
+  // Real-time Presence & Viewer Counters
+  const activeSocketsMap = new Map<string, { uid?: string; streamId?: string }>();
+  const streamViewersMap: Record<string, Set<string>> = {};
 
+  const broadcastActiveUsersCount = () => {
+    const totalCount = activeSocketsMap.size;
+    io.emit('active_users_count', { count: Math.max(1, totalCount) });
+  };
+
+  // GET /api/chats/:chatId/messages
+  app.get('/api/chats/:chatId/messages', (req, res) => {
+    const { chatId } = req.params;
+    const messages = chatMessagesStore[chatId] || [];
+    res.json({ success: true, messages });
+  });
+
+  // GET /api/chats/user/:uid
+  app.get('/api/chats/user/:uid', (req, res) => {
+    const { uid } = req.params;
+    const userChats = Object.values(userChatsStore).filter(
+      (chat: any) => chat.participants && chat.participants.includes(uid)
+    );
+    res.json({ success: true, chats: userChats });
+  });
 
   // Setup Vite in development or static serve in production
   if (!isProduction) {
@@ -158,11 +186,16 @@ Sizning uslubingiz:
 
   io.on('connection', (socket) => {
     console.log('Client connected via Socket.io:', socket.id);
+    activeSocketsMap.set(socket.id, {});
+    broadcastActiveUsersCount();
 
     // Register user socket for direct personal messaging bridge
     socket.on('register_user', (uid) => {
       if (uid) {
         socket.join(`user_${uid}`);
+        const currentData = activeSocketsMap.get(socket.id) || {};
+        activeSocketsMap.set(socket.id, { ...currentData, uid });
+        broadcastActiveUsersCount();
       }
     });
 
@@ -173,6 +206,26 @@ Sizning uslubingiz:
     socket.on('send_message', async (data) => {
       const { chatId, message, senderId, recipientId } = data;
       const payload = { chatId, message, senderId, recipientId };
+
+      // Store in server memory
+      if (!chatMessagesStore[chatId]) {
+        chatMessagesStore[chatId] = [];
+      }
+      // Deduplicate by message id if sent rapidly
+      if (!chatMessagesStore[chatId].some((m: any) => m.id === message.id)) {
+        chatMessagesStore[chatId].push(message);
+        if (chatMessagesStore[chatId].length > 250) {
+          chatMessagesStore[chatId].shift(); // limit history buffer
+        }
+      }
+
+      userChatsStore[chatId] = {
+        id: chatId,
+        participants: [senderId, recipientId].filter(Boolean),
+        lastMessage: message.text || (message.type === 'image' ? 'Rasm 🖼️' : (message.type === 'video' ? 'Video 🎥' : 'Xabar')),
+        lastSenderId: senderId,
+        updatedAt: new Date().toISOString()
+      };
 
       // Broadcast message to room and to personal user channels for guaranteed delivery
       io.to(chatId).emit('receive_message', payload);
@@ -207,8 +260,12 @@ Sizning uslubingiz:
             createdAt: new Date().toISOString()
           };
 
+          if (chatMessagesStore[chatId]) {
+            chatMessagesStore[chatId].push(aiReply);
+          }
+
           setTimeout(() => {
-            io.to(chatId).emit('receive_message', { chatId, message: aiReply, senderId: 'alov_ai_bot' });
+            io.to(chatId).emit('receive_message', { chatId, message: aiReply, senderId: 'alov_ai_bot', recipientId: senderId });
           }, 800);
         } catch (err) {
           console.error("AI socket reply error:", err);
@@ -223,7 +280,24 @@ Sizning uslubingiz:
 
     // --- ISOLATED LIVE STREAM CHAT & WEBRTC SIGNALING ---
     socket.on('join_live_stream', ({ streamId, user }) => {
+      if (!streamId) return;
       socket.join(`live_stream_${streamId}`);
+
+      if (!streamViewersMap[streamId]) {
+        streamViewersMap[streamId] = new Set();
+      }
+      streamViewersMap[streamId].add(socket.id);
+
+      const currentData = activeSocketsMap.get(socket.id) || {};
+      activeSocketsMap.set(socket.id, { ...currentData, streamId });
+
+      const viewerCount = streamViewersMap[streamId].size;
+      io.to(`live_stream_${streamId}`).emit('live_stream_viewer_count', { streamId, count: viewerCount });
+
+      // Send stored chat history to newly joined viewer
+      const history = liveStreamChatStore[streamId] || [];
+      socket.emit('live_stream_chat_history', history);
+
       socket.to(`live_stream_${streamId}`).emit('viewer_joined_stream', {
         socketId: socket.id,
         user
@@ -231,8 +305,27 @@ Sizning uslubingiz:
     });
 
     socket.on('send_live_chat_message', ({ streamId, message }) => {
+      if (!streamId || !message) return;
+
+      if (!liveStreamChatStore[streamId]) {
+        liveStreamChatStore[streamId] = [];
+      }
+      liveStreamChatStore[streamId].push(message);
+      if (liveStreamChatStore[streamId].length > 100) {
+        liveStreamChatStore[streamId].shift();
+      }
+
       // Broadcast chat message strictly to this stream room only
       io.to(`live_stream_${streamId}`).emit('receive_live_chat_message', message);
+    });
+
+    socket.on('leave_live_stream', ({ streamId }) => {
+      if (streamId && streamViewersMap[streamId]) {
+        streamViewersMap[streamId].delete(socket.id);
+        const count = streamViewersMap[streamId].size;
+        io.to(`live_stream_${streamId}`).emit('live_stream_viewer_count', { streamId, count });
+      }
+      socket.leave(`live_stream_${streamId}`);
     });
 
     socket.on('live_stream_offer', ({ streamId, targetSocketId, offer, sender }) => {
@@ -299,6 +392,17 @@ Sizning uslubingiz:
 
     socket.on('disconnect', () => {
       console.log('Client disconnected:', socket.id);
+      const socketInfo = activeSocketsMap.get(socket.id);
+      if (socketInfo?.streamId && streamViewersMap[socketInfo.streamId]) {
+        streamViewersMap[socketInfo.streamId].delete(socket.id);
+        const count = streamViewersMap[socketInfo.streamId].size;
+        io.to(`live_stream_${socketInfo.streamId}`).emit('live_stream_viewer_count', { 
+          streamId: socketInfo.streamId, 
+          count 
+        });
+      }
+      activeSocketsMap.delete(socket.id);
+      broadcastActiveUsersCount();
     });
   });
 

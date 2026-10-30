@@ -324,68 +324,46 @@ export default function App() {
     return () => clearTimeout(timeout);
   }, []);
 
-  // Foydalanuvchi hisobini Firestore bilan sinxronizatsiya qilish (Upsert: Topish yoki Yangi ochish)
+  // Foydalanuvchi hisobini Firestore va Lokal kesh bilan sinxronizatsiya qilish (Upsert)
   const syncUserWithFirestore = async (user: User) => {
     try {
-      let targetDocRef = doc(db, 'users', user.uid);
-      let existingData: any = null;
+      const userRef = doc(db, 'users', user.uid);
+      let userData: any = null;
 
+      // 1. Avval Firestore bazasidan UID orqali tekshirish
       try {
-        // 1. Avval UID orqali bazadan tekshirish
-        const userSnap = await getDoc(targetDocRef);
+        const userSnap = await getDoc(userRef);
         if (userSnap.exists()) {
-          existingData = userSnap.data();
-        } else if (user.email) {
-          // 2. Agar UID bilan topilmasa, Email orqali qidirish (eski akkauntni topish)
-          const q = query(collection(db, 'users'), where('email', '==', user.email), limit(1));
-          const querySnap = await getDocs(q);
-          if (!querySnap.empty) {
-            const existingDoc = querySnap.docs[0];
-            targetDocRef = doc(db, 'users', existingDoc.id);
-            existingData = existingDoc.data();
-          }
+          userData = { ...userSnap.data(), uid: user.uid, status: 'online' };
         }
       } catch (dbErr: any) {
-        console.warn("Firestore sync offline fallback triggered:", dbErr);
-        const fallbackUser = {
-          uid: user.uid,
-          id: `ALOV-${user.uid.slice(0, 5).toUpperCase()}`,
-          name: user.displayName || 'Alov Foydalanuvchisi',
-          email: user.email || '',
-          avatar: user.photoURL || 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&q=80&w=600',
-          role: 'user',
-          age: 22,
-          gender: 'female',
-          region: 'Toshkent shahri',
-          district: 'Yunusobod tumani',
-          status: 'online',
-          location: { lat: 41.3111, lng: 69.2797 }
-        };
-        setCurrentUser(fallbackUser);
-        setShowAuthModal(false);
-        setActiveTab(prev => (prev === 'landing' ? 'discover' : prev));
-        return fallbackUser;
+        console.warn("Firestore getDoc warning:", dbErr);
       }
 
-      let userData: any;
-
-      if (existingData) {
-        // MAVJUD AKKAUNT: Yangi ochmasdan, o'sha eski akkaunt ma'lumotlarini yuklab ichkariga kirgizish
-        userData = {
-          ...existingData,
-          uid: user.uid,
-          status: 'online',
-          lastSeen: serverTimestamp()
-        };
+      // 2. Agar Firestore'da topilmasa, ushbu qurilmaning Lokal keshidan qidirish (eski profilni tiklash)
+      if (!userData) {
         try {
-          await setDoc(targetDocRef, { 
+          const cached = localStorage.getItem('alov_user_' + user.uid);
+          if (cached) {
+            userData = JSON.parse(cached);
+            userData.status = 'online';
+            userData.uid = user.uid;
+          }
+        } catch (e) {}
+      }
+
+      // 3. Agar MAVJUD AKKAUNT topilsa (Firestore yoki Lokal keshda):
+      if (userData) {
+        // Profilni o'zgartirmasdan saqlab qolish va faqat onlayn statusini yangilash
+        try {
+          await setDoc(userRef, { 
             status: 'online', 
             lastSeen: serverTimestamp(),
             uid: user.uid 
           }, { merge: true });
         } catch (e) {}
       } else {
-        // YANGI FOYDALANUVCHI: Faqat mavjud bo'lmagandagina bazaga yozish
+        // 4. YANGI FOYDALANUVCHI: Faqat biror joyda profil topilmagandagina yangi profil yaratish
         userData = {
           uid: user.uid,
           id: `ALOV-${user.uid.slice(0, 5).toUpperCase()}`,
@@ -397,6 +375,7 @@ export default function App() {
           gender: 'female',
           region: 'Toshkent shahri',
           district: 'Yunusobod tumani',
+          bio: 'Alov.uz da yangi tanishuvlar va suhbatlar uchun.',
           status: 'online',
           lastSeen: serverTimestamp(),
           createdAt: serverTimestamp(),
@@ -405,13 +384,18 @@ export default function App() {
           location: { lat: 41.3111, lng: 69.2797 }
         };
         try {
-          await setDoc(targetDocRef, userData);
+          await setDoc(userRef, userData);
         } catch (e) {}
       }
 
+      // Har doim lokal keshni yangilab qo'yish (kelajakda qayta kirish uchun)
+      try {
+        localStorage.setItem('alov_user_' + user.uid, JSON.stringify(userData));
+      } catch (e) {}
+
       setCurrentUser(userData);
       
-      // Update form fields for editing
+      // Anketani to'ldirish maydonlarini yangilash
       setRegName(userData.name || '');
       setRegAge(String(userData.age || 22));
       setRegGender(userData.gender || 'female');
@@ -421,34 +405,18 @@ export default function App() {
       setRegAvatar(userData.avatar || '');
       setRegLocationVisibility(userData.locationVisibility || 'everyone');
       setIsLocationEnabled(userData.isLocationEnabled !== false);
-      setShowAuthModal(false); // Close auth modal on success
+
+      setShowAuthModal(false); // Modalni yopish
       setActiveTab(prev => (prev === 'landing' ? 'discover' : prev));
       return userData;
     } catch (err: any) {
       console.error("Firestore user sync error:", err);
-      const fallbackUser = {
-        uid: user.uid,
-        id: `ALOV-${user.uid.slice(0, 5).toUpperCase()}`,
-        name: user.displayName || 'Alov Foydalanuvchisi',
-        email: user.email || '',
-        avatar: user.photoURL || 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&q=80&w=600',
-        role: 'user',
-        age: 22,
-        gender: 'female',
-        region: 'Toshkent shahri',
-        district: 'Yunusobod tumani',
-        status: 'online',
-        location: { lat: 41.3111, lng: 69.2797 }
-      };
-      setCurrentUser(fallbackUser);
-      setShowAuthModal(false);
-      setActiveTab(prev => (prev === 'landing' ? 'discover' : prev));
     } finally {
       setIsAuthChecking(false);
     }
   };
 
-  // Listen for Google Sign In Redirect Result on page mount (for Mobile Devices)
+  // Listen for Google Sign In Redirect Result on page mount
   useEffect(() => {
     getRedirectResult(auth)
       .then(async (result) => {
@@ -1130,6 +1098,9 @@ export default function App() {
         location: userCoords
       };
       await setDoc(userRef, newUserData, { merge: true });
+      try {
+        localStorage.setItem('alov_user_' + firebaseUser.uid, JSON.stringify(newUserData));
+      } catch (e) {}
       setCurrentUser(newUserData);
       setUsersList(prev => {
         const userMap = new Map<string, any>();
@@ -1160,37 +1131,24 @@ export default function App() {
       const provider = new GoogleAuthProvider();
       provider.setCustomParameters({ prompt: 'select_account' });
 
-      // Mobil qurilmalarni aniqlash (iOS / Android)
-      const isMobile = /iPhone|iPad|iPod|Android/i.test(navigator.userAgent);
-
-      if (isMobile) {
-        // Telefonlarda osilib qolmasligi uchun redirect ishlatamiz
-        await signInWithRedirect(auth, provider);
-      } else {
-        // Kompyuterlarda popup usulidan foydalanamiz
+      // Mobil va kompyuterlarda bir xil barqaror popup usulidan foydalanamiz
+      try {
         const result = await signInWithPopup(auth, provider);
         if (result?.user) {
           await syncUserWithFirestore(result.user);
           setShowAuthModal(false);
           setActiveTab('discover');
         }
+      } catch (popupErr: any) {
+        if (popupErr.code === 'auth/popup-closed-by-user' || popupErr.code === 'auth/cancelled-popup-request') {
+          setIsLoggingIn(false);
+          return; // Foydalanuvchi popup oynasini yopdi
+        }
+        console.warn("Popup oyna bloklandi, redirect usuliga o'tilmoqda:", popupErr);
+        await signInWithRedirect(auth, provider);
       }
     } catch (err: any) {
-      if (err.code === 'auth/popup-closed-by-user' || err.code === 'auth/cancelled-popup-request') {
-        setIsLoggingIn(false);
-        return; // User intentionally closed the popup, do not log error
-      }
       console.error("Google Login Error:", err);
-      if (err.code === 'auth/popup-blocked') {
-        try {
-          const provider = new GoogleAuthProvider();
-          provider.setCustomParameters({ prompt: 'select_account' });
-          await signInWithRedirect(auth, provider);
-          return;
-        } catch (redirectErr: any) {
-          console.error("Google Redirect Error:", redirectErr);
-        }
-      }
       setErrorMsg(err.message || "Google orqali kirishda xatolik yuz berdi.");
     } finally {
       setIsLoggingIn(false);

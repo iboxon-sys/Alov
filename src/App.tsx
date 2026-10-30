@@ -694,7 +694,13 @@ export default function App() {
 
   }, [firebaseUser, currentUser, selectedChatUser, chatView]);
 
-  // MANDATORY Physical GPS Detection & High Precision Tracking
+  // Auto-scroll chat to bottom
+  useEffect(() => {
+    if (chatView === 'conversation') {
+      chatBottomRef.current?.scrollIntoView({ behavior: 'smooth' });
+    }
+  }, [chatMessages, chatView]);
+
   useEffect(() => {
     if (navigator.geolocation) {
       navigator.geolocation.getCurrentPosition(
@@ -2134,9 +2140,13 @@ export default function App() {
                     {(() => {
                       const myUid = currentUser?.uid || firebaseUser?.uid;
                       const activeKey = selectedChatUser?.id || selectedChatUser?.uid;
-                      const messages = (activeKey ? (chatMessages[activeKey] || (selectedChatUser?.uid ? chatMessages[selectedChatUser.uid] : [])) : []) || [];
+                      const msgs = (activeKey ? (chatMessages[activeKey] || (selectedChatUser?.uid ? chatMessages[selectedChatUser.uid] : [])) : []) || [];
+                      
+                      const sortedMessages = [...msgs].sort((a, b) => 
+                        new Date(a.createdAt || 0).getTime() - new Date(b.createdAt || 0).getTime()
+                      );
 
-                      return messages.map((msg, idx) => {
+                      return sortedMessages.map((msg, idx) => {
                         const isMe = msg.senderId === 'me' || (myUid && (msg.senderId === myUid || msg.userId === myUid));
 
                         return (
@@ -2180,6 +2190,9 @@ export default function App() {
                         );
                       });
                     })()}
+                    {/* Auto-scroll effect */}
+                    <div ref={chatBottomRef} />
+
                     {isOtherTyping || (selectedChatUser?.uid === ALOV_AI_USER.uid && isAiTyping) ? (
                       <motion.div 
                         initial={{ opacity: 0, y: 5 }}

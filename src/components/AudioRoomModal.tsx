@@ -505,7 +505,7 @@ export const AudioRoomModal: React.FC<AudioRoomModalProps> = ({
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/90 backdrop-blur-md p-0 md:p-4 select-none animate-in fade-in duration-200">
       <div 
-        className="relative w-full h-full max-w-md bg-slate-950 md:rounded-[36px] overflow-hidden shadow-2xl flex flex-col justify-between border border-white/10"
+        className="relative w-full h-full bg-slate-950 md:rounded-[36px] overflow-hidden shadow-2xl flex flex-col justify-between border border-white/10"
         style={{
           backgroundImage: backgroundUrl ? `url(${backgroundUrl})` : undefined,
           backgroundSize: 'cover',

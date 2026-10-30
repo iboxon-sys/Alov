@@ -184,6 +184,7 @@ export default function App() {
   const [isDraggingPan, setIsDraggingPan] = useState(false);
   const dragStartRef = useRef<{ x: number; y: number }>({ x: 0, y: 0 });
   const commentsEndRef = useRef<HTMLDivElement>(null);
+  const chatBottomRef = useRef<HTMLDivElement>(null);
 
   const [usersList, setUsersList] = useState<any[]>([]);
   const [chatsList, setChatsList] = useState<any[]>([]);

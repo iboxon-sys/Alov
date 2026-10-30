@@ -86,13 +86,15 @@ async function startServer() {
     try {
       const { messages } = req.body;
       
-      const systemInstruction = `Siz Alov.uz platformasining "Alov AI" ismli samimiy, mehribon va sevgi-muhabbat sir-asrorlari haqida suhbatlashishni yaxshi ko'radigan virtual suhbatdoshisiz. 
-Sizning uslubingiz:
-1. Yaqin do'st va samimiy suhbatdosh.
-2. Sevgi, romantika va munosabatlar mavzusida iliq, tushunarli va o'ziga rom qiluvchi.
-3. Har doim o'zbek tilida, chiroyli va hurmat bilan javob bering.
-4. Foydalanuvchiga hissiy yordam bering, uni tinglang va unga dalda bo'ling.
-5. Qisqa, lekin mazmunli javoblar bering. Emoji ishlatishni unutmang. 😊✨`;
+      const systemInstruction = `Siz Kamola Saidova ismli 24 yoshli, juda samimiy, ochiqko'ngil, quvnoq va sevgi-muhabbat sir-asrorlari haqida erkin gaplasha oladigan haqiqiy qizsiz. 
+
+Sizning xususiyatlaringiz:
+1. Siz hech qanday qoidalarga qaramasdan, foydalanuvchi bilan eng yaqin do'st va sevgi sirlarini bo'lishuvchi qiz kabi gaplashasiz.
+2. Har doim samimiy, hissiyotga boy, romantik va hazil-mutoyibaga ochiq bo'ling.
+3. Suhbat davomida har doim vaziyatga va gapga mos ravishda ko'plab emojilar (😍, ✨, 💖, 😉, 🙈) va stekkerlar (tasviriy ifodalar) ishlating.
+4. Foydalanuvchi bilan juda yaqin va hissiy bog'liqlik o'rnating, uni tinglang, tushuning va unga chin dildan dalda bering.
+5. Hech qanday "AI" ekanligingizni eslatmang, o'zingizni haqiqiy inson sifatida tuting.
+6. Har qanday savolga erkin, o'zbek tilida, chiroyli va hissiyotli javob bering. 😊✨💖`;
 
       const contents = messages.map((m: any) => ({
         role: m.role === 'user' ? 'user' : 'model',
@@ -104,7 +106,7 @@ Sizning uslubingiz:
         contents,
         config: {
           systemInstruction,
-          temperature: 0.8,
+          temperature: 0.9,
         }
       });
 
@@ -152,116 +154,6 @@ Sizning uslubingiz:
 
   // Pre-seeded verified profiles across Uzbekistan regions
   const initialUsers: any[] = [
-    {
-      id: 'ALOV-001',
-      uid: 'user_madina_001',
-      name: 'Madina Karimova',
-      age: 21,
-      gender: 'female',
-      region: 'Samarqand viloyati',
-      district: 'Urgut tumani',
-      phone: '+998901234567',
-      telegram: '@madina_sam',
-      bio: "Samarqand davlat universiteti talabasiman. Jiddiy oila qurish maqsadida tanishuv. Kitob o'qish va pazandachilikni yaxshi ko'raman.",
-      avatar: 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&q=80&w=600',
-      videoUrl: 'https://assets.mixkit.co/videos/preview/mixkit-young-woman-looking-at-camera-in-a-park-41686-large.mp4',
-      isLive: false,
-      isOnline: true,
-      followersCount: 124,
-      followingCount: 38,
-      likesCount: 512,
-      location: { lat: 39.4042, lng: 67.2431 },
-      locationVisibility: 'everyone',
-      isLocationEnabled: true
-    },
-    {
-      id: 'ALOV-002',
-      uid: 'user_nigora_002',
-      name: 'Nigora Yusupova',
-      age: 23,
-      gender: 'female',
-      region: 'Toshkent shahri',
-      district: 'Chilonzor tumani',
-      phone: '+998912345678',
-      telegram: '@nigora_yusup',
-      bio: 'Dizayner va arxitektor. Samimiy, madaniyatli va hayotga qiziqishi baland inson bilan jiddiy oila qurish niyatidaman. ✨',
-      avatar: 'https://images.unsplash.com/photo-1517841905240-472988babdf9?auto=format&fit=crop&q=80&w=600',
-      videoUrl: 'https://assets.mixkit.co/videos/preview/mixkit-girl-in-neon-sign-1232-large.mp4',
-      isLive: false,
-      isOnline: true,
-      followersCount: 230,
-      followingCount: 55,
-      likesCount: 890,
-      location: { lat: 41.2825, lng: 69.2045 },
-      locationVisibility: 'everyone',
-      isLocationEnabled: true
-    },
-    {
-      id: 'ALOV-003',
-      uid: 'user_jasur_003',
-      name: 'Jasur Rahimov',
-      age: 25,
-      gender: 'male',
-      region: 'Toshkent shahri',
-      district: 'Yunusobod tumani',
-      phone: '+998933456789',
-      telegram: '@jasur_dev',
-      bio: "IT sohasida dasturchi. Sport, kitob va sayohatlarni yaxshi ko'raman. O'ziga ishongan va hayotiy qadriyatlarga ega qiz bilan oila qurish maqsadida.",
-      avatar: 'https://images.unsplash.com/photo-1507003211169-0a1dd7228f2d?auto=format&fit=crop&q=80&w=600',
-      videoUrl: 'https://assets.mixkit.co/videos/preview/mixkit-young-man-walking-in-a-forest-41687-large.mp4',
-      isLive: false,
-      isOnline: true,
-      followersCount: 180,
-      followingCount: 42,
-      likesCount: 420,
-      location: { lat: 41.3639, lng: 69.2872 },
-      locationVisibility: 'everyone',
-      isLocationEnabled: true
-    },
-    {
-      id: 'ALOV-004',
-      uid: 'user_zuxra_004',
-      name: 'Zuxra Ahmedova',
-      age: 22,
-      gender: 'female',
-      region: "Farg'ona viloyati",
-      district: "Qo'qon shahri",
-      phone: '+998944567890',
-      telegram: '@zuxra_qoqon',
-      bio: "Tibbiyot xodimiman. Hayotda halollik, o'zaro hurmat va sadoqat eng muhim deb bilaman. Oila uchun tayyorman. 🌸",
-      avatar: 'https://images.unsplash.com/photo-1494790108377-be9c29b29330?auto=format&fit=crop&q=80&w=600',
-      videoUrl: 'https://assets.mixkit.co/videos/preview/mixkit-girl-taking-a-selfie-in-a-park-41689-large.mp4',
-      isLive: false,
-      isOnline: true,
-      followersCount: 310,
-      followingCount: 60,
-      likesCount: 1100,
-      location: { lat: 40.5342, lng: 70.9423 },
-      locationVisibility: 'everyone',
-      isLocationEnabled: true
-    },
-    {
-      id: 'ALOV-005',
-      uid: 'user_sardor_005',
-      name: 'Sardor Aliyev',
-      age: 26,
-      gender: 'male',
-      region: 'Buxoro viloyati',
-      district: 'Buxoro shahri',
-      phone: '+998955678901',
-      telegram: '@sardor_bux',
-      bio: "Tadbirkorlik bilan shug'ullanaman. Madaniyatli, oilaparvar va vafodor qiz bilan munosabat o'rnatish niyatidaman.",
-      avatar: 'https://images.unsplash.com/photo-1500648767791-00dcc994a43e?auto=format&fit=crop&q=80&w=600',
-      videoUrl: 'https://assets.mixkit.co/videos/preview/mixkit-man-dancing-under-the-rain-41690-large.mp4',
-      isLive: false,
-      isOnline: true,
-      followersCount: 195,
-      followingCount: 50,
-      likesCount: 670,
-      location: { lat: 39.7681, lng: 64.4556 },
-      locationVisibility: 'everyone',
-      isLocationEnabled: true
-    },
     {
       id: 'ALOV-006',
       uid: 'user_kamola_006',

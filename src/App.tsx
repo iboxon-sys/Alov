@@ -251,18 +251,46 @@ export default function App() {
     const socket = io(getBaseUrl());
     socketRef.current = socket;
 
-    socket.on('receive_message', (msg) => {
+    socket.on('connect', () => {
+      const myUid = currentUser?.uid || firebaseUser?.uid;
+      if (myUid) {
+        socket.emit('register_user', myUid);
+      }
+    });
+
+    socket.on('receive_message', (payload) => {
+      const msg = payload.message || payload;
+      const chatId = payload.chatId;
+      const myUid = currentUser?.uid || firebaseUser?.uid;
+
+      let partnerId = payload.senderId === myUid ? payload.recipientId : payload.senderId;
+      if (!partnerId && msg.senderId) {
+        partnerId = msg.senderId === myUid ? payload.recipientId : msg.senderId;
+      }
+      if (!partnerId && selectedChatUser) {
+        partnerId = selectedChatUser.id || selectedChatUser.uid;
+      }
+
+      if (!partnerId) return;
+
       setChatMessages(prev => {
-        if (!selectedChatUser) return prev;
-        const chatKey = selectedChatUser.id;
-        const currentMsgs = prev[chatKey] || [];
+        const currentMsgs = prev[partnerId] || [];
         if (currentMsgs.some(m => m.id === msg.id)) return prev;
+
+        const updatedMsgs = [...currentMsgs, {
+          ...msg,
+          time: msg.time || new Date(msg.createdAt || Date.now()).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+        }];
+
+        if (chatId) {
+          try {
+            localStorage.setItem('alov_msgs_' + chatId, JSON.stringify(updatedMsgs));
+          } catch (e) {}
+        }
+
         return {
           ...prev,
-          [chatKey]: [...currentMsgs, {
-            ...msg,
-            time: new Date(msg.createdAt || Date.now()).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
-          }]
+          [partnerId]: updatedMsgs
         };
       });
 
@@ -1311,18 +1339,36 @@ export default function App() {
     if (typingTimeoutRef.current) clearTimeout(typingTimeoutRef.current);
     socketRef.current?.emit('typing', { chatId, uid: myUid, isTyping: false });
 
-    // Send message via Socket.io to Render backend server
+    // Send message via Socket.io bridge
     socketRef.current?.emit('send_message', {
       chatId,
+      senderId: myUid,
+      recipientId: otherUid,
       message: msgObj
     });
 
-    // Optimistically update local chat messages
+    // Save to Firestore for permanent persistence
+    try {
+      const messagesRef = collection(db, 'chats', chatId, 'messages');
+      addDoc(messagesRef, msgObj).catch(console.warn);
+      setDoc(doc(db, 'chats', chatId), {
+        lastMessage: text,
+        lastSenderId: myUid,
+        participants: [myUid, otherUid],
+        updatedAt: serverTimestamp()
+      }, { merge: true }).catch(console.warn);
+    } catch (e) {}
+
+    // Optimistically update local chat messages & localStorage
     setChatMessages(prev => {
       const currentMsgs = prev[selectedChatUser.id] || [];
+      const updatedMsgs = [...currentMsgs, msgObj];
+      try {
+        localStorage.setItem('alov_msgs_' + chatId, JSON.stringify(updatedMsgs));
+      } catch (e) {}
       return {
         ...prev,
-        [selectedChatUser.id]: [...currentMsgs, msgObj]
+        [selectedChatUser.id]: updatedMsgs
       };
     });
 
@@ -1617,7 +1663,7 @@ export default function App() {
           </div>
         )}
 
-        {/* --- REELS / EFIRLAR TAB (Refactored) --- */}
+        {/* --- REELS / EFIRLAR TAB (Only active live streamers) --- */}
         {activeTab === 'reels' && (
           <div 
             className="absolute inset-0 z-30 bg-black flex flex-col select-none"
@@ -1636,7 +1682,42 @@ export default function App() {
             }}
           >
             {(() => {
-              const currentReelUser = usersList[currentReelIndex % usersList.length];
+              const activeLiveUsers = usersList.filter(u => u.isLive === true);
+
+              if (activeLiveUsers.length === 0) {
+                return (
+                  <div className="relative w-full h-full flex flex-col items-center justify-center p-6 text-center text-white bg-slate-950 space-y-4">
+                    <button onClick={() => setActiveTab('discover')} className="absolute top-4 left-4 p-2 rounded-full bg-black/40 backdrop-blur-md text-white">
+                      <X className="w-5 h-5" />
+                    </button>
+                    <div className="w-16 h-16 rounded-full bg-rose-600/20 border border-rose-500/40 flex items-center justify-center animate-pulse">
+                      <Radio className="w-8 h-8 text-rose-500" />
+                    </div>
+                    <div className="space-y-1">
+                      <h3 className="text-xl font-black">Hozirda jonli efirlar mavjud emas</h3>
+                      <p className="text-xs text-slate-400 max-w-xs">
+                        Faqat "Efirni boshlash" tugmasini bosgan foydalanuvchilar shu yerda ko'rinadi. Birinchi bo'lib efir boshlang! 🔴
+                      </p>
+                    </div>
+                    <button
+                      onClick={() => {
+                        if (!firebaseUser && !currentUser) {
+                          setShowAuthModal(true);
+                          return;
+                        }
+                        setLiveModalMode('broadcaster');
+                        setShowLiveModal(true);
+                      }}
+                      className="px-6 py-3.5 rounded-full bg-rose-600 hover:bg-rose-500 text-white font-bold text-xs shadow-lg shadow-rose-600/30 transition active:scale-95 flex items-center space-x-2"
+                    >
+                      <Radio className="w-4 h-4" />
+                      <span>Efirni Boshlash 🔴</span>
+                    </button>
+                  </div>
+                );
+              }
+
+              const currentReelUser = activeLiveUsers[currentReelIndex % activeLiveUsers.length];
               const comments = reelComments[currentReelUser.id] || [];
               return (
                 <div className="relative w-full h-full flex flex-col justify-between overflow-hidden">
@@ -2214,9 +2295,9 @@ export default function App() {
 
       </div>
 
-      {/* Fixed Bottom Navigation inside Mockup - Cleanly positioned with zero gap */}
+      {/* Sticky Bottom Navigation inside Mockup - Pinned permanently to bottom */}
       {activeTab !== 'reels' && !(activeTab === 'chats' && chatView === 'conversation') && (
-        <nav className="absolute bottom-0 left-0 right-0 z-40 bg-white/95 backdrop-blur-xl border-t border-[rgba(28,28,28,0.06)] px-1 py-2 flex items-center justify-around shadow-medium">
+        <nav className="sticky bottom-0 left-0 right-0 z-50 shrink-0 bg-white/95 backdrop-blur-xl border-t border-[rgba(28,28,28,0.06)] px-1 py-2.5 flex items-center justify-around shadow-medium">
           <button onClick={() => setActiveTab('discover')} className={`flex flex-col items-center p-1 ${activeTab === 'discover' ? 'text-[#E8474A] font-bold' : 'text-[#6b635c]'}`}>
             <Users className="w-4 h-4" />
             <span className="text-[9px]">Nomzodlar</span>
@@ -2344,7 +2425,7 @@ export default function App() {
               </button>
             </motion.div>
           )}
-          <div className="w-full md:w-[390px] h-screen md:h-[780px] bg-[#FAFAFB] md:rounded-[40px] md:shadow-[0_25px_60px_-15px_rgba(0,0,0,0.7)] md:border-[6px] border-slate-900 relative overflow-hidden flex flex-col">
+          <div className="w-full md:w-[390px] h-[100dvh] md:h-[780px] bg-[#FAFAFB] md:rounded-[40px] md:shadow-[0_25px_60px_-15px_rgba(0,0,0,0.7)] md:border-[6px] border-slate-900 relative overflow-hidden flex flex-col">
             {dashboardContent}
           </div>
         </div>

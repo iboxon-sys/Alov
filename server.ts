@@ -159,14 +159,29 @@ Sizning uslubingiz:
   io.on('connection', (socket) => {
     console.log('Client connected via Socket.io:', socket.id);
 
+    // Register user socket for direct personal messaging bridge
+    socket.on('register_user', (uid) => {
+      if (uid) {
+        socket.join(`user_${uid}`);
+      }
+    });
+
     socket.on('join_chat', (chatId) => {
       socket.join(chatId);
     });
 
     socket.on('send_message', async (data) => {
-      const { chatId, message } = data;
-      // Broadcast message to all clients in the chat room
-      io.to(chatId).emit('receive_message', message);
+      const { chatId, message, senderId, recipientId } = data;
+      const payload = { chatId, message, senderId, recipientId };
+
+      // Broadcast message to room and to personal user channels for guaranteed delivery
+      io.to(chatId).emit('receive_message', payload);
+      if (recipientId) {
+        io.to(`user_${recipientId}`).emit('receive_message', payload);
+      }
+      if (senderId) {
+        io.to(`user_${senderId}`).emit('receive_message', payload);
+      }
 
       // If chatting with Alov AI bot, generate response on server and emit back
       if (chatId.includes('alov_ai_bot') && message.type === 'text') {
@@ -193,7 +208,7 @@ Sizning uslubingiz:
           };
 
           setTimeout(() => {
-            io.to(chatId).emit('receive_message', aiReply);
+            io.to(chatId).emit('receive_message', { chatId, message: aiReply, senderId: 'alov_ai_bot' });
           }, 800);
         } catch (err) {
           console.error("AI socket reply error:", err);
@@ -206,10 +221,47 @@ Sizning uslubingiz:
       socket.to(chatId).emit('user_typing', { uid, isTyping });
     });
 
-    // WebRTC Signaling for Audio Rooms
+    // --- ISOLATED LIVE STREAM CHAT & WEBRTC SIGNALING ---
+    socket.on('join_live_stream', ({ streamId, user }) => {
+      socket.join(`live_stream_${streamId}`);
+      socket.to(`live_stream_${streamId}`).emit('viewer_joined_stream', {
+        socketId: socket.id,
+        user
+      });
+    });
+
+    socket.on('send_live_chat_message', ({ streamId, message }) => {
+      // Broadcast chat message strictly to this stream room only
+      io.to(`live_stream_${streamId}`).emit('receive_live_chat_message', message);
+    });
+
+    socket.on('live_stream_offer', ({ streamId, targetSocketId, offer, sender }) => {
+      io.to(targetSocketId).emit('live_stream_offer', {
+        senderSocketId: socket.id,
+        offer,
+        sender
+      });
+    });
+
+    socket.on('live_stream_answer', ({ streamId, targetSocketId, answer, sender }) => {
+      io.to(targetSocketId).emit('live_stream_answer', {
+        senderSocketId: socket.id,
+        answer,
+        sender
+      });
+    });
+
+    socket.on('live_stream_ice_candidate', ({ streamId, targetSocketId, candidate, sender }) => {
+      io.to(targetSocketId).emit('live_stream_ice_candidate', {
+        senderSocketId: socket.id,
+        candidate,
+        sender
+      });
+    });
+
+    // --- WebRTC Signaling for Audio Rooms ---
     socket.on('join_audio_room', ({ roomCode, user }) => {
       socket.join(roomCode);
-      // Inform existing users in room about new peer
       socket.to(roomCode).emit('user_joined_audio', {
         socketId: socket.id,
         user

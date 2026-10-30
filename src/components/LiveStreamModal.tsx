@@ -99,18 +99,27 @@ export const LiveStreamModal: React.FC<LiveStreamModalProps> = ({
     setPermissionError(null);
     try {
       if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-        throw new Error("Qurilmangiz kamera va mikrofondan foydalanishni qo'llab-quvvatlamaydi.");
+        throw new Error("Brauzeringiz kamera va mikrofondan foydalanishni (getUserMedia) qo'llab-quvvatlamaydi. HTTPS yoki havfsiz ulanishni tekshiring.");
       }
 
-      // Request Camera and Microphone permission
-      const stream = await navigator.mediaDevices.getUserMedia({
-        video: {
-          facingMode: facingMode,
-          width: { ideal: 1280 },
-          height: { ideal: 720 }
-        },
-        audio: true
-      });
+      let stream: MediaStream;
+      try {
+        // Try high quality camera + mic
+        stream = await navigator.mediaDevices.getUserMedia({
+          video: { facingMode: facingMode, width: { ideal: 1280 }, height: { ideal: 720 } },
+          audio: true
+        });
+      } catch (firstErr: any) {
+        console.warn("Primary getUserMedia failed, trying basic constraints:", firstErr);
+        try {
+          // Fallback to basic video + audio
+          stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+        } catch (secondErr: any) {
+          console.warn("Basic video+audio failed, trying audio-only fallback:", secondErr);
+          // Fallback to audio-only stream
+          stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        }
+      }
 
       localStreamRef.current = stream;
       if (localVideoRef.current) {
@@ -130,9 +139,11 @@ export const LiveStreamModal: React.FC<LiveStreamModalProps> = ({
     } catch (err: any) {
       console.error("Camera/Mic Permission Error:", err);
       if (err.name === 'NotAllowedError' || err.name === 'PermissionDeniedError') {
-        setPermissionError("Kamera yoki mikrofonga ruxsat berilmadi. Iltimos, brauzer sozlamalaridan kamera va mikrofonga ruxsat bering!");
+        setPermissionError("Kamera yoki mikrofonga ruxsat berilmadi. Iltimos, brauzer/telefon sozlamalaridan ruxsat bering!");
       } else if (err.name === 'NotFoundError' || err.name === 'DevicesNotFoundError') {
         setPermissionError("Qurilmadagi kamera yoki mikrofon topilmadi.");
+      } else if (err.name === 'NotReadableError' || err.name === 'TrackStartError') {
+        setPermissionError("Kameradan foydalanib bo'lmadi. Kamera boshqa dastur tomonidan band bo'lishi mumkin.");
       } else {
         setPermissionError(err.message || "Jonli efirni boshlashda kutilmagan xatolik yuz berdi.");
       }

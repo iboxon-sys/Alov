@@ -1,44 +1,44 @@
 import React, { useState, useEffect } from 'react';
-import { db, collection, onSnapshot } from '../firebase';
 import { Users, Heart } from 'lucide-react';
+import { getApiUrl, getBaseUrl } from '../config/api';
+import { io } from 'socket.io-client';
 
 export const GenderStatsBar: React.FC = () => {
   const [malePercent, setMalePercent] = useState<number>(50);
   const [femalePercent, setFemalePercent] = useState<number>(50);
   const [totalCount, setTotalCount] = useState<number>(0);
 
-  useEffect(() => {
-    const unsub = onSnapshot(collection(db, 'users'), (snapshot) => {
-      let male = 0;
-      let female = 0;
-      snapshot.forEach(doc => {
-        const data = doc.data();
-        if (data.gender === 'male') {
-          male++;
-        } else if (data.gender === 'female') {
-          female++;
-        }
-      });
-
-      const total = male + female;
-      setTotalCount(snapshot.size);
-
-      if (total > 0) {
-        const mPercent = Math.round((male / total) * 100);
-        setMalePercent(mPercent);
-        setFemalePercent(100 - mPercent);
-      } else {
-        setMalePercent(50);
-        setFemalePercent(50);
+  const fetchStats = async () => {
+    try {
+      const res = await fetch(getApiUrl('/api/stats/gender'));
+      const data = await res.json();
+      if (data.success) {
+        setMalePercent(data.malePercent ?? 50);
+        setFemalePercent(data.femalePercent ?? 50);
+        setTotalCount(data.totalUsers ?? 0);
       }
-    }, (err) => {
-      console.warn("Gender stats listener offline mode:", err);
-      setMalePercent(50);
-      setFemalePercent(50);
-      setTotalCount(0);
+    } catch (err) {
+      console.warn("Gender stats fetch offline mode:", err);
+    }
+  };
+
+  useEffect(() => {
+    fetchStats();
+
+    const socket = io(getBaseUrl());
+    socket.on('active_users_count', (payload: { count: number }) => {
+      if (payload && payload.count !== undefined) {
+        setTotalCount(prev => Math.max(prev, payload.count));
+      }
     });
 
-    return () => unsub();
+    socket.on('user_updated', () => {
+      fetchStats();
+    });
+
+    return () => {
+      socket.disconnect();
+    };
   }, []);
 
   return (

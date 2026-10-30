@@ -1,18 +1,9 @@
 /**
  * WebRTC Signaling & Connection Service for Alov.uz Live Streaming
- * Uses Firebase Firestore for real-time SDP & ICE candidate exchange.
+ * Uses Render Server Socket.io for real-time SDP & ICE candidate exchange (Zero Firestore).
  */
-import { 
-  db, 
-  doc, 
-  setDoc, 
-  getDoc, 
-  collection, 
-  onSnapshot, 
-  addDoc, 
-  serverTimestamp,
-  deleteDoc
-} from '../firebase';
+import { getApiUrl, getBaseUrl } from '../config/api';
+import { io, Socket } from 'socket.io-client';
 
 const ICE_SERVERS: RTCConfiguration = {
   iceServers: [
@@ -32,7 +23,7 @@ export interface LiveStreamData {
   title: string;
   status: 'active' | 'ended';
   viewerCount: number;
-  createdAt?: any;
+  createdAt?: string;
 }
 
 export interface LiveChatMessage {
@@ -41,7 +32,7 @@ export interface LiveChatMessage {
   senderName: string;
   senderAvatar?: string;
   text: string;
-  createdAt?: any;
+  createdAt?: string;
 }
 
 /**
@@ -49,26 +40,21 @@ export interface LiveChatMessage {
  */
 export async function createLiveStream(hostUser: { uid: string; name: string; avatar?: string }, title: string): Promise<string> {
   const streamId = 'stream_' + hostUser.uid + '_' + Date.now();
-  const streamRef = doc(db, 'live_streams', streamId);
-
-  await setDoc(streamRef, {
-    streamId,
-    hostUid: hostUser.uid,
-    hostName: hostUser.name || 'Alov Strimer',
-    hostAvatar: hostUser.avatar || '',
-    title: title || "Jonli Efir",
-    status: 'active',
-    viewerCount: 1,
-    createdAt: serverTimestamp()
-  });
-
-  // Update host user doc to indicate live status for map & profile
-  await setDoc(doc(db, 'users', hostUser.uid), {
-    isLive: true,
-    liveStreamId: streamId,
-    liveTitle: title || "Jonli Efir"
-  }, { merge: true });
-
+  try {
+    await fetch(getApiUrl('/api/live-streams/start'), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        streamId,
+        hostUid: hostUser.uid,
+        hostName: hostUser.name || 'Alov Strimer',
+        hostAvatar: hostUser.avatar || '',
+        title: title || 'Jonli Efir'
+      })
+    });
+  } catch (err) {
+    console.error("Error creating live stream:", err);
+  }
   return streamId;
 }
 
@@ -77,89 +63,73 @@ export async function createLiveStream(hostUser: { uid: string; name: string; av
  */
 export async function stopLiveStream(streamId: string, hostUid: string) {
   try {
-    const streamRef = doc(db, 'live_streams', streamId);
-    await setDoc(streamRef, {
-      status: 'ended',
-      endedAt: serverTimestamp()
-    }, { merge: true });
-
-    await setDoc(doc(db, 'users', hostUid), {
-      isLive: false,
-      liveStreamId: null,
-      liveTitle: null
-    }, { merge: true });
+    await fetch(getApiUrl('/api/live-streams/stop'), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ streamId, hostUid })
+    });
   } catch (err) {
     console.error("Error stopping live stream:", err);
   }
 }
 
 /**
- * Host WebRTC Manager: Listens for incoming viewers and sends local media tracks
+ * Host WebRTC Manager: Listens for incoming viewers via Socket.io and streams video/audio
  */
 export class BroadcasterSignaling {
   private streamId: string;
   private localStream: MediaStream;
   private peerConnections: Map<string, RTCPeerConnection> = new Map();
-  private unsubViewers: (() => void) | null = null;
+  private socket: Socket;
 
-  constructor(streamId: string, localStream: MediaStream) {
+  constructor(streamId: string, localStream: MediaStream, socket?: Socket) {
     this.streamId = streamId;
     this.localStream = localStream;
+    this.socket = socket || io(getBaseUrl());
   }
 
   public startListening() {
-    const viewersCol = collection(db, 'live_streams', this.streamId, 'viewers');
+    this.socket.emit('join_live_stream', { streamId: this.streamId, user: { role: 'host' } });
 
-    this.unsubViewers = onSnapshot(viewersCol, (snapshot) => {
-      snapshot.docChanges().forEach(async (change) => {
-        const viewerId = change.doc.id;
-        const data = change.doc.data();
+    // When viewer joins and sends offer
+    this.socket.on('live_stream_offer', async ({ senderSocketId, offer, sender }: any) => {
+      await this.handleViewerOffer(senderSocketId, offer, sender);
+    });
 
-        if (change.type === 'added' || change.type === 'modified') {
-          // New viewer sent an offer
-          if (data.offer && !data.answer && !this.peerConnections.has(viewerId)) {
-            await this.handleViewerOffer(viewerId, data.offer);
-          }
-        } else if (change.type === 'removed') {
-          // Viewer disconnected
-          const pc = this.peerConnections.get(viewerId);
-          if (pc) {
-            pc.close();
-            this.peerConnections.delete(viewerId);
-          }
+    // When viewer sends ICE candidate
+    this.socket.on('live_stream_ice_candidate', async ({ senderSocketId, candidate }: any) => {
+      const pc = this.peerConnections.get(senderSocketId);
+      if (pc && candidate) {
+        try {
+          await pc.addIceCandidate(new RTCIceCandidate(candidate));
+        } catch (e) {
+          console.warn("Error adding viewer ice candidate:", e);
         }
-      });
+      }
     });
   }
 
-  private async handleViewerOffer(viewerId: string, offer: RTCSessionDescriptionInit) {
+  private async handleViewerOffer(viewerSocketId: string, offer: RTCSessionDescriptionInit, _sender: any) {
     try {
       const pc = new RTCPeerConnection(ICE_SERVERS);
-      this.peerConnections.set(viewerId, pc);
+      this.peerConnections.set(viewerSocketId, pc);
 
       // Add local media tracks to peer connection
       this.localStream.getTracks().forEach((track) => {
         pc.addTrack(track, this.localStream);
       });
 
-      // Handle ICE Candidates from host to viewer
+      // Handle ICE Candidates from host to viewer via Socket.io
       pc.onicecandidate = (event) => {
         if (event.candidate) {
-          const candCol = collection(db, 'live_streams', this.streamId, 'viewers', viewerId, 'hostCandidates');
-          addDoc(candCol, event.candidate.toJSON()).catch(console.error);
+          this.socket.emit('live_stream_ice_candidate', {
+            streamId: this.streamId,
+            targetSocketId: viewerSocketId,
+            candidate: event.candidate.toJSON(),
+            sender: { role: 'host' }
+          });
         }
       };
-
-      // Listen for viewer's ICE candidates
-      const viewerCandCol = collection(db, 'live_streams', this.streamId, 'viewers', viewerId, 'viewerCandidates');
-      onSnapshot(viewerCandCol, (candSnap) => {
-        candSnap.docChanges().forEach((cChange) => {
-          if (cChange.type === 'added') {
-            const candidateData = cChange.doc.data();
-            pc.addIceCandidate(new RTCIceCandidate(candidateData)).catch(console.error);
-          }
-        });
-      });
 
       // Set remote offer from viewer
       await pc.setRemoteDescription(new RTCSessionDescription(offer));
@@ -168,52 +138,51 @@ export class BroadcasterSignaling {
       const answer = await pc.createAnswer();
       await pc.setLocalDescription(answer);
 
-      // Save answer to viewer document
-      const viewerDocRef = doc(db, 'live_streams', this.streamId, 'viewers', viewerId);
-      await setDoc(viewerDocRef, {
+      // Send answer back to viewer via Socket.io
+      this.socket.emit('live_stream_answer', {
+        streamId: this.streamId,
+        targetSocketId: viewerSocketId,
         answer: {
           type: answer.type,
           sdp: answer.sdp
-        }
-      }, { merge: true });
-
+        },
+        sender: { role: 'host' }
+      });
     } catch (err) {
-      console.error(`Error answering viewer ${viewerId}:`, err);
+      console.error(`Error answering viewer ${viewerSocketId}:`, err);
     }
   }
 
   public destroy() {
-    if (this.unsubViewers) {
-      this.unsubViewers();
-      this.unsubViewers = null;
-    }
+    this.socket.emit('leave_live_stream', { streamId: this.streamId });
     this.peerConnections.forEach((pc) => pc.close());
     this.peerConnections.clear();
   }
 }
 
 /**
- * Viewer WebRTC Manager: Sends offer to host and listens for remote stream
+ * Viewer WebRTC Manager: Sends offer to host via Socket.io and receives video/audio
  */
 export class ViewerSignaling {
   private streamId: string;
   private viewerId: string;
   private viewerInfo: { name: string; avatar?: string };
   private pc: RTCPeerConnection | null = null;
-  private unsubDoc: (() => void) | null = null;
-  private unsubCandidates: (() => void) | null = null;
+  private socket: Socket;
   private onRemoteStreamCb: (stream: MediaStream) => void;
 
   constructor(
     streamId: string, 
     viewerId: string, 
     viewerInfo: { name: string; avatar?: string },
-    onRemoteStream: (stream: MediaStream) => void
+    onRemoteStream: (stream: MediaStream) => void,
+    socket?: Socket
   ) {
     this.streamId = streamId;
     this.viewerId = viewerId;
     this.viewerInfo = viewerInfo;
     this.onRemoteStreamCb = onRemoteStream;
+    this.socket = socket || io(getBaseUrl());
   }
 
   public async connect() {
@@ -230,66 +199,63 @@ export class ViewerSignaling {
       }
     };
 
-    // Save viewer ICE candidates to Firestore
+    // Forward viewer ICE candidates to host via Socket.io
     this.pc.onicecandidate = (event) => {
       if (event.candidate) {
-        const candCol = collection(db, 'live_streams', this.streamId, 'viewers', this.viewerId, 'viewerCandidates');
-        addDoc(candCol, event.candidate.toJSON()).catch(console.error);
+        this.socket.emit('live_stream_ice_candidate', {
+          streamId: this.streamId,
+          targetSocketId: 'host',
+          candidate: event.candidate.toJSON(),
+          sender: { viewerId: this.viewerId, ...this.viewerInfo }
+        });
       }
     };
+
+    // Join room on Socket.io
+    this.socket.emit('join_live_stream', {
+      streamId: this.streamId,
+      user: { viewerId: this.viewerId, ...this.viewerInfo }
+    });
+
+    // Listen for Host answer
+    this.socket.on('live_stream_answer', async ({ answer }: any) => {
+      if (answer && this.pc && !this.pc.currentRemoteDescription) {
+        await this.pc.setRemoteDescription(new RTCSessionDescription(answer));
+      }
+    });
+
+    // Listen for Host ICE Candidates
+    this.socket.on('live_stream_ice_candidate', async ({ candidate }: any) => {
+      if (candidate && this.pc) {
+        try {
+          await this.pc.addIceCandidate(new RTCIceCandidate(candidate));
+        } catch (e) {
+          console.warn("Error adding host ice candidate:", e);
+        }
+      }
+    });
 
     // Create SDP Offer
     const offer = await this.pc.createOffer();
     await this.pc.setLocalDescription(offer);
 
-    // Write viewer offer to Firestore
-    const viewerDocRef = doc(db, 'live_streams', this.streamId, 'viewers', this.viewerId);
-    await setDoc(viewerDocRef, {
+    // Send offer to host via Socket.io
+    this.socket.emit('live_stream_offer', {
+      streamId: this.streamId,
+      targetSocketId: 'host',
       offer: {
         type: offer.type,
         sdp: offer.sdp
       },
-      viewerName: this.viewerInfo.name || 'Tomoshabin',
-      viewerAvatar: this.viewerInfo.avatar || '',
-      joinedAt: serverTimestamp()
-    });
-
-    // Listen for Host answer
-    this.unsubDoc = onSnapshot(viewerDocRef, async (snap) => {
-      const data = snap.data();
-      if (data?.answer && this.pc && !this.pc.currentRemoteDescription) {
-        await this.pc.setRemoteDescription(new RTCSessionDescription(data.answer));
-      }
-    });
-
-    // Listen for Host ICE Candidates
-    const hostCandCol = collection(db, 'live_streams', this.streamId, 'viewers', this.viewerId, 'hostCandidates');
-    this.unsubCandidates = onSnapshot(hostCandCol, (snapshot) => {
-      snapshot.docChanges().forEach((change) => {
-        if (change.type === 'added') {
-          const cand = change.doc.data();
-          if (this.pc) {
-            this.pc.addIceCandidate(new RTCIceCandidate(cand)).catch(console.error);
-          }
-        }
-      });
+      sender: { viewerId: this.viewerId, ...this.viewerInfo }
     });
   }
 
   public destroy() {
-    if (this.unsubDoc) {
-      this.unsubDoc();
-      this.unsubDoc = null;
-    }
-    if (this.unsubCandidates) {
-      this.unsubCandidates();
-      this.unsubCandidates = null;
-    }
+    this.socket.emit('leave_live_stream', { streamId: this.streamId });
     if (this.pc) {
       this.pc.close();
       this.pc = null;
     }
-    // Clean up viewer document
-    deleteDoc(doc(db, 'live_streams', this.streamId, 'viewers', this.viewerId)).catch(() => {});
   }
 }

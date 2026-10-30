@@ -19,11 +19,9 @@ import { AudioRoomModal } from './components/AudioRoomModal';
 import { VideoPlayer, VoiceMessage } from './components/ChatMedia';
 import { CandidateSkeleton, ChatSkeleton } from './components/Skeleton';
 import { 
-  auth, db, storage, googleProvider, GoogleAuthProvider, serverTimestamp,
+  auth, googleProvider, GoogleAuthProvider,
   signInWithPopup, signInWithRedirect, getRedirectResult, signOut, onAuthStateChanged, 
-  doc, setDoc, getDoc, collection, getDocs, onSnapshot, setPersistence, browserLocalPersistence, User,
-  addDoc, query, orderBy, limit, where, updateDoc,
-  ref, uploadBytesResumable, getDownloadURL
+  setPersistence, browserLocalPersistence, User
 } from './firebase';
 import { getApiUrl, getBaseUrl } from './config/api';
 import { io, Socket } from 'socket.io-client';
@@ -301,6 +299,33 @@ export default function App() {
         };
       });
 
+      // Update chatsList so this chat never disappears
+      if (chatId) {
+        setChatsList(prev => {
+          const existingIdx = prev.findIndex(c => c.id === chatId);
+          let updated = [...prev];
+          const lastMsg = msg.text || (msg.type === 'image' ? 'Rasm 🖼️' : 'Xabar');
+          if (existingIdx > -1) {
+            const item = { ...updated[existingIdx], lastMessage: lastMsg, updatedAt: msg.createdAt || new Date().toISOString() };
+            updated.splice(existingIdx, 1);
+            updated.unshift(item);
+          } else {
+            updated.unshift({
+              id: chatId,
+              participants: [myUid, partnerId].filter(Boolean),
+              lastMessage: lastMsg,
+              updatedAt: msg.createdAt || new Date().toISOString()
+            });
+          }
+          if (myUid) {
+            try {
+              localStorage.setItem('alov_chats_' + myUid, JSON.stringify(updated));
+            } catch (e) {}
+          }
+          return updated;
+        });
+      }
+
       if (msg.senderId === ALOV_AI_USER.uid) {
         setIsAiTyping(false);
       }
@@ -359,46 +384,23 @@ export default function App() {
     return () => clearTimeout(timeout);
   }, []);
 
-  // Foydalanuvchi hisobini Firestore va Lokal kesh bilan sinxronizatsiya qilish (Upsert)
-  const syncUserWithFirestore = async (user: User) => {
+  // Foydalanuvchi hisobini Render server va Lokal kesh bilan sinxronizatsiya qilish (Zero Firestore)
+  const syncUserWithBackend = async (user: User) => {
     try {
-      const userRef = doc(db, 'users', user.uid);
       let userData: any = null;
 
-      // 1. Avval Firestore bazasidan UID orqali tekshirish
+      // 1. Ushbu qurilmaning Lokal keshidan qidirish (eski profilni tiklash)
       try {
-        const userSnap = await getDoc(userRef);
-        if (userSnap.exists()) {
-          userData = { ...userSnap.data(), uid: user.uid, status: 'online' };
+        const cached = localStorage.getItem('alov_user_' + user.uid);
+        if (cached) {
+          userData = JSON.parse(cached);
+          userData.status = 'online';
+          userData.uid = user.uid;
         }
-      } catch (dbErr: any) {
-        console.warn("Firestore getDoc warning:", dbErr);
-      }
+      } catch (e) {}
 
-      // 2. Agar Firestore'da topilmasa, ushbu qurilmaning Lokal keshidan qidirish (eski profilni tiklash)
+      // 2. Agar profil mavjud bo'lmasa, yangi profil obyektini shakllantirish
       if (!userData) {
-        try {
-          const cached = localStorage.getItem('alov_user_' + user.uid);
-          if (cached) {
-            userData = JSON.parse(cached);
-            userData.status = 'online';
-            userData.uid = user.uid;
-          }
-        } catch (e) {}
-      }
-
-      // 3. Agar MAVJUD AKKAUNT topilsa (Firestore yoki Lokal keshda):
-      if (userData) {
-        // Profilni o'zgartirmasdan saqlab qolish va faqat onlayn statusini yangilash
-        try {
-          await setDoc(userRef, { 
-            status: 'online', 
-            lastSeen: serverTimestamp(),
-            uid: user.uid 
-          }, { merge: true });
-        } catch (e) {}
-      } else {
-        // 4. YANGI FOYDALANUVCHI: Faqat biror joyda profil topilmagandagina yangi profil yaratish
         userData = {
           uid: user.uid,
           id: `ALOV-${user.uid.slice(0, 5).toUpperCase()}`,
@@ -412,18 +414,28 @@ export default function App() {
           district: 'Yunusobod tumani',
           bio: 'Alov.uz da yangi tanishuvlar va suhbatlar uchun.',
           status: 'online',
-          lastSeen: serverTimestamp(),
-          createdAt: serverTimestamp(),
           isLocationEnabled: true,
           locationVisibility: 'everyone',
           location: { lat: 41.3111, lng: 69.2797 }
         };
-        try {
-          await setDoc(userRef, userData);
-        } catch (e) {}
       }
 
-      // Har doim lokal keshni yangilab qo'yish (kelajakda qayta kirish uchun)
+      // 3. Render serveriga sinxronizatsiya qilish
+      try {
+        const res = await fetch(getApiUrl('/api/users/sync'), {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ user: userData })
+        });
+        const data = await res.json();
+        if (data.success && data.user) {
+          userData = data.user;
+        }
+      } catch (e) {
+        console.warn("Backend user sync offline fallback:", e);
+      }
+
+      // Har doim lokal keshni yangilab qo'yish
       try {
         localStorage.setItem('alov_user_' + user.uid, JSON.stringify(userData));
       } catch (e) {}
@@ -441,11 +453,11 @@ export default function App() {
       setRegLocationVisibility(userData.locationVisibility || 'everyone');
       setIsLocationEnabled(userData.isLocationEnabled !== false);
 
-      setShowAuthModal(false); // Modalni yopish
+      setShowAuthModal(false);
       setActiveTab(prev => (prev === 'landing' ? 'discover' : prev));
       return userData;
     } catch (err: any) {
-      console.error("Firestore user sync error:", err);
+      console.error("User sync error:", err);
     } finally {
       setIsAuthChecking(false);
     }
@@ -456,7 +468,7 @@ export default function App() {
     getRedirectResult(auth)
       .then(async (result) => {
         if (result?.user) {
-          await syncUserWithFirestore(result.user);
+          await syncUserWithBackend(result.user);
           setShowAuthModal(false);
           setActiveTab('discover');
         }
@@ -469,28 +481,23 @@ export default function App() {
       });
   }, []);
 
-  // Synchronize Auth State & Firestore User Profile
-  useEffect(() => {
-    if (commentsEndRef.current) {
-        commentsEndRef.current.scrollIntoView({ behavior: 'smooth' });
-    }
-  }, [reelComments]);
-
   // Synchronize Auth State & Real-time Presence
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, async (user) => {
       try {
         setFirebaseUser(user);
         if (user) {
-          await syncUserWithFirestore(user);
+          await syncUserWithBackend(user);
           
-          // Update to offline when closing tab
+          // Update status on beforeunload via sendBeacon / fetch keepalive
           const handleOffline = () => {
             if (auth.currentUser) {
-              setDoc(doc(db, 'users', auth.currentUser.uid), { 
-                status: 'offline', 
-                lastSeen: serverTimestamp() 
-              }, { merge: true });
+              fetch(getApiUrl('/api/users/update'), {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ uid: auth.currentUser.uid, updates: { status: 'offline' } }),
+                keepalive: true
+              }).catch(() => {});
             }
           };
           window.addEventListener('beforeunload', handleOffline);
@@ -510,26 +517,85 @@ export default function App() {
     return () => unsubscribe();
   }, []);
 
-  // Real-time Firestore users listener (Production optimized)
+  // Real-time users loader from Render server & Socket.io (Zero Firestore)
   useEffect(() => {
-    const unsub = onSnapshot(collection(db, 'users'), (snapshot) => {
-      const fetchedUsers: any[] = [];
-      snapshot.forEach(docSnap => {
-        const data = docSnap.data();
-        const docUid = docSnap.id;
-        fetchedUsers.push({
-          ...data,
-          uid: data.uid || docUid,
-          id: data.id || `ALOV-${docUid.slice(0, 5).toUpperCase()}`
-        });
+    const fetchUsers = async () => {
+      try {
+        const res = await fetch(getApiUrl('/api/users'));
+        const data = await res.json();
+        if (data.success && Array.isArray(data.users)) {
+          setUsersList(data.users);
+          setIsLoadingCandidates(false);
+        }
+      } catch (err) {
+        console.warn("Could not fetch users from server:", err);
+        setIsLoadingCandidates(false);
+      }
+    };
+    fetchUsers();
+
+    const socket = io(getBaseUrl());
+    socket.on('user_updated', (updatedUser: any) => {
+      setUsersList(prev => {
+        const userMap = new Map<string, any>();
+        prev.forEach(u => userMap.set(u.uid || u.id, u));
+        userMap.set(updatedUser.uid || updatedUser.id, updatedUser);
+        return Array.from(userMap.values());
       });
-      setUsersList(fetchedUsers);
-      setIsLoadingCandidates(false);
-    }, (err) => {
-      console.warn("Firestore snapshot listener error:", err);
-      setIsLoadingCandidates(false);
     });
-    return () => unsub();
+
+    socket.on('stream_started', (streamData: any) => {
+      setUsersList(prev => prev.map(u => {
+        if (u.uid === streamData.hostUid) {
+          return { ...u, isLive: true, liveStreamId: streamData.id, liveTitle: streamData.title };
+        }
+        return u;
+      }));
+    });
+
+    socket.on('stream_stopped', ({ hostUid }: { hostUid: string }) => {
+      setUsersList(prev => prev.map(u => {
+        if (u.uid === hostUid) {
+          return { ...u, isLive: false, liveStreamId: null, liveTitle: null };
+        }
+        return u;
+      }));
+    });
+
+    return () => {
+      socket.disconnect();
+    };
+  }, []);
+
+  // Load real active audio party rooms from Render server (Zero mock rooms)
+  useEffect(() => {
+    const fetchRooms = async () => {
+      try {
+        const res = await fetch(getApiUrl('/api/audio-rooms'));
+        const data = await res.json();
+        if (data.success && Array.isArray(data.rooms)) {
+          setRoomList(data.rooms);
+        }
+      } catch (err) {
+        console.warn("Could not fetch audio rooms:", err);
+      }
+    };
+    fetchRooms();
+
+    const socket = io(getBaseUrl());
+    socket.on('audio_room_created', (newRoom: any) => {
+      setRoomList(prev => [...prev.filter(r => r.code !== newRoom.code), newRoom]);
+    });
+    socket.on('audio_room_deleted', ({ roomCode }: { roomCode: string }) => {
+      setRoomList(prev => prev.filter(r => r.code !== roomCode));
+    });
+    socket.on('audio_room_closed', ({ roomCode }: { roomCode: string }) => {
+      setRoomList(prev => prev.filter(r => r.code !== roomCode));
+    });
+
+    return () => {
+      socket.disconnect();
+    };
   }, []);
 
   // Load active 1-on-1 chats from Render API & localStorage (No Firestore)
@@ -642,12 +708,18 @@ export default function App() {
           setIsLocationEnabled(true);
           setGpsStatusMsg('');
           if (firebaseUser) {
-            setDoc(doc(db, 'users', firebaseUser.uid), { 
-              location: coords,
-              isLocationEnabled: true,
-              isOnline: true,
-              lastSeen: serverTimestamp()
-            }, { merge: true }).catch(() => {});
+            fetch(getApiUrl('/api/users/update'), {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                uid: firebaseUser.uid,
+                updates: {
+                  location: coords,
+                  isLocationEnabled: true,
+                  isOnline: true
+                }
+              })
+            }).catch(() => {});
           }
         },
         (err) => {
@@ -667,12 +739,18 @@ export default function App() {
           setUserCoords(coords);
           setIsLocationEnabled(true);
           if (firebaseUser) {
-            setDoc(doc(db, 'users', firebaseUser.uid), { 
-              location: coords,
-              isLocationEnabled: true,
-              isOnline: true,
-              lastSeen: serverTimestamp()
-            }, { merge: true }).catch(() => {});
+            fetch(getApiUrl('/api/users/update'), {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                uid: firebaseUser.uid,
+                updates: {
+                  location: coords,
+                  isLocationEnabled: true,
+                  isOnline: true
+                }
+              })
+            }).catch(() => {});
           }
         },
         (err) => {
@@ -798,34 +876,6 @@ export default function App() {
     }
   }, [activeTab, activeRouteUser, userCoords]);
 
-  // Real-time Firestore users listener
-  useEffect(() => {
-    const unsub = onSnapshot(collection(db, 'users'), (snapshot) => {
-      const fetchedUsers: any[] = [];
-      snapshot.forEach(docSnap => {
-        const data = docSnap.data();
-        const docUid = docSnap.id;
-        fetchedUsers.push({
-          ...data,
-          uid: data.uid || docUid,
-          id: data.id || `ALOV-${docUid.slice(0, 5).toUpperCase()}`
-        });
-      });
-      if (fetchedUsers.length > 0) {
-        setUsersList(() => {
-          const userMap = new Map<string, any>();
-          fetchedUsers.forEach(u => {
-            const key = u.uid || u.id;
-            userMap.set(key, u);
-          });
-          return Array.from(userMap.values());
-        });
-      }
-    }, (err) => {
-      console.warn("Firestore snapshot listener error:", err);
-    });
-    return () => unsub();
-  }, [firebaseUser]);
 
   // Real-time Leaflet Map Marker Sync Effect (Flicker-free Optimization)
   useEffect(() => {
@@ -1015,13 +1065,20 @@ export default function App() {
 
           if (firebaseUser) {
             try {
-              await setDoc(doc(db, 'users', firebaseUser.uid), {
-                isLocationEnabled: true,
-                locationVisibility: regLocationVisibility,
-                location: newCoords
-              }, { merge: true });
+              await fetch(getApiUrl('/api/users/update'), {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                  uid: firebaseUser.uid,
+                  updates: {
+                    isLocationEnabled: true,
+                    locationVisibility: regLocationVisibility,
+                    location: newCoords
+                  }
+                })
+              });
             } catch (e) {
-              console.error("Firestore location update error:", e);
+              console.error("Backend location update error:", e);
             }
           }
 
@@ -1039,11 +1096,18 @@ export default function App() {
               setUserCoords(updatedCoords);
               if (firebaseUser) {
                 try {
-                  await setDoc(doc(db, 'users', firebaseUser.uid), {
-                    isLocationEnabled: true,
-                    locationVisibility: regLocationVisibility,
-                    location: updatedCoords
-                  }, { merge: true });
+                  await fetch(getApiUrl('/api/users/update'), {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                      uid: firebaseUser.uid,
+                      updates: {
+                        isLocationEnabled: true,
+                        locationVisibility: regLocationVisibility,
+                        location: updatedCoords
+                      }
+                    })
+                  });
                 } catch (e) {
                   console.error("Watch update error:", e);
                 }
@@ -1060,7 +1124,14 @@ export default function App() {
           setIsLocationEnabled(false);
           setGpsStatusMsg(errMsg);
           if (firebaseUser) {
-            setDoc(doc(db, 'users', firebaseUser.uid), { isLocationEnabled: false }, { merge: true }).catch(() => {});
+            fetch(getApiUrl('/api/users/update'), {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                uid: firebaseUser.uid,
+                updates: { isLocationEnabled: false }
+              })
+            }).catch(() => {});
           }
         },
         GPS_OPTIONS
@@ -1073,9 +1144,14 @@ export default function App() {
       setIsLocationEnabled(false);
       if (firebaseUser) {
         try {
-          await setDoc(doc(db, 'users', firebaseUser.uid), {
-            isLocationEnabled: false
-          }, { merge: true });
+          await fetch(getApiUrl('/api/users/update'), {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              uid: firebaseUser.uid,
+              updates: { isLocationEnabled: false }
+            })
+          });
         } catch (e) {
           console.error("Error disabling location:", e);
         }
@@ -1110,7 +1186,6 @@ export default function App() {
       }
     }
     try {
-      const userRef = doc(db, 'users', firebaseUser.uid);
       const newUserData = {
         ...currentUser,
         id: currentUser?.id || `ALOV-${firebaseUser.uid.slice(0, 5).toUpperCase()}`,
@@ -1135,15 +1210,24 @@ export default function App() {
         locationVisibility: regLocationVisibility,
         location: userCoords
       };
-      await setDoc(userRef, newUserData, { merge: true });
+
+      const res = await fetch(getApiUrl('/api/users/sync'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ user: newUserData })
+      });
+      const data = await res.json();
+      const savedUser = (data.success && data.user) ? data.user : newUserData;
+
       try {
-        localStorage.setItem('alov_user_' + firebaseUser.uid, JSON.stringify(newUserData));
+        localStorage.setItem('alov_user_' + firebaseUser.uid, JSON.stringify(savedUser));
       } catch (e) {}
-      setCurrentUser(newUserData);
+
+      setCurrentUser(savedUser);
       setUsersList(prev => {
         const userMap = new Map<string, any>();
         prev.forEach(u => userMap.set(u.uid || u.id, u));
-        userMap.set(firebaseUser.uid, newUserData);
+        userMap.set(firebaseUser.uid, savedUser);
         return Array.from(userMap.values());
       });
       setShowProfileModal(false);
@@ -1156,9 +1240,14 @@ export default function App() {
   const handleLocationVisibilityChange = (value: 'everyone' | 'mutual' | 'ghost') => {
     setRegLocationVisibility(value);
     if (firebaseUser) {
-      setDoc(doc(db, 'users', firebaseUser.uid), {
-        locationVisibility: value
-      }, { merge: true }).catch(console.error);
+      fetch(getApiUrl('/api/users/update'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          uid: firebaseUser.uid,
+          updates: { locationVisibility: value }
+        })
+      }).catch(console.error);
     }
   };
 
@@ -1173,7 +1262,7 @@ export default function App() {
       try {
         const result = await signInWithPopup(auth, provider);
         if (result?.user) {
-          await syncUserWithFirestore(result.user);
+          await syncUserWithBackend(result.user);
           setShowAuthModal(false);
           setActiveTab('discover');
         }
@@ -1193,12 +1282,17 @@ export default function App() {
     }
   };
 
-
-
   const handleLogout = async () => {
     if (firebaseUser) {
       try {
-        await setDoc(doc(db, 'users', firebaseUser.uid), { isOnline: false }, { merge: true });
+        await fetch(getApiUrl('/api/users/update'), {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            uid: firebaseUser.uid,
+            updates: { isOnline: false }
+          })
+        });
       } catch (e) {}
     }
     await signOut(auth);
@@ -1266,6 +1360,102 @@ export default function App() {
         [selectedChatUser.id]: updatedMsgs
       };
     });
+
+    // Update chatsList item and persist
+    setChatsList(prev => {
+      const existingIdx = prev.findIndex(c => c.id === chatId);
+      let updated = [...prev];
+      if (existingIdx > -1) {
+        const item = { ...updated[existingIdx], lastMessage: msgObj.text, updatedAt: msgObj.createdAt };
+        updated.splice(existingIdx, 1);
+        updated.unshift(item);
+      } else {
+        updated.unshift({
+          id: chatId,
+          participants: [myUid, otherUid],
+          lastMessage: msgObj.text,
+          updatedAt: msgObj.createdAt,
+          partner: selectedChatUser
+        });
+      }
+      try {
+        localStorage.setItem('alov_chats_' + myUid, JSON.stringify(updated));
+      } catch (e) {}
+      return updated;
+    });
+  };
+
+  // Helper to open chat and immediately add to chatsList and localStorage
+  const openChatWithUser = (targetUser: any) => {
+    setSelectedChatUser(targetUser);
+    setChatView('conversation');
+    setActiveTab('chats');
+
+    const myUid = currentUser?.uid || firebaseUser?.uid;
+    const otherUid = targetUser?.uid || targetUser?.id;
+    if (myUid && otherUid) {
+      const chatId = [myUid, otherUid].sort().join('_');
+      setChatsList(prev => {
+        const existingIdx = prev.findIndex(c => c.id === chatId);
+        let updated = [...prev];
+        if (existingIdx === -1) {
+          updated.unshift({
+            id: chatId,
+            participants: [myUid, otherUid],
+            lastMessage: "Yangi suhbat boshlandi",
+            updatedAt: new Date().toISOString(),
+            partner: targetUser
+          });
+        }
+        try {
+          localStorage.setItem('alov_chats_' + myUid, JSON.stringify(updated));
+        } catch (e) {}
+        return updated;
+      });
+    }
+  };
+
+  // 1 Room per user: Open existing or create single room
+  const handleOpenMyRoom = async () => {
+    if (!firebaseUser && !currentUser) {
+      setShowAuthModal(true);
+      return;
+    }
+    const myUid = currentUser?.uid || firebaseUser?.uid;
+    const myName = currentUser?.name || firebaseUser?.displayName || 'Alov Foydalanuvchisi';
+    const myAvatar = currentUser?.avatar || firebaseUser?.photoURL || '';
+
+    // Check if user already created an active room in roomList
+    const existing = roomList.find(r => r.ownerUid === myUid);
+    if (existing) {
+      setAudioRoomCode(existing.code);
+      setAudioRoomTitle(existing.title);
+      setShowAudioRoomModal(true);
+      return;
+    }
+
+    try {
+      const res = await fetch(getApiUrl('/api/audio-rooms/create'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          ownerUid: myUid,
+          ownerName: myName,
+          ownerAvatar: myAvatar,
+          title: `${myName} Ovozli Xonasi 🎙️`
+        })
+      });
+      const data = await res.json();
+      if (data.success && data.room) {
+        setAudioRoomCode(data.room.code);
+        setAudioRoomTitle(data.room.title);
+        setShowAudioRoomModal(true);
+      }
+    } catch (e) {
+      setAudioRoomCode(`room_${myUid}`);
+      setAudioRoomTitle(`${myName} Ovozli Xonasi 🎙️`);
+      setShowAudioRoomModal(true);
+    }
   };
 
   const handleTyping = () => {
@@ -1332,31 +1522,46 @@ export default function App() {
       };
     });
 
+    // Update chatsList item and persist
+    setChatsList(prev => {
+      const existingIdx = prev.findIndex(c => c.id === chatId);
+      let updated = [...prev];
+      if (existingIdx > -1) {
+        const item = { ...updated[existingIdx], lastMessage: text, updatedAt: msgObj.createdAt };
+        updated.splice(existingIdx, 1);
+        updated.unshift(item);
+      } else {
+        updated.unshift({
+          id: chatId,
+          participants: [myUid, otherUid],
+          lastMessage: text,
+          updatedAt: msgObj.createdAt,
+          partner: selectedChatUser
+        });
+      }
+      try {
+        localStorage.setItem('alov_chats_' + myUid, JSON.stringify(updated));
+      } catch (e) {}
+      return updated;
+    });
+
     if (isAIBot) {
       setIsAiTyping(true);
     }
   };
 
-  const handleMediaUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleMediaUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file || !firebaseUser || !selectedChatUser) return;
 
     const type = file.type.startsWith('image/') ? 'image' : (file.type.startsWith('video/') ? 'video' : 'audio');
-    const storageRef = ref(storage, `chats/${firebaseUser.uid}/${Date.now()}_${file.name}`);
-    const uploadTask = uploadBytesResumable(storageRef, file);
-
-    uploadTask.on('state_changed', 
-      (snapshot) => {
-        // Progress can be tracked if needed
-      }, 
-      (error) => {
-        console.error("Upload error:", error);
-      }, 
-      async () => {
-        const downloadURL = await getDownloadURL(uploadTask.snapshot.ref);
-        handleSendChatMessage(type, downloadURL);
+    const reader = new FileReader();
+    reader.onloadend = () => {
+      if (typeof reader.result === 'string') {
+        handleSendChatMessage(type, reader.result);
       }
-    );
+    };
+    reader.readAsDataURL(file);
   };
 
   const startRecording = async () => {
@@ -1369,18 +1574,15 @@ export default function App() {
         if (e.data.size > 0) chunks.push(e.data);
       };
 
-      recorder.onstop = async () => {
+      recorder.onstop = () => {
         const blob = new Blob(chunks, { type: 'audio/webm' });
-        const file = new File([blob], "voice_message.webm", { type: 'audio/webm' });
-        
-        const storageRef = ref(storage, `chats/${firebaseUser?.uid}/voice_${Date.now()}.webm`);
-        const uploadTask = uploadBytesResumable(storageRef, file);
-        
-        uploadTask.on('state_changed', null, (err) => console.error(err), async () => {
-          const downloadURL = await getDownloadURL(uploadTask.snapshot.ref);
-          handleSendChatMessage('voice', downloadURL);
-        });
-        
+        const reader = new FileReader();
+        reader.onloadend = () => {
+          if (typeof reader.result === 'string') {
+            handleSendChatMessage('voice', reader.result);
+          }
+        };
+        reader.readAsDataURL(blob);
         stream.getTracks().forEach(t => t.stop());
       };
 
@@ -1401,13 +1603,8 @@ export default function App() {
     }
   };
 
-  const resetUnreadCount = async (chatId: string) => {
-    if (!firebaseUser) return;
-    try {
-      await updateDoc(doc(db, 'chats', chatId), {
-        [`unreadCount.${firebaseUser.uid}`]: 0
-      });
-    } catch (e) {}
+  const resetUnreadCount = (_chatId: string) => {
+    // Unread count is reset locally and tracked via Socket.io
   };
 
   const targetGender = currentUser?.gender === 'male' ? 'female' : 'male';
@@ -1557,7 +1754,7 @@ export default function App() {
                     <button onClick={() => setSelectedProfile(user)} className="flex-1 py-1.5 rounded-full bg-[#FCEAEA] hover:bg-[#f8d7d7] text-[#E8474A] font-bold text-[10px] transition active:scale-95">
                       Profil
                     </button>
-                    <button onClick={() => { setSelectedChatUser(user); setChatView('conversation'); setActiveTab('chats'); }} className="flex-1 py-1.5 rounded-full bg-[#E8474A] hover:bg-[#CB2E31] text-white font-bold text-[10px] transition active:scale-95">
+                    <button onClick={() => openChatWithUser(user)} className="flex-1 py-1.5 rounded-full bg-[#E8474A] hover:bg-[#CB2E31] text-white font-bold text-[10px] transition active:scale-95">
                       Chat
                     </button>
                   </div>
@@ -1573,64 +1770,72 @@ export default function App() {
             <div className="bg-gradient-to-r from-rose-600 via-pink-600 to-purple-600 text-white p-5 rounded-[24px] space-y-3 shadow-xl">
               <div className="flex items-center space-x-2">
                 <Radio className="w-6 h-6 animate-pulse text-rose-200" />
-                <h1 className="text-xl font-extrabold tracking-wide">Jonli Ovozli Xonalar (Audioroom)</h1>
+                <h1 className="text-xl font-extrabold tracking-wide">Jonli Ovozli Xonalar (Party Room)</h1>
               </div>
               <p className="text-xs text-rose-100">
-                WebRTC & Render signaling orqali real-time ovozli muloqot qiling va yangi do'stlar orttiring! 🎙️
+                8 ta mikrofon o'rindiqlari, jonli audio suhbat va real-time xona chati! 🎙️✨
               </p>
               <button 
-                onClick={() => {
-                  if (!firebaseUser && !currentUser) {
-                    setShowAuthModal(true);
-                    return;
-                  }
-                  setAudioRoomCode(`room_${currentUser?.uid || 'user'}_${Date.now()}`);
-                  setAudioRoomTitle(`${currentUser?.name || 'Alov'} Ovozli Xonasi 🎙️`);
-                  setShowAudioRoomModal(true);
-                }}
+                onClick={handleOpenMyRoom}
                 className="w-full bg-white text-rose-600 hover:bg-rose-50 py-3 rounded-full font-bold text-xs shadow-lg active:scale-95 transition flex items-center justify-center space-x-2"
               >
                 <Plus className="w-4 h-4" />
-                <span>Ovozli Xona Ochish (+ Join)</span>
+                <span>O'z Ovozli Xonangizni Ochish (+ Join)</span>
               </button>
             </div>
 
-            {/* Default active voice rooms */}
+            {/* Active Real Voice Rooms */}
             <div className="space-y-2.5">
-              <h2 className="text-sm font-bold text-slate-800 px-1">Mavjud Ovozli Xonalar:</h2>
-              {[
-                { code: 'alov_general_room', title: 'Alov.uz Umumiy Muloqot Xonasi 🎙️', host: 'Alov Moderator', members: 4 },
-                { code: 'alov_romance_room', title: 'Sevgi va Munosabatlar Gurungi 💖', host: 'Madina', members: 6 },
-                { code: 'alov_music_room', title: 'Musiqa va Kechki Gurunglar 🎵', host: 'Jasur', members: 3 }
-              ].map((room) => (
-                <div key={room.code} className="bg-white p-4 rounded-[20px] card-shadow space-y-3 border border-slate-100">
-                  <div className="flex items-center justify-between">
-                    <div>
-                      <h3 className="font-bold text-sm text-slate-900">{room.title}</h3>
-                      <p className="text-[11px] text-slate-500 mt-0.5">Boshlovchi: {room.host} • {room.members} ta ishtirokchi</p>
-                    </div>
-                    <span className="px-2.5 py-1 rounded-full bg-emerald-100 text-emerald-700 text-[10px] font-extrabold flex items-center space-x-1">
-                      <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-ping" />
-                      <span>FAOL</span>
-                    </span>
+              <h2 className="text-sm font-bold text-slate-800 px-1">Faol Ovozli Xonalar:</h2>
+              {roomList.length === 0 ? (
+                <div className="bg-white p-6 rounded-[20px] card-shadow text-center space-y-2 border border-slate-100">
+                  <div className="w-12 h-12 rounded-full bg-rose-50 text-rose-500 mx-auto flex items-center justify-center">
+                    <Radio className="w-6 h-6 animate-pulse" />
                   </div>
+                  <h3 className="font-bold text-sm text-slate-800">Hozircha ochiq ovozli xonalar yo'q</h3>
+                  <p className="text-xs text-slate-400 max-w-xs mx-auto">
+                    Birinchi bo'lib o'z xonangizni oching va barchani jonli suhbatga chorlang! 🎙️✨
+                  </p>
                   <button 
-                    onClick={() => {
-                      if (!firebaseUser && !currentUser) {
-                        setShowAuthModal(true);
-                        return;
-                      }
-                      setAudioRoomCode(room.code);
-                      setAudioRoomTitle(room.title);
-                      setShowAudioRoomModal(true);
-                    }} 
-                    className="w-full py-2.5 rounded-full bg-slate-900 hover:bg-slate-800 text-white font-bold text-xs shadow-md transition flex items-center justify-center space-x-2"
+                    onClick={handleOpenMyRoom}
+                    className="mt-2 px-5 py-2 rounded-full bg-slate-900 hover:bg-slate-800 text-white font-bold text-xs shadow-md transition"
                   >
-                    <Mic className="w-3.5 h-3.5 text-rose-400" />
-                    <span>Ovozli xonaga kirish 🎙️</span>
+                    Xona ochish ✨
                   </button>
                 </div>
-              ))}
+              ) : (
+                roomList.map((room) => (
+                  <div key={room.code} className="bg-white p-4 rounded-[20px] card-shadow space-y-3 border border-slate-100">
+                    <div className="flex items-center justify-between">
+                      <div className="min-w-0 pr-2">
+                        <h3 className="font-bold text-sm text-slate-900 truncate">{room.title}</h3>
+                        <p className="text-[11px] text-slate-500 mt-0.5 truncate">
+                          Boshlovchi: {room.ownerName || 'Alov Foydalanuvchisi'} • {room.membersCount || 1} ta ishtirokchi
+                        </p>
+                      </div>
+                      <span className="px-2.5 py-1 rounded-full bg-emerald-100 text-emerald-700 text-[10px] font-extrabold flex items-center space-x-1 shrink-0">
+                        <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-ping" />
+                        <span>FAOL</span>
+                      </span>
+                    </div>
+                    <button 
+                      onClick={() => {
+                        if (!firebaseUser && !currentUser) {
+                          setShowAuthModal(true);
+                          return;
+                        }
+                        setAudioRoomCode(room.code);
+                        setAudioRoomTitle(room.title);
+                        setShowAudioRoomModal(true);
+                      }} 
+                      className="w-full py-2.5 rounded-full bg-slate-900 hover:bg-slate-800 text-white font-bold text-xs shadow-md transition flex items-center justify-center space-x-2 active:scale-95"
+                    >
+                      <Mic className="w-3.5 h-3.5 text-rose-400" />
+                      <span>Xonaga kirish 🎙️</span>
+                    </button>
+                  </div>
+                ))
+              )}
             </div>
           </div>
         )}
@@ -1726,7 +1931,7 @@ export default function App() {
                     </div>
                     
                     <div className="flex items-center space-x-2 bg-black/40 backdrop-blur-md px-3 py-1 rounded-full text-[10px] font-bold">
-                       <span className="text-red-500">●</span> 1,240
+                       <span className="text-red-500 animate-pulse">●</span> {activeUsersCount || 1}
                     </div>
                   </div>
 
@@ -1895,8 +2100,8 @@ export default function App() {
                 </div>
               </div>
             ) : (
-              <div className="absolute inset-0 z-50 bg-white flex flex-col h-full animate-in fade-in zoom-in-95 duration-200">
-                <div className="p-3 border-b border-slate-100 flex items-center justify-between shrink-0 bg-white shadow-subtle z-10">
+              <div className="fixed inset-0 md:absolute md:inset-0 z-50 bg-white flex flex-col h-[100dvh] md:h-full max-h-[100dvh] overflow-hidden animate-in fade-in zoom-in-95 duration-200">
+                <div className="sticky top-0 z-30 shrink-0 p-3 border-b border-slate-100 flex items-center justify-between bg-white/95 backdrop-blur-md shadow-subtle">
                   <div className="flex items-center space-x-2">
                     <button onClick={() => setChatView('list')} className="p-2 rounded-full hover:bg-slate-100 text-slate-700 transition active:scale-90">
                       <ArrowLeft className="w-5 h-5" />
@@ -1924,7 +2129,7 @@ export default function App() {
                   </div>
                 </div>
 
-                <div className="flex-1 p-4 overflow-y-auto space-y-3 bg-[#F8F9FA] scrollbar-none scroll-smooth">
+                <div className="flex-1 p-4 overflow-y-auto overscroll-contain space-y-3 bg-[#F8F9FA] scrollbar-none scroll-smooth">
                   <AnimatePresence>
                     {(() => {
                       const myUid = currentUser?.uid || firebaseUser?.uid;
@@ -1995,7 +2200,7 @@ export default function App() {
                   <div ref={commentsEndRef} />
                 </div>
 
-                <div className="p-3 pb-6 bg-white border-t border-slate-100 flex items-end space-x-2 shrink-0 glass">
+                <div className="sticky bottom-0 z-30 p-3 pb-safe bg-white/95 backdrop-blur-md border-t border-slate-100 flex items-end space-x-2 shrink-0 glass">
                   <label aria-label="Media yuklash" className="p-2.5 rounded-full text-slate-400 hover:bg-slate-50 transition active:scale-90 cursor-pointer">
                     <Plus className="w-5 h-5" />
                     <input type="file" className="hidden" accept="image/*,video/*,audio/*" onChange={handleMediaUpload} />
@@ -2949,9 +3154,7 @@ export default function App() {
               </button>
               <button 
                 onClick={() => {
-                  setSelectedChatUser(selectedProfile);
-                  setChatView('conversation');
-                  setActiveTab('chats');
+                  openChatWithUser(selectedProfile);
                   setSelectedProfile(null);
                 }} 
                 className="flex-1 py-2.5 rounded-full bg-[#E8474A] hover:bg-[#CB2E31] text-white font-bold text-xs shadow-sm flex items-center justify-center space-x-1 active:scale-95 transition-all"

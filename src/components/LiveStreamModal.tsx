@@ -3,17 +3,6 @@ import {
   X, Video, VideoOff, Mic, MicOff, Send, Heart, Flame, Users, Radio, 
   RotateCcw, Sparkles, MessageCircle, AlertCircle, CheckCircle2, ShieldAlert
 } from 'lucide-react';
-import { 
-  db, 
-  doc, 
-  setDoc, 
-  collection, 
-  onSnapshot, 
-  addDoc, 
-  serverTimestamp, 
-  query, 
-  orderBy 
-} from '../firebase';
 import { getBaseUrl } from '../config/api';
 import { io, Socket } from 'socket.io-client';
 import { 
@@ -216,24 +205,10 @@ export const LiveStreamModal: React.FC<LiveStreamModalProps> = ({
     onClose();
   };
 
-  // 2. VIEWER INITIALIZATION FLOW
+  // 2. VIEWER INITIALIZATION FLOW (100% Socket.io, No Firestore)
   useEffect(() => {
     if (mode === 'viewer' && activeStreamId) {
-      // 1. Listen for stream metadata (status, viewerCount)
-      const streamDocRef = doc(db, 'live_streams', activeStreamId);
-      const unsubStream = onSnapshot(streamDocRef, (snap) => {
-        if (!snap.exists()) {
-          setStreamEnded(true);
-          return;
-        }
-        const data = snap.data();
-        setStreamData(data);
-        if (data.status === 'ended') {
-          setStreamEnded(true);
-        }
-      });
-
-      // 2. Initialize WebRTC connection to receive Host's live video
+      // Initialize WebRTC connection to receive Host's live video via Socket.io
       const viewer = new ViewerSignaling(
         activeStreamId,
         currentUser.uid,
@@ -250,7 +225,6 @@ export const LiveStreamModal: React.FC<LiveStreamModalProps> = ({
       viewerSignalingRef.current = viewer;
 
       return () => {
-        unsubStream();
         viewer.destroy();
       };
     }
@@ -304,6 +278,12 @@ export const LiveStreamModal: React.FC<LiveStreamModalProps> = ({
     socket.on('live_stream_viewer_count', ({ count }: { count: number }) => {
       if (typeof count === 'number') {
         setViewerCount(count);
+      }
+    });
+
+    socket.on('stream_stopped', ({ streamId }: { streamId: string }) => {
+      if (streamId === activeStreamId) {
+        setStreamEnded(true);
       }
     });
 
@@ -603,6 +583,10 @@ export const LiveStreamModal: React.FC<LiveStreamModalProps> = ({
                   </div>
 
                   <div className="flex items-center space-x-2">
+                    <div className="flex items-center space-x-1 bg-black/50 backdrop-blur-md px-2.5 py-1 rounded-full text-xs">
+                      <Users className="w-3.5 h-3.5 text-slate-300" />
+                      <span className="font-bold">{viewerCount}</span>
+                    </div>
                     <span className="flex items-center space-x-1.5 bg-red-600 px-2.5 py-1 rounded-full text-[10px] font-black tracking-wider shadow-lg animate-pulse">
                       ● LIVE
                     </span>

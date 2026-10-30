@@ -1,5 +1,6 @@
 import React from 'react';
 import { ShieldCheck, Users, Smartphone, Zap, Heart, Flame } from 'lucide-react';
+import { GenderStatsBar } from './components/GenderStatsBar';
 
 export const LandingPage = ({ onLogin }: { onLogin: () => void }) => (
   <div className="min-h-screen bg-white text-slate-900 font-sans p-6 pb-20 space-y-10">
@@ -9,6 +10,9 @@ export const LandingPage = ({ onLogin }: { onLogin: () => void }) => (
       </h1>
       <p className="text-slate-600 font-medium">O'zbekistondagi eng zamonaviy tanishuv va jonli muloqot platformasi.</p>
     </header>
+
+    {/* Real-time Gender Statistics Bar */}
+    <GenderStatsBar />
 
     <div className="bg-gradient-to-br from-rose-50 to-pink-50 p-6 rounded-3xl space-y-4 border border-rose-100">
       <h2 className="text-2xl font-bold text-slate-900">Nima uchun Alov.uz?</h2>

@@ -15,6 +15,7 @@ import { clsx, type ClassValue } from 'clsx';
 import { twMerge } from 'tailwind-merge';
 import { LandingPage } from './LandingPage';
 import { LiveStreamModal } from './components/LiveStreamModal';
+import { AudioRoomModal } from './components/AudioRoomModal';
 import { VideoPlayer, VoiceMessage } from './components/ChatMedia';
 import { CandidateSkeleton, ChatSkeleton } from './components/Skeleton';
 import { 
@@ -24,7 +25,8 @@ import {
   addDoc, query, orderBy, limit, where, updateDoc,
   ref, uploadBytesResumable, getDownloadURL
 } from './firebase';
-import { getApiUrl } from './config/api';
+import { getApiUrl, getBaseUrl } from './config/api';
+import { io, Socket } from 'socket.io-client';
 
 /** Utility for Tailwind class merging */
 function cn(...inputs: ClassValue[]) {
@@ -152,6 +154,7 @@ export default function App() {
   const [firebaseUser, setFirebaseUser] = useState<User | null>(null);
   const [currentUser, setCurrentUser] = useState<any>(null);
   const [isAuthChecking, setIsAuthChecking] = useState<boolean>(true);
+  const [isLoggingIn, setIsLoggingIn] = useState<boolean>(false);
   const [showAuthModal, setShowAuthModal] = useState(false);
   const [showProfileModal, setShowProfileModal] = useState(false);
   const [errorMsg, setErrorMsg] = useState('');
@@ -208,6 +211,11 @@ export default function App() {
   const [activeLiveStreamId, setActiveLiveStreamId] = useState<string | undefined>(undefined);
   const [activeLiveHostUser, setActiveLiveHostUser] = useState<any | undefined>(undefined);
 
+  // Audio Room (Ovozli xona) states
+  const [showAudioRoomModal, setShowAudioRoomModal] = useState(false);
+  const [audioRoomCode, setAudioRoomCode] = useState<string>('alov_general_room');
+  const [audioRoomTitle, setAudioRoomTitle] = useState<string>('Alov.uz Jonli Ovozli Xona 🎙️');
+
   const [activeRoom, setActiveRoom] = useState<any | null>(null);
   const [roomList, setRoomList] = useState<any[]>([]);
 
@@ -237,6 +245,50 @@ export default function App() {
   const [geoWatchId, setGeoWatchId] = useState<number | null>(null);
   const [userCoords, setUserCoords] = useState<{lat: number, lng: number, accuracy?: number}>({ lat: 41.2995, lng: 69.2401, accuracy: 20 });
   const [gpsStatusMsg, setGpsStatusMsg] = useState<string>('');
+  const socketRef = useRef<Socket | null>(null);
+
+  useEffect(() => {
+    const socket = io(getBaseUrl());
+    socketRef.current = socket;
+
+    socket.on('receive_message', (msg) => {
+      setChatMessages(prev => {
+        if (!selectedChatUser) return prev;
+        const chatKey = selectedChatUser.id;
+        const currentMsgs = prev[chatKey] || [];
+        if (currentMsgs.some(m => m.id === msg.id)) return prev;
+        return {
+          ...prev,
+          [chatKey]: [...currentMsgs, {
+            ...msg,
+            time: new Date(msg.createdAt || Date.now()).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+          }]
+        };
+      });
+
+      if (msg.senderId === ALOV_AI_USER.uid) {
+        setIsAiTyping(false);
+      }
+    });
+
+    socket.on('user_typing', ({ uid, isTyping }) => {
+      if (selectedChatUser && (selectedChatUser.uid === uid || selectedChatUser.id === uid)) {
+        setIsOtherTyping(isTyping);
+      }
+    });
+
+    return () => {
+      socket.disconnect();
+    };
+  }, [selectedChatUser]);
+
+  useEffect(() => {
+    if (!firebaseUser || !selectedChatUser || chatView !== 'conversation') return;
+    const myUid = firebaseUser.uid;
+    const otherUid = selectedChatUser.uid || selectedChatUser.id;
+    const chatId = [myUid, otherUid].sort().join('_');
+    socketRef.current?.emit('join_chat', chatId);
+  }, [firebaseUser, selectedChatUser, chatView]);
 
   // Ensure persistent Auth session across browser reloads
   useEffect(() => {
@@ -258,11 +310,48 @@ export default function App() {
     };
   }, []);
 
-  // Foydalanuvchi hisobini Firestore bilan sinxronizatsiya qilish
+  // Safety Timeout Fallback to prevent infinite loading ("Sessiya tiklanmoqda...")
+  useEffect(() => {
+    const timeout = setTimeout(() => {
+      setIsAuthChecking((prev) => {
+        if (prev) {
+          console.warn("Auth check timed out after 4s, forcing isAuthChecking to false.");
+          return false;
+        }
+        return prev;
+      });
+    }, 4000);
+    return () => clearTimeout(timeout);
+  }, []);
+
+  // Foydalanuvchi hisobini Firestore bilan sinxronizatsiya qilish (with robust offline/token error fallback)
   const syncUserWithFirestore = async (user: User) => {
     try {
       const userRef = doc(db, 'users', user.uid);
-      const userSnap = await getDoc(userRef);
+      let userSnap;
+      try {
+        userSnap = await getDoc(userRef);
+      } catch (dbErr: any) {
+        console.warn("Firestore sync offline fallback triggered:", dbErr);
+        const fallbackUser = {
+          uid: user.uid,
+          id: `ALOV-${user.uid.slice(0, 5).toUpperCase()}`,
+          name: user.displayName || 'Alov Foydalanuvchisi',
+          email: user.email || '',
+          avatar: user.photoURL || 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&q=80&w=600',
+          role: 'user',
+          age: 22,
+          gender: 'female',
+          region: 'Toshkent shahri',
+          district: 'Yunusobod tumani',
+          status: 'online',
+          location: { lat: 41.3111, lng: 69.2797 }
+        };
+        setCurrentUser(fallbackUser);
+        setShowAuthModal(false);
+        return fallbackUser;
+      }
+
       let userData: any;
 
       if (userSnap.exists()) {
@@ -273,10 +362,12 @@ export default function App() {
           status: 'online',
           lastSeen: serverTimestamp()
         };
-        await updateDoc(userRef, { 
-          status: 'online', 
-          lastSeen: serverTimestamp() 
-        });
+        try {
+          await updateDoc(userRef, { 
+            status: 'online', 
+            lastSeen: serverTimestamp() 
+          });
+        } catch (e) {}
       } else {
         // CREATE NEW USER: Initial setup
         userData = {
@@ -297,7 +388,9 @@ export default function App() {
           locationVisibility: 'everyone',
           location: { lat: 41.3111, lng: 69.2797 }
         };
-        await setDoc(userRef, userData);
+        try {
+          await setDoc(userRef, userData);
+        } catch (e) {}
       }
 
       setCurrentUser(userData);
@@ -312,12 +405,30 @@ export default function App() {
       setRegAvatar(userData.avatar || '');
       setRegLocationVisibility(userData.locationVisibility || 'everyone');
       setIsLocationEnabled(userData.isLocationEnabled !== false);
-
-      setIsAuthChecking(false);
       setShowAuthModal(false); // Close auth modal on success
+      setActiveTab(prev => (prev === 'landing' ? 'discover' : prev));
       return userData;
     } catch (err: any) {
       console.error("Firestore user sync error:", err);
+      const fallbackUser = {
+        uid: user.uid,
+        id: `ALOV-${user.uid.slice(0, 5).toUpperCase()}`,
+        name: user.displayName || 'Alov Foydalanuvchisi',
+        email: user.email || '',
+        avatar: user.photoURL || 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&q=80&w=600',
+        role: 'user',
+        age: 22,
+        gender: 'female',
+        region: 'Toshkent shahri',
+        district: 'Yunusobod tumani',
+        status: 'online',
+        location: { lat: 41.3111, lng: 69.2797 }
+      };
+      setCurrentUser(fallbackUser);
+      setShowAuthModal(false);
+      setActiveTab(prev => (prev === 'landing' ? 'discover' : prev));
+    } finally {
+      setIsAuthChecking(false);
     }
   };
 
@@ -347,26 +458,31 @@ export default function App() {
   // Synchronize Auth State & Real-time Presence
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, async (user) => {
-      setFirebaseUser(user);
-      if (user) {
-        await syncUserWithFirestore(user);
-        
-        // Update to offline when closing tab
-        const handleOffline = () => {
-          if (auth.currentUser) {
-            setDoc(doc(db, 'users', auth.currentUser.uid), { 
-              status: 'offline', 
-              lastSeen: serverTimestamp() 
-            }, { merge: true });
-          }
-        };
-        window.addEventListener('beforeunload', handleOffline);
-        return () => {
-          window.removeEventListener('beforeunload', handleOffline);
-          handleOffline();
-        };
-      } else {
-        setCurrentUser(null);
+      try {
+        setFirebaseUser(user);
+        if (user) {
+          await syncUserWithFirestore(user);
+          
+          // Update to offline when closing tab
+          const handleOffline = () => {
+            if (auth.currentUser) {
+              setDoc(doc(db, 'users', auth.currentUser.uid), { 
+                status: 'offline', 
+                lastSeen: serverTimestamp() 
+              }, { merge: true });
+            }
+          };
+          window.addEventListener('beforeunload', handleOffline);
+          return () => {
+            window.removeEventListener('beforeunload', handleOffline);
+            handleOffline();
+          };
+        } else {
+          setCurrentUser(null);
+          setIsAuthChecking(false);
+        }
+      } catch (err) {
+        console.error("Auth state change error:", err);
         setIsAuthChecking(false);
       }
     });
@@ -1021,18 +1137,22 @@ export default function App() {
 
   const handleGoogleLogin = async () => {
     try {
+      setIsLoggingIn(true);
       setErrorMsg('');
       const provider = new GoogleAuthProvider();
       provider.setCustomParameters({ prompt: 'select_account' });
       const result = await signInWithPopup(auth, provider);
       if (result?.user) {
         await syncUserWithFirestore(result.user);
+        setShowAuthModal(false);
+        setActiveTab('discover');
       }
     } catch (err: any) {
-      console.error("Google Login Error:", err);
       if (err.code === 'auth/popup-closed-by-user' || err.code === 'auth/cancelled-popup-request') {
-        return; // User intentionally closed the popup
+        setIsLoggingIn(false);
+        return; // User intentionally closed the popup, do not log error
       }
+      console.error("Google Login Error:", err);
       if (err.code === 'auth/popup-blocked') {
         try {
           const provider = new GoogleAuthProvider();
@@ -1044,6 +1164,8 @@ export default function App() {
         }
       }
       setErrorMsg(err.message || "Google orqali kirishda xatolik yuz berdi.");
+    } finally {
+      setIsLoggingIn(false);
     }
   };
 
@@ -1168,14 +1290,10 @@ export default function App() {
 
     if (typingTimeoutRef.current) clearTimeout(typingTimeoutRef.current);
 
-    updateDoc(doc(db, 'chats', chatId), {
-      [`isTyping.${myUid}`]: true
-    }).catch(() => {});
+    socketRef.current?.emit('typing', { chatId, uid: myUid, isTyping: true });
 
     typingTimeoutRef.current = setTimeout(() => {
-      updateDoc(doc(db, 'chats', chatId), {
-        [`isTyping.${myUid}`]: false
-      }).catch(() => {});
+      socketRef.current?.emit('typing', { chatId, uid: myUid, isTyping: false });
     }, 2000);
   };
 
@@ -1192,95 +1310,38 @@ export default function App() {
 
     if (!myUid) return;
 
-    try {
-      const chatId = [myUid, otherUid].sort().join('_');
-      const messagesRef = collection(db, 'chats', chatId, 'messages');
-      
-      // Stop typing status immediately
-      if (typingTimeoutRef.current) clearTimeout(typingTimeoutRef.current);
-      if (!isAIBot) {
-        updateDoc(doc(db, 'chats', chatId), {
-          [`isTyping.${myUid}`]: false
-        }).catch(() => {});
-      }
+    const chatId = [myUid, otherUid].sort().join('_');
+    const msgObj = {
+      id: 'msg_' + Date.now() + Math.random().toString(36).substring(2, 5),
+      senderId: myUid,
+      senderName: currentUser?.name || firebaseUser?.displayName || 'Foydalanuvchi',
+      text,
+      type,
+      fileUrl: fileUrl || null,
+      createdAt: new Date().toISOString(),
+      time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+    };
 
-      await addDoc(messagesRef, {
-        senderId: myUid,
-        senderName: currentUser?.name || firebaseUser?.displayName || 'Foydalanuvchi',
-        text,
-        type,
-        fileUrl: fileUrl || null,
-        createdAt: serverTimestamp(),
-        read: false
-      });
+    if (typingTimeoutRef.current) clearTimeout(typingTimeoutRef.current);
+    socketRef.current?.emit('typing', { chatId, uid: myUid, isTyping: false });
 
-      // Update chat metadata with unread count for the other person
-      const chatDocRef = doc(db, 'chats', chatId);
-      const chatSnap = await getDoc(chatDocRef);
-      let unreadCount = 0;
-      if (chatSnap.exists()) {
-        const data = chatSnap.data();
-        unreadCount = (data.unreadCount?.[otherUid] || 0) + 1;
-      } else {
-        unreadCount = 1;
-      }
+    // Send message via Socket.io to Render backend server
+    socketRef.current?.emit('send_message', {
+      chatId,
+      message: msgObj
+    });
 
-      await setDoc(chatDocRef, {
-        lastMessage: text,
-        lastSenderId: myUid,
-        updatedAt: serverTimestamp(),
-        participants: [myUid, otherUid],
-        [`unreadCount.${otherUid}`]: isAIBot ? 0 : unreadCount
-      }, { merge: true });
+    // Optimistically update local chat messages
+    setChatMessages(prev => {
+      const currentMsgs = prev[selectedChatUser.id] || [];
+      return {
+        ...prev,
+        [selectedChatUser.id]: [...currentMsgs, msgObj]
+      };
+    });
 
-      // Handle AI Bot response
-      if (isAIBot && type === 'text') {
-        setIsAiTyping(true);
-        
-        // Fetch last few messages for context
-        const q = query(messagesRef, orderBy('createdAt', 'desc'), limit(5));
-        const historySnap = await getDocs(q);
-        const history = historySnap.docs.map(d => {
-          const data = d.data();
-          return {
-            role: data.senderId === myUid ? 'user' : 'model',
-            text: data.text
-          };
-        }).reverse();
-
-        try {
-          const res = await fetch(getApiUrl('/api/ai/alov-respond'), {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ messages: history })
-          });
-          const data = await res.json();
-          
-          if (data.reply) {
-            await addDoc(messagesRef, {
-              senderId: ALOV_AI_USER.uid,
-              senderName: ALOV_AI_USER.name,
-              text: data.reply,
-              type: 'text',
-              createdAt: serverTimestamp(),
-              read: true
-            });
-
-            await updateDoc(chatDocRef, {
-              lastMessage: data.reply,
-              lastSenderId: ALOV_AI_USER.uid,
-              updatedAt: serverTimestamp()
-            });
-          }
-        } catch (e) {
-          console.error("AI response error:", e);
-        } finally {
-          setIsAiTyping(false);
-        }
-      }
-
-    } catch (err) {
-      console.error("Error sending chat message:", err);
+    if (isAIBot) {
+      setIsAiTyping(true);
     }
   };
 
@@ -1505,33 +1566,68 @@ export default function App() {
         {/* --- ROOMS TAB --- */}
         {activeTab === 'rooms' && (
           <div className="space-y-3">
-            <div className="bg-gradient-to-r from-[#E8474A] to-[#CB2E31] text-white p-4 rounded-[20px] space-y-2">
-              <h1 className="text-xl font-editorial">Jonli Ovozli Xonalar</h1>
+            <div className="bg-gradient-to-r from-rose-600 via-pink-600 to-purple-600 text-white p-5 rounded-[24px] space-y-3 shadow-xl">
+              <div className="flex items-center space-x-2">
+                <Radio className="w-6 h-6 animate-pulse text-rose-200" />
+                <h1 className="text-xl font-extrabold tracking-wide">Jonli Ovozli Xonalar (Audioroom)</h1>
+              </div>
+              <p className="text-xs text-rose-100">
+                WebRTC & Render signaling orqali real-time ovozli muloqot qiling va yangi do'stlar orttiring! 🎙️
+              </p>
               <button 
                 onClick={() => {
-                  const newRoom = {
-                    id: 'room-' + Date.now(),
-                    title: `${currentUser?.name || 'Mening'} xonam 🌟`,
-                    host: currentUser || { name: 'Host', avatar: firebaseUser?.photoURL },
-                    listenersCount: 1,
-                    chairs: [{ id: 1, user: currentUser, isMuted: false, isTalking: true }]
-                  };
-                  setRoomList([newRoom, ...roomList]);
-                  setActiveRoom(newRoom);
+                  if (!firebaseUser && !currentUser) {
+                    setShowAuthModal(true);
+                    return;
+                  }
+                  setAudioRoomCode(`room_${currentUser?.uid || 'user'}_${Date.now()}`);
+                  setAudioRoomTitle(`${currentUser?.name || 'Alov'} Ovozli Xonasi 🎙️`);
+                  setShowAudioRoomModal(true);
                 }}
-                className="w-full bg-white text-[#E8474A] py-2.5 rounded-full font-bold text-xs shadow-md"
+                className="w-full bg-white text-rose-600 hover:bg-rose-50 py-3 rounded-full font-bold text-xs shadow-lg active:scale-95 transition flex items-center justify-center space-x-2"
               >
-                + Xona ochish
+                <Plus className="w-4 h-4" />
+                <span>Ovozli Xona Ochish (+ Join)</span>
               </button>
             </div>
-            {roomList.map(room => (
-              <div key={room.id} className="bg-white p-3 rounded-[16px] card-shadow space-y-2">
-                <h3 className="font-editorial text-lg">{room.title}</h3>
-                <button onClick={() => setActiveRoom(room)} className="w-full py-2 rounded-full bg-[#E8474A] text-white font-bold text-xs">
-                  Kirish
-                </button>
-              </div>
-            ))}
+
+            {/* Default active voice rooms */}
+            <div className="space-y-2.5">
+              <h2 className="text-sm font-bold text-slate-800 px-1">Mavjud Ovozli Xonalar:</h2>
+              {[
+                { code: 'alov_general_room', title: 'Alov.uz Umumiy Muloqot Xonasi 🎙️', host: 'Alov Moderator', members: 4 },
+                { code: 'alov_romance_room', title: 'Sevgi va Munosabatlar Gurungi 💖', host: 'Madina', members: 6 },
+                { code: 'alov_music_room', title: 'Musiqa va Kechki Gurunglar 🎵', host: 'Jasur', members: 3 }
+              ].map((room) => (
+                <div key={room.code} className="bg-white p-4 rounded-[20px] card-shadow space-y-3 border border-slate-100">
+                  <div className="flex items-center justify-between">
+                    <div>
+                      <h3 className="font-bold text-sm text-slate-900">{room.title}</h3>
+                      <p className="text-[11px] text-slate-500 mt-0.5">Boshlovchi: {room.host} • {room.members} ta ishtirokchi</p>
+                    </div>
+                    <span className="px-2.5 py-1 rounded-full bg-emerald-100 text-emerald-700 text-[10px] font-extrabold flex items-center space-x-1">
+                      <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-ping" />
+                      <span>FAOL</span>
+                    </span>
+                  </div>
+                  <button 
+                    onClick={() => {
+                      if (!firebaseUser && !currentUser) {
+                        setShowAuthModal(true);
+                        return;
+                      }
+                      setAudioRoomCode(room.code);
+                      setAudioRoomTitle(room.title);
+                      setShowAudioRoomModal(true);
+                    }} 
+                    className="w-full py-2.5 rounded-full bg-slate-900 hover:bg-slate-800 text-white font-bold text-xs shadow-md transition flex items-center justify-center space-x-2"
+                  >
+                    <Mic className="w-3.5 h-3.5 text-rose-400" />
+                    <span>Ovozli xonaga kirish 🎙️</span>
+                  </button>
+                </div>
+              ))}
+            </div>
           </div>
         )}
 
@@ -2290,15 +2386,25 @@ export default function App() {
               <div className="space-y-4 pt-2">
                 <button 
                   onClick={handleGoogleLogin}
-                  className="w-full flex items-center justify-center space-x-3 py-4 px-4 rounded-2xl border border-slate-200 hover:border-slate-300 hover:bg-slate-50 font-bold text-sm shadow-xs bg-white text-slate-800 active:scale-98 transition duration-200"
+                  disabled={isLoggingIn}
+                  className="w-full flex items-center justify-center space-x-3 py-4 px-4 rounded-2xl border border-slate-200 hover:border-slate-300 hover:bg-slate-50 font-bold text-sm shadow-xs bg-white text-slate-800 active:scale-98 transition duration-200 disabled:opacity-60 disabled:cursor-not-allowed"
                 >
-                  <svg className="w-5 h-5 shrink-0" viewBox="0 0 24 24">
-                    <path fill="#4285F4" d="M23.745 12.27c0-.7-.06-1.4-.19-2.07H12v4.51h6.6c-.29 1.52-1.14 2.82-2.4 3.68v3.05h3.88c2.27-2.09 3.665-5.17 3.665-9.17z"/>
-                    <path fill="#34A853" d="M12 24c3.24 0 5.95-1.08 7.93-2.91l-3.88-3.05c-1.08.72-2.45 1.16-4.05 1.16-3.13 0-5.78-2.11-6.73-4.96H1.18v3.15C3.165 21.33 7.21 24 12 24z"/>
-                    <path fill="#FBBC05" d="M5.27 14.24c-.25-.72-.38-1.49-.38-2.24s.13-1.52.38-2.24V6.61H1.18C.43 8.13 0 9.87 0 12s.43 3.87 1.18 5.39l4.09-3.15z"/>
-                    <path fill="#EA4335" d="M12 4.75c1.77 0 3.35.61 4.6 1.8l3.42-3.42C17.95 1.19 15.24 0 12 0 7.21 0 3.165 2.67 1.18 6.61l4.09 3.15c.95-2.85 3.6-4.96 6.73-4.96z"/>
-                  </svg>
-                  <span>Google orqali davom ettirish</span>
+                  {isLoggingIn ? (
+                    <div className="flex items-center space-x-2">
+                      <RefreshCw className="w-4 h-4 text-rose-500 animate-spin" />
+                      <span>Kirilmoqda...</span>
+                    </div>
+                  ) : (
+                    <>
+                      <svg className="w-5 h-5 shrink-0" viewBox="0 0 24 24">
+                        <path fill="#4285F4" d="M23.745 12.27c0-.7-.06-1.4-.19-2.07H12v4.51h6.6c-.29 1.52-1.14 2.82-2.4 3.68v3.05h3.88c2.27-2.09 3.665-5.17 3.665-9.17z"/>
+                        <path fill="#34A853" d="M12 24c3.24 0 5.95-1.08 7.93-2.91l-3.88-3.05c-1.08.72-2.45 1.16-4.05 1.16-3.13 0-5.78-2.11-6.73-4.96H1.18v3.15C3.165 21.33 7.21 24 12 24z"/>
+                        <path fill="#FBBC05" d="M5.27 14.24c-.25-.72-.38-1.49-.38-2.24s.13-1.52.38-2.24V6.61H1.18C.43 8.13 0 9.87 0 12s.43 3.87 1.18 5.39l4.09-3.15z"/>
+                        <path fill="#EA4335" d="M12 4.75c1.77 0 3.35.61 4.6 1.8l3.42-3.42C17.95 1.19 15.24 0 12 0 7.21 0 3.165 2.67 1.18 6.61l4.09 3.15c.95-2.85 3.6-4.96 6.73-4.96z"/>
+                      </svg>
+                      <span>Google orqali davom ettirish</span>
+                    </>
+                  )}
                 </button>
                 <p className="text-[10px] text-slate-400 text-center px-4">
                   Kirish orqali siz foydalanish shartlari va maxfiylik siyosatiga rozilik bildirasiz.
@@ -2813,6 +2919,20 @@ export default function App() {
             setActiveLiveStreamId(undefined);
             setActiveLiveHostUser(undefined);
           }}
+        />
+      )}
+
+      {/* --- AUDIO ROOM (OVOZLI XONA) MODAL --- */}
+      {showAudioRoomModal && (
+        <AudioRoomModal
+          roomCode={audioRoomCode}
+          roomTitle={audioRoomTitle}
+          currentUser={{
+            uid: currentUser?.uid || firebaseUser?.uid || 'user_' + Date.now(),
+            name: currentUser?.name || firebaseUser?.displayName || 'Alov Foydalanuvchisi',
+            avatar: currentUser?.avatar || firebaseUser?.photoURL || ''
+          }}
+          onClose={() => setShowAudioRoomModal(false)}
         />
       )}
 

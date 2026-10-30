@@ -324,13 +324,27 @@ export default function App() {
     return () => clearTimeout(timeout);
   }, []);
 
-  // Foydalanuvchi hisobini Firestore bilan sinxronizatsiya qilish (with robust offline/token error fallback)
+  // Foydalanuvchi hisobini Firestore bilan sinxronizatsiya qilish (Upsert: Topish yoki Yangi ochish)
   const syncUserWithFirestore = async (user: User) => {
     try {
-      const userRef = doc(db, 'users', user.uid);
-      let userSnap;
+      let targetDocRef = doc(db, 'users', user.uid);
+      let existingData: any = null;
+
       try {
-        userSnap = await getDoc(userRef);
+        // 1. Avval UID orqali bazadan tekshirish
+        const userSnap = await getDoc(targetDocRef);
+        if (userSnap.exists()) {
+          existingData = userSnap.data();
+        } else if (user.email) {
+          // 2. Agar UID bilan topilmasa, Email orqali qidirish (eski akkauntni topish)
+          const q = query(collection(db, 'users'), where('email', '==', user.email), limit(1));
+          const querySnap = await getDocs(q);
+          if (!querySnap.empty) {
+            const existingDoc = querySnap.docs[0];
+            targetDocRef = doc(db, 'users', existingDoc.id);
+            existingData = existingDoc.data();
+          }
+        }
       } catch (dbErr: any) {
         console.warn("Firestore sync offline fallback triggered:", dbErr);
         const fallbackUser = {
@@ -349,27 +363,29 @@ export default function App() {
         };
         setCurrentUser(fallbackUser);
         setShowAuthModal(false);
+        setActiveTab(prev => (prev === 'landing' ? 'discover' : prev));
         return fallbackUser;
       }
 
       let userData: any;
 
-      if (userSnap.exists()) {
-        // GET EXISTING USER: Only update presence and lastSeen
+      if (existingData) {
+        // MAVJUD AKKAUNT: Yangi ochmasdan, o'sha eski akkaunt ma'lumotlarini yuklab ichkariga kirgizish
         userData = {
-          ...userSnap.data(),
+          ...existingData,
           uid: user.uid,
           status: 'online',
           lastSeen: serverTimestamp()
         };
         try {
-          await updateDoc(userRef, { 
+          await setDoc(targetDocRef, { 
             status: 'online', 
-            lastSeen: serverTimestamp() 
-          });
+            lastSeen: serverTimestamp(),
+            uid: user.uid 
+          }, { merge: true });
         } catch (e) {}
       } else {
-        // CREATE NEW USER: Initial setup
+        // YANGI FOYDALANUVCHI: Faqat mavjud bo'lmagandagina bazaga yozish
         userData = {
           uid: user.uid,
           id: `ALOV-${user.uid.slice(0, 5).toUpperCase()}`,
@@ -389,7 +405,7 @@ export default function App() {
           location: { lat: 41.3111, lng: 69.2797 }
         };
         try {
-          await setDoc(userRef, userData);
+          await setDoc(targetDocRef, userData);
         } catch (e) {}
       }
 
@@ -432,17 +448,19 @@ export default function App() {
     }
   };
 
-  // Listen for Google Sign In Redirect Result on page mount
+  // Listen for Google Sign In Redirect Result on page mount (for Mobile Devices)
   useEffect(() => {
     getRedirectResult(auth)
       .then(async (result) => {
         if (result?.user) {
           await syncUserWithFirestore(result.user);
+          setShowAuthModal(false);
+          setActiveTab('discover');
         }
       })
       .catch((err: any) => {
         console.error("Get Redirect Result Error:", err);
-        if (err.code !== 'auth/popup-closed-by-user') {
+        if (err.code !== 'auth/popup-closed-by-user' && err.code !== 'auth/cancelled-popup-request') {
           setErrorMsg(err.message || "Google orqali kirishda xatolik yuz berdi.");
         }
       });
@@ -1141,11 +1159,21 @@ export default function App() {
       setErrorMsg('');
       const provider = new GoogleAuthProvider();
       provider.setCustomParameters({ prompt: 'select_account' });
-      const result = await signInWithPopup(auth, provider);
-      if (result?.user) {
-        await syncUserWithFirestore(result.user);
-        setShowAuthModal(false);
-        setActiveTab('discover');
+
+      // Mobil qurilmalarni aniqlash (iOS / Android)
+      const isMobile = /iPhone|iPad|iPod|Android/i.test(navigator.userAgent);
+
+      if (isMobile) {
+        // Telefonlarda osilib qolmasligi uchun redirect ishlatamiz
+        await signInWithRedirect(auth, provider);
+      } else {
+        // Kompyuterlarda popup usulidan foydalanamiz
+        const result = await signInWithPopup(auth, provider);
+        if (result?.user) {
+          await syncUserWithFirestore(result.user);
+          setShowAuthModal(false);
+          setActiveTab('discover');
+        }
       }
     } catch (err: any) {
       if (err.code === 'auth/popup-closed-by-user' || err.code === 'auth/cancelled-popup-request') {

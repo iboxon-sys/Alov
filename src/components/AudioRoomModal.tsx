@@ -163,10 +163,9 @@ export const AudioRoomModal: React.FC<AudioRoomModalProps> = ({
       if (typeof count === 'number') setMembersCount(count);
     });
 
-    // WebRTC: when peer joined
-    socket.on('user_joined_audio', async ({ socketId, user }: any) => {
+    // WebRTC: when peer joined or speaker ready
+    const handleRemoteSpeaker = async ({ socketId }: any) => {
       if (mySeatIndex !== null && localStreamRef.current) {
-        // Initiator creates offer to new user
         try {
           const pc = createPeerConnection(socketId);
           const offer = await pc.createOffer();
@@ -180,7 +179,10 @@ export const AudioRoomModal: React.FC<AudioRoomModalProps> = ({
           console.warn("Peer offer error:", e);
         }
       }
-    });
+    };
+
+    socket.on('user_joined_audio', handleRemoteSpeaker);
+    socket.on('speaker_ready', handleRemoteSpeaker);
 
     // WebRTC: offer received
     socket.on('webrtc_offer', async ({ senderSocketId, offer }: any) => {
@@ -225,10 +227,25 @@ export const AudioRoomModal: React.FC<AudioRoomModalProps> = ({
       if (pc) {
         pc.close();
         peerConnectionsRef.current.delete(socketId);
+        const audioEl = document.getElementById(`audio_peer_${socketId}`);
+        if (audioEl) audioEl.remove();
       }
     });
 
     return () => {
+      socket.off('connect');
+      socket.off('audio_room_state');
+      socket.off('seats_updated');
+      socket.off('seat_status_changed');
+      socket.off('receive_room_chat_message');
+      socket.off('room_background_updated');
+      socket.off('room_members_count');
+      socket.off('user_joined_audio');
+      socket.off('speaker_ready');
+      socket.off('webrtc_offer');
+      socket.off('webrtc_answer');
+      socket.off('webrtc_ice_candidate');
+      socket.off('user_left_audio');
       socket.emit('leave_audio_room', { roomCode, user: currentUser });
       socket.disconnect();
       cleanupAudio();
@@ -262,9 +279,17 @@ export const AudioRoomModal: React.FC<AudioRoomModalProps> = ({
 
     pc.ontrack = (event) => {
       if (event.streams && event.streams[0]) {
-        const audio = new Audio();
-        audio.srcObject = event.streams[0];
-        audio.play().catch(console.warn);
+        let audioEl = document.getElementById(`audio_peer_${peerSocketId}`) as HTMLAudioElement;
+        if (!audioEl) {
+          audioEl = document.createElement('audio');
+          audioEl.id = `audio_peer_${peerSocketId}`;
+          audioEl.autoplay = true;
+          // @ts-ignore
+          audioEl.playsInline = true;
+          document.body.appendChild(audioEl);
+        }
+        audioEl.srcObject = event.streams[0];
+        audioEl.play().catch(e => console.warn("Audio play error:", e));
       }
     };
 
@@ -313,12 +338,14 @@ export const AudioRoomModal: React.FC<AudioRoomModalProps> = ({
           speakingDebounce = isSpeaking;
           setIsSpeakingLocally(isSpeaking);
           if (socketRef.current && mySeatIndex !== null) {
-            socketRef.current.emit('update_seat_status', {
+            const statusPayload = {
               roomCode,
               seatIndex: mySeatIndex,
               uid: currentUser.uid,
               isSpeaking
-            });
+            };
+            socketRef.current.emit('update_seat_status', statusPayload);
+            socketRef.current.emit('room:update_status', statusPayload);
           }
         }
         animFrameRef.current = requestAnimationFrame(checkVolume);
@@ -341,7 +368,11 @@ export const AudioRoomModal: React.FC<AudioRoomModalProps> = ({
     if (animFrameRef.current) {
       cancelAnimationFrame(animFrameRef.current);
     }
-    peerConnectionsRef.current.forEach(pc => pc.close());
+    peerConnectionsRef.current.forEach((pc, id) => {
+      pc.close();
+      const audioEl = document.getElementById(`audio_peer_${id}`);
+      if (audioEl) audioEl.remove();
+    });
     peerConnectionsRef.current.clear();
   };
 
@@ -355,21 +386,23 @@ export const AudioRoomModal: React.FC<AudioRoomModalProps> = ({
       });
     }
     if (socketRef.current && mySeatIndex !== null) {
-      socketRef.current.emit('update_seat_status', {
+      const statusPayload = {
         roomCode,
         seatIndex: mySeatIndex,
         uid: currentUser.uid,
         isMuted: nextMute,
         isSpeaking: false
-      });
+      };
+      socketRef.current.emit('update_seat_status', statusPayload);
+      socketRef.current.emit('room:update_status', statusPayload);
     }
   };
 
   // Occupy or change seat
   const handleSeatClick = async (seatIndex: number) => {
     const targetSeat = seats[seatIndex];
-    if (targetSeat.user && targetSeat.user.uid === currentUser.uid) {
-      // User clicked their own seat -> prompt leave seat or mute
+    if (targetSeat.user && (targetSeat.user.uid === currentUser.uid || (targetSeat.user as any).id === currentUser.uid)) {
+      // User clicked their own seat
       return;
     }
 
@@ -378,24 +411,48 @@ export const AudioRoomModal: React.FC<AudioRoomModalProps> = ({
       return;
     }
 
-    // Occupy seat
-    socketRef.current?.emit('take_seat', {
+    // Optimistically update seat in local state immediately for instant feedback
+    setSeats(prev => prev.map((s, idx) => {
+      if (idx === seatIndex) {
+        return { ...s, user: currentUser, isMuted: false, isSpeaking: false };
+      }
+      if (s.user?.uid === currentUser.uid) {
+        return { ...s, user: null, isMuted: false, isSpeaking: false };
+      }
+      return s;
+    }));
+    setMySeatIndex(seatIndex);
+
+    // Occupy seat via Socket.io (dual event emission for compatibility)
+    const seatPayload = {
       roomCode,
       seatIndex,
       user: currentUser
-    });
-    setMySeatIndex(seatIndex);
+    };
+    socketRef.current?.emit('room:join_seat', seatPayload);
+    socketRef.current?.emit('take_seat', seatPayload);
+
     await startLocalAudio();
+
+    if (socketRef.current) {
+      socketRef.current.emit('user_became_speaker', {
+        roomCode,
+        user: currentUser
+      });
+    }
   };
 
   // Leave Seat (become listener only)
   const handleLeaveSeat = () => {
     if (mySeatIndex !== null) {
-      socketRef.current?.emit('leave_seat', {
+      setSeats(prev => prev.map((s, idx) => idx === mySeatIndex ? { ...s, user: null, isMuted: false, isSpeaking: false } : s));
+      const leavePayload = {
         roomCode,
         seatIndex: mySeatIndex,
         user: currentUser
-      });
+      };
+      socketRef.current?.emit('room:leave_seat', leavePayload);
+      socketRef.current?.emit('leave_seat', leavePayload);
       setMySeatIndex(null);
       cleanupAudio();
     }

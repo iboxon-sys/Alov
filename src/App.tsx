@@ -199,6 +199,7 @@ export default function App() {
   const [routeInfo, setRouteInfo] = useState<{ distanceKm: string; durationMin: number } | null>(null);
   const mapPolylineRef = useRef<any>(null);
   const mapInstanceRef = useRef<any>(null);
+  const mapContainerRef = useRef<HTMLDivElement>(null);
   const markersRef = useRef<Record<string, any>>({});
 
   // Chat view substate: 'list' or 'conversation'
@@ -264,7 +265,7 @@ export default function App() {
       }
     });
 
-    socket.on('receive_message', (payload) => {
+    const handleIncomingChatMessage = (payload: any) => {
       const msg = payload.message || payload;
       const chatId = payload.chatId;
       const myUid = currentUser?.uid || firebaseUser?.uid;
@@ -274,30 +275,34 @@ export default function App() {
         partnerId = msg.senderId === myUid ? payload.recipientId : msg.senderId;
       }
       if (!partnerId && selectedChatUser) {
-        partnerId = selectedChatUser.id || selectedChatUser.uid;
+        partnerId = selectedChatUser.uid || selectedChatUser.id;
       }
 
-      if (!partnerId) return;
+      if (!partnerId && !chatId) return;
+
+      const newMsg = {
+        ...msg,
+        time: msg.time || new Date(msg.createdAt || Date.now()).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+      };
 
       setChatMessages(prev => {
-        const currentMsgs = prev[partnerId] || [];
-        if (currentMsgs.some(m => m.id === msg.id)) return prev;
+        const key = chatId || partnerId;
+        const currentMsgs = prev[key] || (partnerId ? prev[partnerId] : []) || [];
+        if (currentMsgs.some(m => m.id === newMsg.id)) return prev;
 
-        const updatedMsgs = [...currentMsgs, {
-          ...msg,
-          time: msg.time || new Date(msg.createdAt || Date.now()).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
-        }];
-
+        const updatedMsgs = [...currentMsgs, newMsg];
         if (chatId) {
           try {
             localStorage.setItem('alov_msgs_' + chatId, JSON.stringify(updatedMsgs));
           } catch (e) {}
         }
 
-        return {
-          ...prev,
-          [partnerId]: updatedMsgs
-        };
+        const next = { ...prev };
+        if (chatId) next[chatId] = updatedMsgs;
+        if (partnerId) next[partnerId] = updatedMsgs;
+        if (payload.senderId) next[payload.senderId] = updatedMsgs;
+        if (payload.recipientId) next[payload.recipientId] = updatedMsgs;
+        return next;
       });
 
       // Update chatsList so this chat never disappears
@@ -327,10 +332,13 @@ export default function App() {
         });
       }
 
-      if (msg.senderId === ALOV_AI_USER.uid) {
+      if (msg.senderId === ALOV_AI_USER.uid || msg.senderId === 'user_kamola_006' || msg.senderId === 'ALOV-006') {
         setIsAiTyping(false);
       }
-    });
+    };
+
+    socket.on('receive_message', handleIncomingChatMessage);
+    socket.on('chat:message', handleIncomingChatMessage);
 
     socket.on('user_typing', ({ uid, isTyping }) => {
       if (selectedChatUser && (selectedChatUser.uid === uid || selectedChatUser.id === uid)) {
@@ -339,17 +347,33 @@ export default function App() {
     });
 
     return () => {
+      socket.off('connect');
+      socket.off('active_users_count');
+      socket.off('receive_message', handleIncomingChatMessage);
+      socket.off('chat:message', handleIncomingChatMessage);
+      socket.off('user_typing');
       socket.disconnect();
     };
-  }, [selectedChatUser]);
+  }, []);
 
+  // Register user on socket when auth state changes
   useEffect(() => {
-    if (!firebaseUser || !selectedChatUser || chatView !== 'conversation') return;
-    const myUid = firebaseUser.uid;
+    const myUid = currentUser?.uid || firebaseUser?.uid;
+    if (myUid && socketRef.current) {
+      socketRef.current.emit('register_user', myUid);
+    }
+  }, [currentUser?.uid, firebaseUser?.uid]);
+
+  // Join active conversation room on socket
+  useEffect(() => {
+    if (!selectedChatUser) return;
+    const myUid = currentUser?.uid || firebaseUser?.uid;
     const otherUid = selectedChatUser.uid || selectedChatUser.id;
-    const chatId = [myUid, otherUid].sort().join('_');
-    socketRef.current?.emit('join_chat', chatId);
-  }, [firebaseUser, selectedChatUser, chatView]);
+    if (myUid && otherUid && socketRef.current) {
+      const chatId = [myUid, otherUid].sort().join('_');
+      socketRef.current.emit('join_chat', chatId);
+    }
+  }, [selectedChatUser, currentUser?.uid, firebaseUser?.uid, chatView]);
 
   // Ensure persistent Auth session across browser reloads
   useEffect(() => {

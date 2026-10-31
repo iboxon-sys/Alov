@@ -332,9 +332,9 @@ export const LiveStreamModal: React.FC<LiveStreamModalProps> = ({
         
         {/* Floating Heart Animations */}
         <div className="absolute inset-0 pointer-events-none overflow-hidden z-40">
-          {hearts.map(h => (
+          {hearts.map((h, idx) => (
             <div 
-              key={h.id}
+              key={h.id ? `${h.id}_${idx}` : `heart_${idx}`}
               className="absolute bottom-20 transition-all duration-1000 animate-float-heart"
               style={{ left: `${h.left}%` }}
             >
@@ -489,8 +489,8 @@ export const LiveStreamModal: React.FC<LiveStreamModalProps> = ({
                         Jonli efir boshlandi! Foydalanuvchilar yozgan xabarlar bu yerda ko'rinadi.
                       </div>
                     ) : (
-                      chatMessages.map(msg => (
-                        <div key={msg.id} className="flex items-start space-x-2 bg-black/40 backdrop-blur-sm px-3 py-1.5 rounded-2xl max-w-[85%] text-xs text-white">
+                      chatMessages.map((msg, idx) => (
+                        <div key={msg.id ? `${msg.id}_${idx}` : `live_msg_${idx}`} className="flex items-start space-x-2 bg-black/40 backdrop-blur-sm px-3 py-1.5 rounded-2xl max-w-[85%] text-xs text-white">
                           <img 
                             src={msg.senderAvatar || 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&q=80&w=600'} 
                             alt="" 
@@ -623,8 +623,8 @@ export const LiveStreamModal: React.FC<LiveStreamModalProps> = ({
                         Efirga xush kelibsiz! Savol yoki fikringizni yozing.
                       </div>
                     ) : (
-                      chatMessages.map(msg => (
-                        <div key={msg.id} className="flex items-start space-x-2 bg-black/40 backdrop-blur-sm px-3 py-1.5 rounded-2xl max-w-[85%] text-xs text-white">
+                      chatMessages.map((msg, idx) => (
+                        <div key={msg.id ? `${msg.id}_${idx}` : `live_msg_v_${idx}`} className="flex items-start space-x-2 bg-black/40 backdrop-blur-sm px-3 py-1.5 rounded-2xl max-w-[85%] text-xs text-white">
                           <img 
                             src={msg.senderAvatar || 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&q=80&w=600'} 
                             alt="" 

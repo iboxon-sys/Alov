@@ -8,7 +8,8 @@ import {
   Heart, Flame, Radio, MessageCircle, User as UserIcon, Sparkles, Video, 
   MapPin, Send, Mic, Play, Plus, Users, Eye, ThumbsUp, Smartphone, 
   ChevronRight, X, ArrowUpRight, ShieldCheck, Globe, LogIn, LogOut, CheckCircle2, Edit3, ArrowLeft, VideoOff,
-  ZoomIn, ZoomOut, Move, Crop, AlertTriangle, RefreshCw, Navigation, Shield, Lock, EyeOff, Car, Upload
+  ZoomIn, ZoomOut, Move, Crop, AlertTriangle, RefreshCw, Navigation, Shield, Lock, EyeOff, Car, Upload,
+  Clock, Check, CheckCheck
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { clsx, type ClassValue } from 'clsx';
@@ -29,6 +30,24 @@ import { io, Socket } from 'socket.io-client';
 /** Utility for Tailwind class merging */
 function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs));
+}
+
+// Calculate dynamic age from birth date string (YYYY-MM-DD)
+function calculateAge(birthDateStr?: string, fallbackAge: number = 22): number {
+  if (!birthDateStr) return fallbackAge;
+  try {
+    const birthDate = new Date(birthDateStr);
+    if (isNaN(birthDate.getTime())) return fallbackAge;
+    const today = new Date();
+    let age = today.getFullYear() - birthDate.getFullYear();
+    const m = today.getMonth() - birthDate.getMonth();
+    if (m < 0 || (m === 0 && today.getDate() < birthDate.getDate())) {
+      age--;
+    }
+    return age > 0 ? age : fallbackAge;
+  } catch (e) {
+    return fallbackAge;
+  }
 }
 
 // High Precision GPS Options: Forces device physical GPS chip rather than coarse IP
@@ -159,6 +178,7 @@ export default function App() {
 
   // Profile Form Fields (including Avatar URL and Location Visibility)
   const [regName, setRegName] = useState('');
+  const [regBirthDate, setRegBirthDate] = useState('2002-05-15');
   const [regAge, setRegAge] = useState('22');
   const [regGender, setRegGender] = useState<'male' | 'female'>('female');
   const [regRegion, setRegRegion] = useState('Toshkent shahri');
@@ -282,26 +302,35 @@ export default function App() {
 
       const newMsg = {
         ...msg,
+        status: msg.status || (msg.senderId === myUid ? 'sent' : 'read'),
         time: msg.time || new Date(msg.createdAt || Date.now()).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
       };
 
       setChatMessages(prev => {
-        const key = chatId || partnerId;
-        const currentMsgs = prev[key] || (partnerId ? prev[partnerId] : []) || [];
-        if (currentMsgs.some(m => m.id === newMsg.id)) return prev;
+        const keysToUpdate = Array.from(new Set([
+          chatId, partnerId, payload.senderId, payload.recipientId, selectedChatUser?.id, selectedChatUser?.uid
+        ].filter(Boolean))) as string[];
 
-        const updatedMsgs = [...currentMsgs, newMsg];
-        if (chatId) {
+        const next = { ...prev };
+        keysToUpdate.forEach(k => {
+          const currentMsgs = prev[k] || [];
+          const existingIdx = currentMsgs.findIndex(m => m.id === newMsg.id);
+          let updatedMsgs: any[];
+          if (existingIdx > -1) {
+            updatedMsgs = [...currentMsgs];
+            updatedMsgs[existingIdx] = { ...updatedMsgs[existingIdx], ...newMsg };
+          } else {
+            updatedMsgs = [...currentMsgs, newMsg];
+          }
+          next[k] = updatedMsgs;
+        });
+
+        if (chatId && next[chatId]) {
           try {
-            localStorage.setItem('alov_msgs_' + chatId, JSON.stringify(updatedMsgs));
+            localStorage.setItem('alov_msgs_' + chatId, JSON.stringify(next[chatId]));
           } catch (e) {}
         }
 
-        const next = { ...prev };
-        if (chatId) next[chatId] = updatedMsgs;
-        if (partnerId) next[partnerId] = updatedMsgs;
-        if (payload.senderId) next[payload.senderId] = updatedMsgs;
-        if (payload.recipientId) next[payload.recipientId] = updatedMsgs;
         return next;
       });
 
@@ -332,6 +361,16 @@ export default function App() {
         });
       }
 
+      // If incoming message is from partner while we have their chat open, emit mark_read
+      if (msg.senderId && msg.senderId !== myUid && selectedChatUser && (selectedChatUser.id === partnerId || selectedChatUser.uid === partnerId)) {
+        socketRef.current?.emit('mark_read', {
+          chatId,
+          messageIds: [msg.id],
+          senderId: msg.senderId,
+          recipientId: myUid
+        });
+      }
+
       if (msg.senderId === ALOV_AI_USER.uid || msg.senderId === 'user_kamola_006' || msg.senderId === 'ALOV-006') {
         setIsAiTyping(false);
       }
@@ -339,6 +378,35 @@ export default function App() {
 
     socket.on('receive_message', handleIncomingChatMessage);
     socket.on('chat:message', handleIncomingChatMessage);
+
+    socket.on('message_ack', ({ chatId, messageId, status }: any) => {
+      setChatMessages(prev => {
+        const next = { ...prev };
+        Object.keys(next).forEach(k => {
+          if (next[k]) {
+            next[k] = next[k].map(m => m.id === messageId ? { ...m, status: status || 'sent' } : m);
+          }
+        });
+        return next;
+      });
+    });
+
+    socket.on('message_read', ({ chatId, messageIds }: any) => {
+      setChatMessages(prev => {
+        const next = { ...prev };
+        Object.keys(next).forEach(k => {
+          if (next[k]) {
+            next[k] = next[k].map(m => {
+              if (!messageIds || messageIds.includes(m.id)) {
+                return { ...m, status: 'read', read: true };
+              }
+              return m;
+            });
+          }
+        });
+        return next;
+      });
+    });
 
     socket.on('user_typing', ({ uid, isTyping }) => {
       if (selectedChatUser && (selectedChatUser.uid === uid || selectedChatUser.id === uid)) {
@@ -351,10 +419,21 @@ export default function App() {
       socket.off('active_users_count');
       socket.off('receive_message', handleIncomingChatMessage);
       socket.off('chat:message', handleIncomingChatMessage);
+      socket.off('message_ack');
+      socket.off('message_read');
       socket.off('user_typing');
       socket.disconnect();
     };
-  }, []);
+  }, [selectedChatUser?.id, selectedChatUser?.uid]);
+
+  // Auto-scroll chat to bottom on new messages
+  useEffect(() => {
+    if (chatView === 'conversation') {
+      setTimeout(() => {
+        chatBottomRef.current?.scrollIntoView({ behavior: 'smooth' });
+      }, 50);
+    }
+  }, [chatMessages, selectedChatUser?.id, selectedChatUser?.uid, chatView]);
 
   // Register user on socket when auth state changes
   useEffect(() => {
@@ -364,7 +443,7 @@ export default function App() {
     }
   }, [currentUser?.uid, firebaseUser?.uid]);
 
-  // Join active conversation room on socket
+  // Join active conversation room on socket & mark messages read
   useEffect(() => {
     if (!selectedChatUser) return;
     const myUid = currentUser?.uid || firebaseUser?.uid;
@@ -372,6 +451,13 @@ export default function App() {
     if (myUid && otherUid && socketRef.current) {
       const chatId = [myUid, otherUid].sort().join('_');
       socketRef.current.emit('join_chat', chatId);
+      if (chatView === 'conversation') {
+        socketRef.current.emit('mark_read', {
+          chatId,
+          senderId: otherUid,
+          recipientId: myUid
+        });
+      }
     }
   }, [selectedChatUser, currentUser?.uid, firebaseUser?.uid, chatView]);
 
@@ -468,8 +554,10 @@ export default function App() {
       setCurrentUser(userData);
       
       // Anketani to'ldirish maydonlarini yangilash
+      const userBdate = userData.birthDate || '2002-05-15';
+      setRegBirthDate(userBdate);
       setRegName(userData.name || '');
-      setRegAge(String(userData.age || 22));
+      setRegAge(String(calculateAge(userBdate, userData.age || 22)));
       setRegGender(userData.gender || 'female');
       setRegRegion(userData.region || 'Toshkent shahri');
       setRegDistrict(userData.district || 'Yunusobod tumani');
@@ -1217,12 +1305,14 @@ export default function App() {
       }
     }
     try {
+      const computedAge = calculateAge(regBirthDate, Number(regAge));
       const newUserData = {
         ...currentUser,
         id: currentUser?.id || `ALOV-${firebaseUser.uid.slice(0, 5).toUpperCase()}`,
         uid: firebaseUser.uid,
         name: regName || firebaseUser.displayName || 'Alov Foydalanuvchisi',
-        age: Number(regAge),
+        birthDate: regBirthDate,
+        age: computedAge,
         gender: regGender,
         region: regRegion,
         district: regDistrict,
@@ -1525,6 +1615,8 @@ export default function App() {
       text,
       type,
       fileUrl: fileUrl || null,
+      status: 'sending' as 'sending' | 'sent' | 'read',
+      read: false,
       createdAt: new Date().toISOString(),
       time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
     };
@@ -1532,26 +1624,65 @@ export default function App() {
     if (typingTimeoutRef.current) clearTimeout(typingTimeoutRef.current);
     socketRef.current?.emit('typing', { chatId, uid: myUid, isTyping: false });
 
-    // Send message via Socket.io bridge (Render server + memory store)
+    // Send message via Socket.io bridge with ack callback
     socketRef.current?.emit('send_message', {
       chatId,
       senderId: myUid,
       recipientId: otherUid,
       message: msgObj
+    }, (ack: any) => {
+      if (ack && (ack.status === 'sent' || ack.success)) {
+        setChatMessages(prev => {
+          const next = { ...prev };
+          Object.keys(next).forEach(k => {
+            if (next[k]) {
+              next[k] = next[k].map(m => m.id === msgObj.id ? { ...m, status: 'sent' } : m);
+            }
+          });
+          try {
+            localStorage.setItem('alov_msgs_' + chatId, JSON.stringify(next[chatId] || []));
+          } catch (e) {}
+          return next;
+        });
+      }
     });
 
-    // Optimistically update local chat messages & localStorage
+    // Optimistically update local chat messages & localStorage across all key aliases
     setChatMessages(prev => {
-      const currentMsgs = prev[selectedChatUser.id] || [];
-      const updatedMsgs = [...currentMsgs, msgObj];
+      const keysToUpdate = Array.from(new Set([
+        chatId, selectedChatUser.id, selectedChatUser.uid, otherUid
+      ].filter(Boolean))) as string[];
+
+      const next = { ...prev };
+      keysToUpdate.forEach(k => {
+        const currentMsgs = prev[k] || [];
+        next[k] = [...currentMsgs, msgObj];
+      });
+
       try {
-        localStorage.setItem('alov_msgs_' + chatId, JSON.stringify(updatedMsgs));
+        localStorage.setItem('alov_msgs_' + chatId, JSON.stringify(next[chatId]));
       } catch (e) {}
-      return {
-        ...prev,
-        [selectedChatUser.id]: updatedMsgs
-      };
+
+      return next;
     });
+
+    // Fallback timer: update sending status to sent after 300ms if no ack callback fired yet
+    setTimeout(() => {
+      setChatMessages(prev => {
+        const next = { ...prev };
+        Object.keys(next).forEach(k => {
+          if (next[k]) {
+            next[k] = next[k].map(m => {
+              if (m.id === msgObj.id && m.status === 'sending') {
+                return { ...m, status: 'sent' };
+              }
+              return m;
+            });
+          }
+        });
+        return next;
+      });
+    }, 300);
 
     // Update chatsList item and persist
     setChatsList(prev => {
@@ -1725,8 +1856,8 @@ export default function App() {
                 className="w-full px-3 py-2 rounded-[8px] bg-[#FAFAFB] border border-slate-200 text-xs font-semibold"
               >
                 <option value="Barchasi">Barcha viloyatlar</option>
-                {Object.keys(UZ_LOCATIONS).map(reg => (
-                  <option key={reg} value={reg}>{reg}</option>
+                {Object.keys(UZ_LOCATIONS).map((reg, idx) => (
+                  <option key={`reg_opt1_${reg}_${idx}`} value={reg}>{reg}</option>
                 ))}
               </select>
             </div>
@@ -1737,8 +1868,8 @@ export default function App() {
                   <CandidateSkeleton />
                   <CandidateSkeleton />
                 </>
-              ) : filteredCandidates.map(user => (
-                <div key={user.id} className="bg-white rounded-[20px] p-2.5 card-shadow flex flex-col justify-between space-y-2 border border-slate-100 hover:shadow-md transition-all">
+              ) : filteredCandidates.map((user, idx) => (
+                <div key={user.uid ? `${user.uid}_${idx}` : `${user.id}_${idx}`} className="bg-white rounded-[20px] p-2.5 card-shadow flex flex-col justify-between space-y-2 border border-slate-100 hover:shadow-md transition-all">
                   <div className="relative aspect-[3/4] w-full rounded-[14px] overflow-hidden bg-slate-100">
                     <img 
                       src={user.avatar || 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&q=80&w=600'} 
@@ -1762,7 +1893,7 @@ export default function App() {
                   </div>
 
                   <div className="min-w-0">
-                    <h3 className="text-sm font-bold font-editorial text-slate-900 truncate">{user.name}, {user.age}</h3>
+                    <h3 className="text-sm font-bold font-editorial text-slate-900 truncate">{user.name}, {calculateAge(user.birthDate, user.age)} yoshda</h3>
                     <p className="text-[10px] text-[#6b635c] truncate">{user.district || user.region}</p>
                   </div>
 
@@ -1835,8 +1966,8 @@ export default function App() {
                   </button>
                 </div>
               ) : (
-                roomList.map((room) => (
-                  <div key={room.code} className="bg-white p-4 rounded-[20px] card-shadow space-y-3 border border-slate-100">
+                roomList.map((room, idx) => (
+                  <div key={room.code ? `${room.code}_${idx}` : `room_${idx}`} className="bg-white p-4 rounded-[20px] card-shadow space-y-3 border border-slate-100">
                     <div className="flex items-center justify-between">
                       <div className="min-w-0 pr-2">
                         <h3 className="font-bold text-sm text-slate-900 truncate">{room.title}</h3>
@@ -1994,8 +2125,8 @@ export default function App() {
 
                     {/* Comments */}
                     <div className="space-y-1.5 max-h-[150px] overflow-y-auto pb-2" onWheel={(e) => e.stopPropagation()}>
-                      {comments.map((c) => (
-                        <div key={c.id} className="text-white text-xs flex items-center space-x-1.5">
+                      {comments.map((c, idx) => (
+                        <div key={c.id ? `${c.id}_${idx}` : `comment_${idx}`} className="text-white text-xs flex items-center space-x-1.5">
                           <span className="font-bold text-rose-300">{c.name}:</span>
                           <span className="text-slate-100">{c.text}</span>
                         </div>
@@ -2070,14 +2201,14 @@ export default function App() {
                       </div>
                       <p className="text-xs text-slate-400 font-medium">Hozircha xabarlar yo'q. Nomzodlar bilan suhbatni boshlang!</p>
                     </div>
-                  ) : chatsList.map(chat => {
+                  ) : chatsList.map((chat, idx) => {
                     const otherUid = chat.participants.find((p: string) => p !== firebaseUser?.uid);
                     const otherUser = usersList.find(u => u.uid === otherUid) || (otherUid === ALOV_AI_USER.uid ? ALOV_AI_USER : null);
                     const unread = chat.unreadCount?.[firebaseUser?.uid || ''] || 0;
                     
                     return (
                       <motion.div 
-                        key={chat.id}
+                        key={chat.id ? `${chat.id}_${idx}` : `chat_${idx}`}
                         initial={{ opacity: 0, x: -10 }}
                         animate={{ opacity: 1, x: 0 }}
                         onClick={() => { 
@@ -2164,8 +2295,15 @@ export default function App() {
                   <AnimatePresence>
                     {(() => {
                       const myUid = currentUser?.uid || firebaseUser?.uid;
+                      const otherUid = selectedChatUser?.uid || selectedChatUser?.id;
                       const activeKey = selectedChatUser?.id || selectedChatUser?.uid;
-                      const msgs = (activeKey ? (chatMessages[activeKey] || (selectedChatUser?.uid ? chatMessages[selectedChatUser.uid] : [])) : []) || [];
+                      const activeChatId = (myUid && otherUid) ? [myUid, otherUid].sort().join('_') : null;
+
+                      const msgs = (activeChatId && chatMessages[activeChatId]) ||
+                                   (activeKey && chatMessages[activeKey]) ||
+                                   (selectedChatUser?.uid && chatMessages[selectedChatUser.uid]) ||
+                                   (selectedChatUser?.id && chatMessages[selectedChatUser.id]) ||
+                                   [];
                       
                       const sortedMessages = [...msgs].sort((a, b) => 
                         new Date(a.createdAt || 0).getTime() - new Date(b.createdAt || 0).getTime()
@@ -2176,7 +2314,7 @@ export default function App() {
 
                         return (
                           <motion.div 
-                            key={msg.id || idx}
+                            key={msg.id ? `${msg.id}_${idx}` : `msg_${idx}`}
                             initial={{ opacity: 0, y: 10, scale: 0.95 }}
                             animate={{ opacity: 1, y: 0, scale: 1 }}
                             className={cn("flex", isMe ? 'justify-end' : 'justify-start')}
@@ -2207,7 +2345,15 @@ export default function App() {
                                   {msg.time}
                                 </span>
                                 {isMe && (
-                                  <CheckCircle2 className={cn("w-2.5 h-2.5", msg.read ? "text-blue-300" : "text-rose-200")} />
+                                  <div className="flex items-center ml-1 shrink-0">
+                                    {msg.status === 'sending' ? (
+                                      <Clock className="w-3 h-3 text-rose-200/90 animate-pulse" />
+                                    ) : (msg.status === 'read' || msg.read) ? (
+                                      <CheckCheck className="w-3.5 h-3.5 text-blue-300 font-bold" />
+                                    ) : (
+                                      <Check className="w-3.5 h-3.5 text-rose-200" />
+                                    )}
+                                  </div>
                                 )}
                               </div>
                             </div>
@@ -2443,11 +2589,11 @@ export default function App() {
                     <h3 className="font-bold text-lg">Hudud bo'yicha filtr</h3>
                     <select value={filterRegion} onChange={(e) => { setFilterRegion(e.target.value); setFilterDistrict('Barchasi'); }} className="w-full p-3 rounded-xl border">
                         <option value="Barchasi">Barcha viloyatlar</option>
-                        {Object.keys(UZ_LOCATIONS).map(reg => <option key={reg} value={reg}>{reg}</option>)}
+                        {Object.keys(UZ_LOCATIONS).map((reg, idx) => <option key={`filter_modal_reg_${reg}_${idx}`} value={reg}>{reg}</option>)}
                     </select>
                     <select value={filterDistrict} onChange={(e) => setFilterDistrict(e.target.value)} className="w-full p-3 rounded-xl border">
                         <option value="Barchasi">Barcha tumanlar</option>
-                        {UZ_LOCATIONS[filterRegion]?.map(dist => <option key={dist} value={dist}>{dist}</option>)}
+                        {UZ_LOCATIONS[filterRegion]?.map((dist, idx) => <option key={`filter_modal_dist_${dist}_${idx}`} value={dist}>{dist}</option>)}
                     </select>
                     <div className="flex space-x-2 pt-2">
                         <button onClick={() => setShowFilterModal(false)} className="flex-1 p-3 rounded-xl bg-gray-100 font-bold">Yopish</button>
@@ -2808,27 +2954,35 @@ export default function App() {
                   />
                 </div>
 
-                <div className="grid grid-cols-2 gap-2.5">
-                  <div>
-                    <label className="block text-[11px] font-bold text-slate-700 mb-1">Yosh</label>
-                    <input 
-                      type="number" 
-                      value={regAge}
-                      onChange={(e) => setRegAge(e.target.value)}
-                      className="w-full px-4 py-3 rounded-xl bg-white border border-gray-300 text-xs font-semibold text-gray-900 focus:border-red-500 focus:ring-1 focus:ring-red-500 transition-all outline-none"
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-[11px] font-bold text-slate-700 mb-1">Jins</label>
-                    <select 
-                      value={regGender}
-                      onChange={(e) => setRegGender(e.target.value as any)}
-                      className="w-full px-3.5 py-3 rounded-xl bg-white border border-gray-300 text-xs font-semibold text-gray-900 focus:border-red-500 focus:ring-1 focus:ring-red-500 transition-all outline-none"
-                    >
-                      <option value="female" className="text-gray-900 bg-white font-medium">Ayol / Qiz</option>
-                      <option value="male" className="text-gray-900 bg-white font-medium">Erkak / Yigit</option>
-                    </select>
-                  </div>
+                <div>
+                  <label className="block text-[11px] font-bold text-slate-700 mb-1">Tug'ilgan sana (Kalendardan tanlang) 📅</label>
+                  <input 
+                    type="date" 
+                    value={regBirthDate}
+                    onChange={(e) => {
+                      const bDate = e.target.value;
+                      setRegBirthDate(bDate);
+                      const computedAge = calculateAge(bDate);
+                      setRegAge(String(computedAge));
+                    }}
+                    max={new Date().toISOString().split('T')[0]}
+                    className="w-full px-4 py-3 rounded-xl bg-white border border-gray-300 text-xs font-semibold text-gray-900 focus:border-red-500 focus:ring-1 focus:ring-red-500 transition-all outline-none cursor-pointer"
+                  />
+                  <p className="text-[10px] text-slate-500 mt-1 font-medium">
+                    Hozirgi yoshingiz: <span className="font-bold text-[#E8474A]">{calculateAge(regBirthDate, Number(regAge))} yoshda</span> (har yili avtomatik 1 yoshga ulg'ayadi)
+                  </p>
+                </div>
+
+                <div>
+                  <label className="block text-[11px] font-bold text-slate-700 mb-1">Jins</label>
+                  <select 
+                    value={regGender}
+                    onChange={(e) => setRegGender(e.target.value as any)}
+                    className="w-full px-3.5 py-3 rounded-xl bg-white border border-gray-300 text-xs font-semibold text-gray-900 focus:border-red-500 focus:ring-1 focus:ring-red-500 transition-all outline-none"
+                  >
+                    <option value="female" className="text-gray-900 bg-white font-medium">Ayol / Qiz</option>
+                    <option value="male" className="text-gray-900 bg-white font-medium">Erkak / Yigit</option>
+                  </select>
                 </div>
 
                 <div>
@@ -2842,8 +2996,8 @@ export default function App() {
                     }}
                     className="w-full px-4 py-3 rounded-xl bg-white border border-gray-300 text-xs font-semibold text-gray-900 focus:border-red-500 focus:ring-1 focus:ring-red-500 transition-all outline-none"
                   >
-                    {Object.keys(UZ_LOCATIONS).map(reg => (
-                      <option key={reg} value={reg} className="text-gray-900 bg-white font-medium">{reg}</option>
+                    {Object.keys(UZ_LOCATIONS).map((reg, idx) => (
+                      <option key={`prof_reg_${reg}_${idx}`} value={reg} className="text-gray-900 bg-white font-medium">{reg}</option>
                     ))}
                   </select>
                 </div>
@@ -2856,8 +3010,8 @@ export default function App() {
                       onChange={(e) => setRegDistrict(e.target.value)}
                       className="w-full px-3.5 py-3 rounded-xl bg-white border border-gray-300 text-xs font-semibold text-gray-900 focus:border-red-500 focus:ring-1 focus:ring-red-500 transition-all outline-none"
                     >
-                      {UZ_LOCATIONS[regRegion]?.map(dist => (
-                        <option key={dist} value={dist} className="text-gray-900 bg-white font-medium">{dist}</option>
+                      {UZ_LOCATIONS[regRegion]?.map((dist, idx) => (
+                        <option key={`prof_dist_${dist}_${idx}`} value={dist} className="text-gray-900 bg-white font-medium">{dist}</option>
                       ))}
                     </select>
                   </div>

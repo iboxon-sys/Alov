@@ -736,10 +736,10 @@ export const AudioRoomModal: React.FC<AudioRoomModalProps> = ({
                 Xonaga xush kelibsiz! Savol va fikrlaringizni yozib qoldiring.
               </div>
             ) : (
-              messages.map(msg => {
+              messages.map((msg, idx) => {
                 if (msg.isSystem) {
                   return (
-                    <div key={msg.id} className="flex items-center space-x-1.5 bg-gradient-to-r from-pink-950/60 to-purple-950/60 border border-pink-500/30 px-3 py-1 rounded-full text-[11px] text-pink-200 w-fit">
+                    <div key={msg.id ? `${msg.id}_${idx}` : `sys_msg_${idx}`} className="flex items-center space-x-1.5 bg-gradient-to-r from-pink-950/60 to-purple-950/60 border border-pink-500/30 px-3 py-1 rounded-full text-[11px] text-pink-200 w-fit">
                       <Sparkles className="w-3 h-3 text-pink-400" />
                       <span className="font-semibold">{msg.text}</span>
                     </div>
@@ -747,7 +747,7 @@ export const AudioRoomModal: React.FC<AudioRoomModalProps> = ({
                 }
                 const isMe = msg.senderUid === currentUser.uid;
                 return (
-                  <div key={msg.id} className="flex items-start space-x-2 bg-black/50 backdrop-blur-md px-3 py-1.5 rounded-2xl max-w-[88%] text-xs text-white border border-white/5">
+                  <div key={msg.id ? `${msg.id}_${idx}` : `room_msg_${idx}`} className="flex items-start space-x-2 bg-black/50 backdrop-blur-md px-3 py-1.5 rounded-2xl max-w-[88%] text-xs text-white border border-white/5">
                     <img 
                       src={msg.senderAvatar || 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&q=80&w=600'} 
                       alt="" 
@@ -851,9 +851,9 @@ export const AudioRoomModal: React.FC<AudioRoomModalProps> = ({
               <div>
                 <label className="block text-xs font-bold text-slate-300 mb-2">Tayyor mavzular:</label>
                 <div className="grid grid-cols-2 gap-2">
-                  {PRESET_BACKGROUNDS.map(preset => (
+                  {PRESET_BACKGROUNDS.map((preset, idx) => (
                     <button
-                      key={preset.id}
+                      key={`${preset.id}_${idx}`}
                       onClick={() => handleSelectPresetBg(preset.url)}
                       className="relative h-20 rounded-xl overflow-hidden border border-white/20 group text-left p-2 flex flex-col justify-end"
                       style={{ backgroundImage: `url(${preset.url})`, backgroundSize: 'cover' }}

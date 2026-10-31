@@ -516,7 +516,7 @@ Suhbatlashish qoidalaringiz:
       if ((isKamolaChat || isAlovAiBot) && message.type === 'text') {
         const botUid = isKamolaChat ? 'user_kamola_006' : 'alov_ai_bot';
         const botName = isKamolaChat ? 'Kamola Saidova' : 'Alov AI';
-        const botAvatar = isKamolaChat ? 'https://images.unsplash.com/photo-1524504388940-b1c1722653e1?auto=format&fit=crop&q=80&w=600' : 'https://cdn-icons-png.flaticon.com/512/4712/4712035.png';
+        const botAvatar = isKamolaChat ? 'https://images.unsplash.com/photo-1524504388940-b1c1722653e1?auto=format&fit=crop&q=80&w=600' : '/src/assets/images/alov_app_logo_1793451330582.jpg';
 
         try {
           const ai = new GoogleGenAI({ 

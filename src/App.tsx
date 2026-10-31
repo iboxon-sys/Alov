@@ -122,7 +122,7 @@ const ALOV_AI_USER = {
   uid: 'alov_ai_bot',
   id: 'ALOV-AI',
   name: 'Alov AI',
-  avatar: 'https://cdn-icons-png.flaticon.com/512/4712/4712035.png',
+  avatar: '/src/assets/images/alov_app_logo_1793451330582.jpg',
   bio: 'Sizning samimiy va mehribon virtual suhbatdoshingiz. Sevgi va munosabatlar haqida gaplashamizmi? 😊✨',
   status: 'online',
   isAI: true
@@ -387,6 +387,11 @@ export default function App() {
             next[k] = next[k].map(m => m.id === messageId ? { ...m, status: status || 'sent' } : m);
           }
         });
+        if (chatId && next[chatId]) {
+          try {
+            localStorage.setItem('alov_msgs_' + chatId, JSON.stringify(next[chatId]));
+          } catch (e) {}
+        }
         return next;
       });
     });
@@ -404,6 +409,11 @@ export default function App() {
             });
           }
         });
+        if (chatId && next[chatId]) {
+          try {
+            localStorage.setItem('alov_msgs_' + chatId, JSON.stringify(next[chatId]));
+          } catch (e) {}
+        }
         return next;
       });
     });
@@ -783,8 +793,13 @@ export default function App() {
       if (cached) localMsgs = JSON.parse(cached);
     } catch (e) {}
 
-    if (localMsgs.length > 0) {
-      setChatMessages(prev => ({ ...prev, [selectedChatUser.id]: localMsgs }));
+    const sanitizedLocalMsgs = localMsgs.map(m => ({
+      ...m,
+      status: (m.status === 'sending' || !m.status) ? 'sent' : m.status
+    }));
+
+    if (sanitizedLocalMsgs.length > 0) {
+      setChatMessages(prev => ({ ...prev, [selectedChatUser.id]: sanitizedLocalMsgs }));
     }
 
     // 2. Sync from Render API
@@ -793,7 +808,13 @@ export default function App() {
       .then(data => {
         if (data.success && Array.isArray(data.messages)) {
           const msgMap = new Map<string, any>();
-          [...localMsgs, ...data.messages].forEach(m => msgMap.set(m.id, m));
+          [...sanitizedLocalMsgs, ...data.messages].forEach(m => {
+            const sanitized = {
+              ...m,
+              status: (m.status === 'sending' || !m.status) ? 'sent' : m.status
+            };
+            msgMap.set(m.id, sanitized);
+          });
           const merged = Array.from(msgMap.values()).sort((a, b) => 
             new Date(a.createdAt || 0).getTime() - new Date(b.createdAt || 0).getTime()
           );
@@ -1680,6 +1701,11 @@ export default function App() {
             });
           }
         });
+        if (chatId && next[chatId]) {
+          try {
+            localStorage.setItem('alov_msgs_' + chatId, JSON.stringify(next[chatId]));
+          } catch (e) {}
+        }
         return next;
       });
     }, 300);

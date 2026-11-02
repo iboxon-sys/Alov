@@ -817,7 +817,7 @@ Suhbatlashish qoidalaringiz:
           backgroundUrl: '',
           seats: Array.from({ length: 8 }, (_, i) => ({
             seatIndex: i,
-            user: i === 0 && user?.uid ? { uid: user.uid, name: user.name, avatar: user.avatar } : null,
+            user: i === 0 && user?.uid ? { uid: user.uid, id: user.id || user.uid, name: user.name, avatar: user.avatar, socketId: socket.id } : null,
             isMuted: false,
             isSpeaking: false
           })),
@@ -851,7 +851,9 @@ Suhbatlashish qoidalaringiz:
       room.messages.push(joinMsg);
       if (room.messages.length > 80) room.messages.shift();
 
-      socket.emit('audio_room_state', room);
+      // Broadcast full room state to EVERYONE in the room so all users see each other in real-time
+      io.to(roomCode).emit('audio_room_state', room);
+      io.to(roomCode).emit('seats_updated', { seats: room.seats });
       io.to(roomCode).emit('receive_room_chat_message', joinMsg);
       io.to(roomCode).emit('room_members_count', { count: room.membersCount });
 
@@ -886,7 +888,9 @@ Suhbatlashish qoidalaringiz:
           isSpeaking: false
         };
         io.to(roomCode).emit('seats_updated', { seats: room.seats });
+        io.to(roomCode).emit('audio_room_state', room);
         io.to(roomCode).emit('room:seat_joined', { seatIndex, user, socketId: socket.id });
+        socket.to(roomCode).emit('speaker_ready', { socketId: socket.id, user });
         socket.to(roomCode).emit('user_joined_audio', { socketId: socket.id, user });
       }
     };
@@ -905,6 +909,7 @@ Suhbatlashish qoidalaringiz:
           }
         });
         io.to(roomCode).emit('seats_updated', { seats: room.seats });
+        io.to(roomCode).emit('audio_room_state', room);
         io.to(roomCode).emit('room:seat_left', { seatIndex, user });
       }
     };
@@ -922,6 +927,7 @@ Suhbatlashish qoidalaringiz:
           }
         });
         io.to(roomCode).emit('seat_status_changed', { seats: room.seats });
+        io.to(roomCode).emit('seats_updated', { seats: room.seats });
       }
     };
 
@@ -930,6 +936,7 @@ Suhbatlashish qoidalaringiz:
 
     socket.on('user_became_speaker', ({ roomCode, user }: any) => {
       socket.to(roomCode).emit('speaker_ready', { socketId: socket.id, user });
+      socket.to(roomCode).emit('user_joined_audio', { socketId: socket.id, user });
     });
 
     socket.on('send_room_chat_message', ({ roomCode, message }) => {

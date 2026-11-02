@@ -230,19 +230,25 @@ export const AudioRoomModal: React.FC<AudioRoomModalProps> = ({
 
     // WebRTC: when peer joined or speaker ready
     const handleRemoteSpeaker = async ({ socketId }: any) => {
-      if (mySeatIndex !== null && localStreamRef.current) {
-        try {
-          const pc = createPeerConnection(socketId);
-          const offer = await pc.createOffer();
-          await pc.setLocalDescription(offer);
-          socket.emit('webrtc_offer', {
-            targetSocketId: socketId,
-            offer,
-            sender: currentUser
+      if (!socketId || socketId === socket.id) return;
+      try {
+        const pc = createPeerConnection(socketId);
+        if (localStreamRef.current) {
+          localStreamRef.current.getTracks().forEach(track => {
+            if (!pc.getSenders().some(s => s.track === track)) {
+              pc.addTrack(track, localStreamRef.current!);
+            }
           });
-        } catch (e) {
-          console.warn("Peer offer error:", e);
         }
+        const offer = await pc.createOffer();
+        await pc.setLocalDescription(offer);
+        socket.emit('webrtc_offer', {
+          targetSocketId: socketId,
+          offer,
+          sender: currentUser
+        });
+      } catch (e) {
+        console.warn("Peer offer error:", e);
       }
     };
 
@@ -251,8 +257,16 @@ export const AudioRoomModal: React.FC<AudioRoomModalProps> = ({
 
     // WebRTC: offer received
     socket.on('webrtc_offer', async ({ senderSocketId, offer }: any) => {
+      if (!senderSocketId || senderSocketId === socket.id) return;
       try {
         const pc = createPeerConnection(senderSocketId);
+        if (localStreamRef.current) {
+          localStreamRef.current.getTracks().forEach(track => {
+            if (!pc.getSenders().some(s => s.track === track)) {
+              pc.addTrack(track, localStreamRef.current!);
+            }
+          });
+        }
         await pc.setRemoteDescription(new RTCSessionDescription(offer));
         const answer = await pc.createAnswer();
         await pc.setLocalDescription(answer);
@@ -269,8 +283,12 @@ export const AudioRoomModal: React.FC<AudioRoomModalProps> = ({
     // WebRTC: answer received
     socket.on('webrtc_answer', async ({ senderSocketId, answer }: any) => {
       const pc = peerConnectionsRef.current.get(senderSocketId);
-      if (pc && !pc.currentRemoteDescription) {
-        await pc.setRemoteDescription(new RTCSessionDescription(answer));
+      if (pc && !pc.currentRemoteDescription && answer) {
+        try {
+          await pc.setRemoteDescription(new RTCSessionDescription(answer));
+        } catch (e) {
+          console.warn("Set remote desc error:", e);
+        }
       }
     });
 
@@ -322,7 +340,7 @@ export const AudioRoomModal: React.FC<AudioRoomModalProps> = ({
     };
   }, [roomCode, currentUser]);
 
-  // Create WebRTC Peer Connection
+  // Create WebRTC Peer Connection for bidirectional or receiver-only audio
   const createPeerConnection = (peerSocketId: string) => {
     let pc = peerConnectionsRef.current.get(peerSocketId);
     if (pc) return pc;
@@ -359,6 +377,7 @@ export const AudioRoomModal: React.FC<AudioRoomModalProps> = ({
           document.body.appendChild(audioEl);
         }
         audioEl.srcObject = event.streams[0];
+        audioEl.volume = 1.0;
         audioEl.play().catch(e => console.warn("Audio play error:", e));
       }
     };
@@ -379,9 +398,21 @@ export const AudioRoomModal: React.FC<AudioRoomModalProps> = ({
       });
       localStreamRef.current = stream;
 
-      // Add tracks to existing peer connections
-      peerConnectionsRef.current.forEach(pc => {
-        stream.getTracks().forEach(track => pc.addTrack(track, stream));
+      // Add tracks to existing peer connections and offer renegotiation
+      peerConnectionsRef.current.forEach((pc, socketId) => {
+        stream.getTracks().forEach(track => {
+          if (!pc.getSenders().some(s => s.track === track)) {
+            pc.addTrack(track, stream);
+          }
+        });
+        pc.createOffer().then(offer => {
+          pc.setLocalDescription(offer);
+          socketRef.current?.emit('webrtc_offer', {
+            targetSocketId: socketId,
+            offer,
+            sender: currentUser
+          });
+        }).catch(() => {});
       });
 
       // Initialize Web Audio level detector for glowing avatar effect
@@ -654,8 +685,21 @@ export const AudioRoomModal: React.FC<AudioRoomModalProps> = ({
     setShowBgModal(false);
   };
 
+  const unlockAllAudio = () => {
+    const audioElements = document.querySelectorAll('audio[id^="audio_peer_"]');
+    audioElements.forEach((el: any) => {
+      if (el.paused) {
+        el.play().catch(() => {});
+      }
+    });
+  };
+
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/90 backdrop-blur-md p-0 md:p-4 select-none animate-in fade-in duration-200">
+    <div 
+      onClick={unlockAllAudio}
+      onTouchStart={unlockAllAudio}
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/90 backdrop-blur-md p-0 md:p-4 select-none animate-in fade-in duration-200"
+    >
       <div 
         className="relative w-full h-full bg-slate-950 md:rounded-[36px] overflow-hidden shadow-2xl flex flex-col justify-between border border-white/10"
         style={{

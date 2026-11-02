@@ -473,15 +473,40 @@ export default function App() {
       callNotification.requestPermission().catch(() => {});
     };
 
+    callNotification.setActionCallback((action, _data) => {
+      if (action === 'accept') {
+        setIncomingCallData(prev => {
+          if (prev?.caller) {
+            setActiveCallUser(prev.caller);
+          }
+          return prev;
+        });
+      } else {
+        setIncomingCallData(prev => {
+          if (prev?.caller) {
+            const targetUid = prev.caller.uid || prev.caller.id;
+            socketRef.current?.emit('reject-call', { targetUid, targetSocketId: prev.callerSocketId });
+            socketRef.current?.emit('end-call', { targetUid, targetSocketId: prev.callerSocketId });
+          }
+          return null;
+        });
+        setActiveCallUser(null);
+      }
+    });
+
     socket.on('incoming-call', handleIncomingCall);
     socket.on('call-made', handleIncomingCall);
 
     socket.on('call-rejected', () => {
+      callNotification.dismissNotifications();
+      callNotification.stopRingtone();
       setIncomingCallData(null);
       setActiveCallUser(null);
     });
 
     socket.on('call-ended', () => {
+      callNotification.dismissNotifications();
+      callNotification.stopRingtone();
       setIncomingCallData(null);
       setActiveCallUser(null);
     });

@@ -160,6 +160,10 @@ export const OneOnOneCallModal: React.FC<OneOnOneCallModalProps> = ({
       localStreamRef.current = stream;
       const videoTrack = stream.getVideoTracks()[0];
       if (videoTrack) {
+        // Prevent frame rate drops and stuttering
+        if ('contentHint' in videoTrack) {
+          (videoTrack as any).contentHint = 'motion';
+        }
         originalCameraTrackRef.current = videoTrack;
       }
 
@@ -174,7 +178,18 @@ export const OneOnOneCallModal: React.FC<OneOnOneCallModalProps> = ({
 
         // Add local tracks to peer connection
         stream.getTracks().forEach(track => {
-          pc.addTrack(track, stream!);
+          const sender = pc.addTrack(track, stream!);
+          if (track.kind === 'video') {
+            try {
+              const params = sender.getParameters();
+              if (params.encodings && params.encodings.length > 0) {
+                params.encodings[0].maxBitrate = 2500000; // 2.5 Mbps HD
+                params.encodings[0].networkPriority = 'high';
+              }
+              (params as any).degradationPreference = 'maintain-framerate';
+              sender.setParameters(params).catch(() => {});
+            } catch (e) {}
+          }
         });
 
         // Remote track received
@@ -401,12 +416,17 @@ export const OneOnOneCallModal: React.FC<OneOnOneCallModalProps> = ({
     if (isScreenSharing) {
       stopScreenSharing();
     } else {
+      if (!navigator.mediaDevices || !navigator.mediaDevices.getDisplayMedia) {
+        setPermissionWarning("Sizning Android qurilmangiz / brauzeringiz ekran translatsiyasini taqiqladi. Kameralik translatsiyadan foydalaning.");
+        return;
+      }
+
       try {
         const screenStream = await navigator.mediaDevices.getDisplayMedia({
           video: {
             frameRate: { ideal: 30, max: 30 },
-            width: { ideal: 1920, max: 1920 },
-            height: { ideal: 1080, max: 1080 }
+            width: { ideal: 1280, max: 1920 },
+            height: { ideal: 720, max: 1080 }
           },
           audio: true
         });
@@ -416,15 +436,21 @@ export const OneOnOneCallModal: React.FC<OneOnOneCallModalProps> = ({
 
         if (!screenTrack) return;
 
+        if ('contentHint' in screenTrack) {
+          (screenTrack as any).contentHint = 'detail';
+        }
+
         const videoSender = pc.getSenders().find(s => s.track?.kind === 'video');
         if (videoSender) {
           await videoSender.replaceTrack(screenTrack);
           try {
             const parameters = videoSender.getParameters();
             if (parameters.encodings && parameters.encodings.length > 0) {
-              parameters.encodings[0].maxBitrate = 4000000; // 4 Mbps for high definition screen sharing
-              await videoSender.setParameters(parameters);
+              parameters.encodings[0].maxBitrate = 2500000; // 2.5 Mbps crisp HD
+              parameters.encodings[0].networkPriority = 'high';
             }
+            (parameters as any).degradationPreference = 'maintain-framerate';
+            await videoSender.setParameters(parameters);
           } catch (e) {
             console.warn("Could not set maxBitrate parameters:", e);
           }
@@ -443,6 +469,7 @@ export const OneOnOneCallModal: React.FC<OneOnOneCallModalProps> = ({
 
       } catch (err: any) {
         console.warn("Screen share notice:", err?.message);
+        setPermissionWarning("Ekran translatsiyasi bekor qilindi yoki ruxsat berilmadi.");
       }
     }
   };

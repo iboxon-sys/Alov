@@ -1,0 +1,32 @@
+{
+  "id": "/",
+  "name": "Alov.uz - Zamonaviy Tanishuv va Video Qo'ng'iroq",
+  "short_name": "Alov.uz",
+  "description": "O'zbekistondagi eng zamonaviy tanishuv, obuna, jonli ovozli xonalar va video/audio qo'ng'iroqlar platformasi.",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#0F172A",
+  "theme_color": "#E8474A",
+  "icons": [
+    {
+      "src": "/src/assets/images/alov_app_logo_1793451330582.jpg",
+      "sizes": "192x192",
+      "type": "image/jpeg",
+      "purpose": "any"
+    },
+    {
+      "src": "/src/assets/images/alov_app_logo_1793451330582.jpg",
+      "sizes": "512x512",
+      "type": "image/jpeg",
+      "purpose": "any"
+    },
+    {
+      "src": "/src/assets/images/alov_app_logo_1793451330582.jpg",
+      "sizes": "512x512",
+      "type": "image/jpeg",
+      "purpose": "maskable"
+    }
+  ]
+}

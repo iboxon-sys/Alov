@@ -1,6 +1,6 @@
 /**
- * Call notification & Web Audio synthesized ringtone service (WhatsApp / Telegram style)
- * Supports Android standard Push Notifications via Service Worker and Web Audio ringtone.
+ * Call notification, App Badge & Web Audio synthesized ringtone service
+ * Supports Android standard Push Notifications, Heads-Up banners, App Badges and Web Audio ringtones.
  */
 
 class CallNotificationService {
@@ -8,21 +8,43 @@ class CallNotificationService {
   private ringtoneInterval: any = null;
   private isRinging: boolean = false;
   private swRegistration: ServiceWorkerRegistration | null = null;
+  private onActionCallback: ((action: 'accept' | 'reject', data?: any) => void) | null = null;
 
   constructor() {
     this.registerServiceWorker();
+    this.listenToSWWorkerMessages();
   }
 
-  // Register Service Worker for Android PWA notifications
+  // Register Service Worker for Android PWA / APK notifications
   public async registerServiceWorker() {
     if ('serviceWorker' in navigator) {
       try {
         const reg = await navigator.serviceWorker.register('/sw.js');
         this.swRegistration = reg;
-        console.log('Service Worker registered successfully:', reg.scope);
+        console.log('Service Worker registered for Android PWA:', reg.scope);
       } catch (err) {
-        console.warn('Service Worker registration failed:', err);
+        console.warn('Service Worker registration notice:', err);
       }
+    }
+  }
+
+  // Set callback for notification action buttons ("Javob berish" / "Rad etish")
+  public setActionCallback(cb: (action: 'accept' | 'reject', data?: any) => void) {
+    this.onActionCallback = cb;
+  }
+
+  private listenToSWWorkerMessages() {
+    if ('serviceWorker' in navigator) {
+      navigator.serviceWorker.addEventListener('message', (event) => {
+        if (event.data && event.data.type === 'CALL_NOTIFICATION_ACTION') {
+          const action = event.data.action === 'reject' ? 'reject' : 'accept';
+          this.stopRingtone();
+          this.dismissNotifications();
+          if (this.onActionCallback) {
+            this.onActionCallback(action, event.data.data);
+          }
+        }
+      });
     }
   }
 
@@ -41,22 +63,28 @@ class CallNotificationService {
     return 'denied';
   }
 
-  // Show Android system web notification via Service Worker registration
-  public async showCallNotification(callerName: string, avatarUrl?: string) {
+  // Show Android high priority heads-up notification and update launcher app badge
+  public async showCallNotification(callerName: string, avatarUrl?: string, callerUid?: string) {
+    // 1. Update App Badge (Launcher icon badge on Android / Desktop)
+    this.setAppBadge(1);
+
     if ('Notification' in window && Notification.permission === 'granted') {
       try {
         const title = "Kiruvchi video qo'ng'iroq 📞";
-        const options = {
+        const options: any = {
           body: `${callerName} sizga video qo'ng'iroq qilmoqda...`,
           icon: avatarUrl || '/favicon.ico',
           badge: '/favicon.ico',
-          vibrate: [300, 100, 300, 1000],
+          vibrate: [500, 200, 500, 200, 500],
           tag: 'incoming-call',
           renotify: true,
           requireInteraction: true,
+          priority: 2,
+          importance: 'high',
+          data: { callerUid },
           actions: [
-            { action: 'accept', title: 'Javob berish' },
-            { action: 'reject', title: 'Rad etish' }
+            { action: 'accept', title: '📞 Javob berish' },
+            { action: 'reject', title: '✕ Rad etish' }
           ]
         };
 
@@ -78,18 +106,37 @@ class CallNotificationService {
     }
   }
 
-  // Dismiss active call notifications when call is answered or rejected
+  // Dismiss active call notifications & clear app badge
   public dismissNotifications() {
+    this.clearAppBadge();
+
+    if (this.swRegistration && this.swRegistration.active) {
+      this.swRegistration.active.postMessage({ action: 'DISMISS_CALL_NOTIFICATIONS' });
+    }
+
     if ('registration' in navigator && (navigator as any).serviceWorker) {
       navigator.serviceWorker.ready.then((reg) => {
         reg.getNotifications({ tag: 'incoming-call' }).then((notifications) => {
           notifications.forEach(n => n.close());
         });
-      });
+      }).catch(() => {});
     }
-    if ('Notification' in window && Notification.permission === 'granted') {
+  }
+
+  // Set App Launcher Icon Badge
+  public setAppBadge(count: number = 1) {
+    if ('setAppBadge' in navigator) {
       try {
-        // Fallback dismissal if any
+        (navigator as any).setAppBadge(count).catch(() => {});
+      } catch (e) {}
+    }
+  }
+
+  // Clear App Launcher Icon Badge
+  public clearAppBadge() {
+    if ('clearAppBadge' in navigator) {
+      try {
+        (navigator as any).clearAppBadge().catch(() => {});
       } catch (e) {}
     }
   }
@@ -99,10 +146,9 @@ class CallNotificationService {
     if (this.isRinging) return;
     this.isRinging = true;
 
-    // Vibrate device if supported
     if ('vibrate' in navigator) {
       try {
-        navigator.vibrate([400, 200, 400, 1500]);
+        navigator.vibrate([500, 200, 500, 200, 500]);
       } catch (e) {}
     }
 
@@ -155,7 +201,7 @@ class CallNotificationService {
       playChimeSequence();
       if ('vibrate' in navigator) {
         try {
-          navigator.vibrate([400, 200, 400, 1500]);
+          navigator.vibrate([500, 200, 500, 200, 500]);
         } catch (e) {}
       }
     }, 2400);

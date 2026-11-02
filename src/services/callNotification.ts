@@ -78,6 +78,22 @@ class CallNotificationService {
     }
   }
 
+  // Dismiss active call notifications when call is answered or rejected
+  public dismissNotifications() {
+    if ('registration' in navigator && (navigator as any).serviceWorker) {
+      navigator.serviceWorker.ready.then((reg) => {
+        reg.getNotifications({ tag: 'incoming-call' }).then((notifications) => {
+          notifications.forEach(n => n.close());
+        });
+      });
+    }
+    if ('Notification' in window && Notification.permission === 'granted') {
+      try {
+        // Fallback dismissal if any
+      } catch (e) {}
+    }
+  }
+
   // Play synthesized modern phone ringtone using Web Audio API
   public startRingtone() {
     if (this.isRinging) return;

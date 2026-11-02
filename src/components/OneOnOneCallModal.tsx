@@ -413,6 +413,15 @@ export const OneOnOneCallModal: React.FC<OneOnOneCallModalProps> = ({
         const videoSender = pc.getSenders().find(s => s.track?.kind === 'video');
         if (videoSender) {
           await videoSender.replaceTrack(screenTrack);
+          try {
+            const parameters = videoSender.getParameters();
+            if (parameters.encodings && parameters.encodings.length > 0) {
+              parameters.encodings[0].maxBitrate = 1500000; // 1.5 Mbps for crisp text and zero lag
+              await videoSender.setParameters(parameters);
+            }
+          } catch (e) {
+            console.warn("Could not set maxBitrate parameters:", e);
+          }
         }
 
         if (localVideoRef.current) {

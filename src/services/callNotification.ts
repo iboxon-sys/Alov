@@ -1,40 +1,77 @@
 /**
  * Call notification & Web Audio synthesized ringtone service (WhatsApp / Telegram style)
- * Generates rhythmic telephone chime without requiring external audio downloads.
+ * Supports Android standard Push Notifications via Service Worker and Web Audio ringtone.
  */
 
 class CallNotificationService {
   private audioCtx: AudioContext | null = null;
   private ringtoneInterval: any = null;
   private isRinging: boolean = false;
+  private swRegistration: ServiceWorkerRegistration | null = null;
+
+  constructor() {
+    this.registerServiceWorker();
+  }
+
+  // Register Service Worker for Android PWA notifications
+  public async registerServiceWorker() {
+    if ('serviceWorker' in navigator) {
+      try {
+        const reg = await navigator.serviceWorker.register('/sw.js');
+        this.swRegistration = reg;
+        console.log('Service Worker registered successfully:', reg.scope);
+      } catch (err) {
+        console.warn('Service Worker registration failed:', err);
+      }
+    }
+  }
 
   // Request browser notification permission
   public async requestPermission(): Promise<NotificationPermission> {
-    if ('Notification' in window && Notification.permission === 'default') {
-      try {
-        return await Notification.requestPermission();
-      } catch (e) {
-        return 'denied';
+    if ('Notification' in window) {
+      if (Notification.permission === 'default') {
+        try {
+          return await Notification.requestPermission();
+        } catch (e) {
+          return 'denied';
+        }
       }
+      return Notification.permission as NotificationPermission;
     }
-    return ('Notification' in window ? Notification.permission : 'denied') as NotificationPermission;
+    return 'denied';
   }
 
-  // Show system web notification
-  public showCallNotification(callerName: string, avatarUrl?: string) {
+  // Show Android system web notification via Service Worker registration
+  public async showCallNotification(callerName: string, avatarUrl?: string) {
     if ('Notification' in window && Notification.permission === 'granted') {
       try {
-        const notif = new Notification("Kiruvchi video qo'ng'iroq 📞", {
+        const title = "Kiruvchi video qo'ng'iroq 📞";
+        const options = {
           body: `${callerName} sizga video qo'ng'iroq qilmoqda...`,
-          icon: avatarUrl || '/src/assets/images/alov_app_logo_1793451330582.jpg',
+          icon: avatarUrl || '/favicon.ico',
+          badge: '/favicon.ico',
+          vibrate: [300, 100, 300, 1000],
           tag: 'incoming-call',
-          requireInteraction: true
-        });
-
-        notif.onclick = () => {
-          window.focus();
-          notif.close();
+          renotify: true,
+          requireInteraction: true,
+          actions: [
+            { action: 'accept', title: 'Javob berish' },
+            { action: 'reject', title: 'Rad etish' }
+          ]
         };
+
+        if (this.swRegistration && this.swRegistration.showNotification) {
+          await this.swRegistration.showNotification(title, options);
+        } else if ('registration' in navigator && (navigator as any).serviceWorker?.ready) {
+          const reg = await (navigator as any).serviceWorker.ready;
+          await reg.showNotification(title, options);
+        } else {
+          const notif = new Notification(title, options);
+          notif.onclick = () => {
+            window.focus();
+            notif.close();
+          };
+        }
       } catch (e) {
         console.warn("Could not show system notification:", e);
       }
@@ -68,7 +105,6 @@ class CallNotificationService {
         }
 
         const now = this.audioCtx.currentTime;
-        // WhatsApp / Telegram style harmonious two-tone melody (notes: E5, G#5, B5, E6)
         const notes = [
           { freq: 659.25, time: 0, dur: 0.18 },
           { freq: 830.61, time: 0.22, dur: 0.18 },
@@ -82,7 +118,6 @@ class CallNotificationService {
           osc.type = 'sine';
           osc.frequency.setValueAtTime(n.freq, now + n.time);
 
-          // Smooth exponential decay for marimba/bell timbre
           gain.gain.setValueAtTime(0.001, now + n.time);
           gain.gain.exponentialRampToValueAtTime(0.35, now + n.time + 0.03);
           gain.gain.exponentialRampToValueAtTime(0.0001, now + n.time + n.dur);
@@ -99,7 +134,6 @@ class CallNotificationService {
       }
     };
 
-    // Play immediately and repeat every 2.4 seconds
     playChimeSequence();
     this.ringtoneInterval = setInterval(() => {
       playChimeSequence();

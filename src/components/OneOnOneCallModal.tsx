@@ -118,11 +118,17 @@ export const OneOnOneCallModal: React.FC<OneOnOneCallModalProps> = ({
       try {
         // Tier 1: Try Camera + Mic
         stream = await navigator.mediaDevices.getUserMedia({
-          video: { width: { ideal: 1280 }, height: { ideal: 720 }, facingMode: 'user' },
+          video: {
+            width: { ideal: 1920, max: 1920 },
+            height: { ideal: 1080, max: 1080 },
+            frameRate: { ideal: 30, max: 30 },
+            facingMode: 'user'
+          },
           audio: {
             echoCancellation: true,
             noiseSuppression: true,
-            autoGainControl: true
+            autoGainControl: true,
+            sampleRate: 48000
           }
         });
       } catch (camErr: any) {
@@ -398,11 +404,11 @@ export const OneOnOneCallModal: React.FC<OneOnOneCallModalProps> = ({
       try {
         const screenStream = await navigator.mediaDevices.getDisplayMedia({
           video: {
-            frameRate: { ideal: 15, max: 20 },
-            width: { max: 1280 },
-            height: { max: 720 }
+            frameRate: { ideal: 30, max: 30 },
+            width: { ideal: 1920, max: 1920 },
+            height: { ideal: 1080, max: 1080 }
           },
-          audio: false
+          audio: true
         });
 
         screenStreamRef.current = screenStream;
@@ -416,7 +422,7 @@ export const OneOnOneCallModal: React.FC<OneOnOneCallModalProps> = ({
           try {
             const parameters = videoSender.getParameters();
             if (parameters.encodings && parameters.encodings.length > 0) {
-              parameters.encodings[0].maxBitrate = 1500000; // 1.5 Mbps for crisp text and zero lag
+              parameters.encodings[0].maxBitrate = 4000000; // 4 Mbps for high definition screen sharing
               await videoSender.setParameters(parameters);
             }
           } catch (e) {

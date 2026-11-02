@@ -1,7 +1,9 @@
 /**
  * Alov.uz Dynamic Base URL & API Helper
- * Automatically handles local development, custom domains, and Render production (https://alov.onrender.com/)
+ * Supports Render Cloud Backend (https://alov-backend.onrender.com) and dynamic local preview
  */
+
+export const RENDER_BACKEND_URL = "https://alov-backend.onrender.com";
 
 export const getBaseUrl = (): string => {
   // 1. Check if configured via Vite or React App environment variables
@@ -13,14 +15,19 @@ export const getBaseUrl = (): string => {
   // 2. Browser runtime detection
   if (typeof window !== 'undefined' && window.location) {
     const origin = window.location.origin;
-    if (window.location.hostname.includes('onrender.com') || window.location.hostname === 'alov.onrender.com') {
-      return origin || 'https://alov.onrender.com';
+    // If running on local dev or AI Studio preview container, return origin so Express Vite middleware works
+    if (window.location.hostname === 'localhost' || window.location.hostname.includes('127.0.0.1') || window.location.hostname.includes('run.app')) {
+      return origin;
+    }
+    // Render deployment static client pointing to Render backend
+    if (window.location.hostname.includes('onrender.com')) {
+      return origin || RENDER_BACKEND_URL;
     }
     return origin;
   }
 
   // 3. Fallback default
-  return 'https://alov.onrender.com';
+  return RENDER_BACKEND_URL;
 };
 
 /**

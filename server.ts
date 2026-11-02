@@ -744,24 +744,54 @@ Suhbatlashish qoidalaringiz:
     socket.on('join_audio_room', ({ roomCode, user }) => {
       if (!roomCode) return;
       socket.join(roomCode);
-      const room = audioRoomsStore.get(roomCode);
-      if (room) {
-        room.membersCount = (room.membersCount || 0) + 1;
-        const joinMsg = {
-          id: 'sys_' + Date.now() + Math.random().toString(36).slice(2, 5),
-          senderUid: 'system',
-          senderName: 'Tizim',
-          text: `${user?.name || 'Foydalanuvchi'} xonaga kirdi 👋✨`,
-          isSystem: true,
-          time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+      let room = audioRoomsStore.get(roomCode);
+      if (!room) {
+        room = {
+          code: roomCode,
+          title: `${user?.name || 'Alov'} Ovozli Xonasi 🎙️`,
+          ownerUid: user?.uid || 'guest',
+          ownerName: user?.name || 'Boshlovchi',
+          ownerAvatar: user?.avatar || '',
+          backgroundUrl: '',
+          seats: Array.from({ length: 8 }, (_, i) => ({
+            seatIndex: i,
+            user: i === 0 && user?.uid ? { uid: user.uid, name: user.name, avatar: user.avatar } : null,
+            isMuted: false,
+            isSpeaking: false
+          })),
+          messages: [
+            {
+              id: 'sys_' + Date.now(),
+              senderUid: 'system',
+              senderName: 'Alov Tizimi',
+              text: `Xush kelibsiz! "${user?.name || 'Alov'}" ovozli xonasi ochildi ✨🎙️`,
+              isSystem: true,
+              time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+            }
+          ],
+          membersCount: 1,
+          createdAt: new Date().toISOString()
         };
-        room.messages.push(joinMsg);
-        if (room.messages.length > 80) room.messages.shift();
-
-        socket.emit('audio_room_state', room);
-        io.to(roomCode).emit('receive_room_chat_message', joinMsg);
-        io.to(roomCode).emit('room_members_count', { count: room.membersCount });
+        audioRoomsStore.set(roomCode, room);
+        io.emit('audio_room_created', room);
+      } else {
+        room.membersCount = (room.membersCount || 0) + 1;
       }
+
+      const joinMsg = {
+        id: 'sys_' + Date.now() + Math.random().toString(36).slice(2, 5),
+        senderUid: 'system',
+        senderName: 'Tizim',
+        text: `${user?.name || 'Foydalanuvchi'} xonaga kirdi 👋✨`,
+        isSystem: true,
+        time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+      };
+      room.messages.push(joinMsg);
+      if (room.messages.length > 80) room.messages.shift();
+
+      socket.emit('audio_room_state', room);
+      io.to(roomCode).emit('receive_room_chat_message', joinMsg);
+      io.to(roomCode).emit('room_members_count', { count: room.membersCount });
 
       socket.to(roomCode).emit('user_joined_audio', {
         socketId: socket.id,

@@ -268,16 +268,37 @@ export default function App() {
   const [activeUsersCount, setActiveUsersCount] = useState<number>(1);
   const socketRef = useRef<Socket | null>(null);
 
+  const currentUserRef = useRef<any>(null);
+  const selectedChatUserRef = useRef<any>(null);
+
+  useEffect(() => {
+    currentUserRef.current = currentUser || (firebaseUser ? { uid: firebaseUser.uid, name: firebaseUser.displayName } : null);
+  }, [currentUser, firebaseUser]);
+
+  useEffect(() => {
+    selectedChatUserRef.current = selectedChatUser;
+  }, [selectedChatUser]);
+
   useEffect(() => {
     const socket = io(getBaseUrl());
     socketRef.current = socket;
 
-    socket.on('connect', () => {
-      const myUid = currentUser?.uid || firebaseUser?.uid;
+    const registerSocketUser = () => {
+      const myUid = currentUserRef.current?.uid || firebaseUser?.uid || currentUser?.uid;
       if (myUid) {
         socket.emit('register_user', myUid);
       }
-    });
+      const activeSelUser = selectedChatUserRef.current;
+      if (myUid && activeSelUser) {
+        const otherUid = activeSelUser.uid || activeSelUser.id;
+        if (otherUid) {
+          const chatId = [myUid, otherUid].sort().join('_');
+          socket.emit('join_chat', chatId);
+        }
+      }
+    };
+
+    socket.on('connect', registerSocketUser);
 
     socket.on('active_users_count', ({ count }: { count: number }) => {
       if (typeof count === 'number' && count > 0) {
@@ -288,14 +309,15 @@ export default function App() {
     const handleIncomingChatMessage = (payload: any) => {
       const msg = payload.message || payload;
       const chatId = payload.chatId;
-      const myUid = currentUser?.uid || firebaseUser?.uid;
+      const myUid = currentUserRef.current?.uid || firebaseUser?.uid || currentUser?.uid;
+      const currentSelUser = selectedChatUserRef.current;
 
       let partnerId = payload.senderId === myUid ? payload.recipientId : payload.senderId;
       if (!partnerId && msg.senderId) {
         partnerId = msg.senderId === myUid ? payload.recipientId : msg.senderId;
       }
-      if (!partnerId && selectedChatUser) {
-        partnerId = selectedChatUser.uid || selectedChatUser.id;
+      if (!partnerId && currentSelUser) {
+        partnerId = currentSelUser.uid || currentSelUser.id;
       }
 
       if (!partnerId && !chatId) return;
@@ -308,7 +330,7 @@ export default function App() {
 
       setChatMessages(prev => {
         const keysToUpdate = Array.from(new Set([
-          chatId, partnerId, payload.senderId, payload.recipientId, selectedChatUser?.id, selectedChatUser?.uid
+          chatId, partnerId, payload.senderId, payload.recipientId, currentSelUser?.id, currentSelUser?.uid
         ].filter(Boolean))) as string[];
 
         const next = { ...prev };
@@ -362,7 +384,7 @@ export default function App() {
       }
 
       // If incoming message is from partner while we have their chat open, emit mark_read
-      if (msg.senderId && msg.senderId !== myUid && selectedChatUser && (selectedChatUser.id === partnerId || selectedChatUser.uid === partnerId)) {
+      if (msg.senderId && msg.senderId !== myUid && currentSelUser && (currentSelUser.id === partnerId || currentSelUser.uid === partnerId)) {
         socketRef.current?.emit('mark_read', {
           chatId,
           messageIds: [msg.id],
@@ -419,13 +441,14 @@ export default function App() {
     });
 
     socket.on('user_typing', ({ uid, isTyping }) => {
-      if (selectedChatUser && (selectedChatUser.uid === uid || selectedChatUser.id === uid)) {
+      const currentSelUser = selectedChatUserRef.current;
+      if (currentSelUser && (currentSelUser.uid === uid || currentSelUser.id === uid)) {
         setIsOtherTyping(isTyping);
       }
     });
 
     return () => {
-      socket.off('connect');
+      socket.off('connect', registerSocketUser);
       socket.off('active_users_count');
       socket.off('receive_message', handleIncomingChatMessage);
       socket.off('chat:message', handleIncomingChatMessage);
@@ -434,7 +457,7 @@ export default function App() {
       socket.off('user_typing');
       socket.disconnect();
     };
-  }, [selectedChatUser?.id, selectedChatUser?.uid]);
+  }, []);
 
   // Auto-scroll chat to bottom on new messages
   useEffect(() => {

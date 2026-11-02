@@ -2041,7 +2041,7 @@ export default function App() {
             {/* Active Real Voice Rooms */}
             <div className="space-y-2.5">
               <h2 className="text-sm font-bold text-slate-800 px-1">Faol Ovozli Xonalar:</h2>
-              {roomList.length === 0 ? (
+              {roomList.filter(r => (r.membersCount || 0) > 0).length === 0 ? (
                 <div className="bg-white p-6 rounded-[20px] card-shadow text-center space-y-2 border border-slate-100">
                   <div className="w-12 h-12 rounded-full bg-rose-50 text-rose-500 mx-auto flex items-center justify-center">
                     <Radio className="w-6 h-6 animate-pulse" />
@@ -2058,7 +2058,7 @@ export default function App() {
                   </button>
                 </div>
               ) : (
-                roomList.map((room, idx) => (
+                roomList.filter(r => (r.membersCount || 0) > 0).map((room, idx) => (
                   <div key={room.code ? `${room.code}_${idx}` : `room_${idx}`} className="bg-white p-4 rounded-[20px] card-shadow space-y-3 border border-slate-100">
                     <div className="flex items-center justify-between">
                       <div className="min-w-0 pr-2">
@@ -2310,6 +2310,7 @@ export default function App() {
                         onClick={() => { 
                           setSelectedChatUser(otherUser); 
                           setChatView('conversation'); 
+                          setChatsList(prev => prev.map(c => c.id === chat.id ? { ...c, unreadCount: { ...(c.unreadCount || {}), [myUid || '']: 0 } } : c));
                         }}
                         className={cn(
                           "p-4 flex items-center space-x-3 cursor-pointer hover:bg-slate-50 transition-all relative",

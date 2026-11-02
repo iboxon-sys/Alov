@@ -17,6 +17,7 @@ export interface OneOnOneCallModalProps {
     id?: string;
     name: string;
     avatar?: string;
+    status?: string;
   };
   isIncoming?: boolean;
   incomingOffer?: any;
@@ -396,7 +397,11 @@ export const OneOnOneCallModal: React.FC<OneOnOneCallModalProps> = ({
     } else {
       try {
         const screenStream = await navigator.mediaDevices.getDisplayMedia({
-          video: true,
+          video: {
+            frameRate: { ideal: 15, max: 20 },
+            width: { max: 1280 },
+            height: { max: 720 }
+          },
           audio: false
         });
 
@@ -506,7 +511,7 @@ export const OneOnOneCallModal: React.FC<OneOnOneCallModalProps> = ({
                 <h3 className="text-xl font-bold text-white">{remoteUser.name}</h3>
                 <p className="text-sm text-rose-300 font-medium animate-pulse flex items-center justify-center space-x-1.5">
                   <RefreshCw className="w-4 h-4 animate-spin" />
-                  <span>{isIncoming ? "Ulanmoqda..." : "Qo'ng'iroq qilinmoqda..."}</span>
+                  <span>{isIncoming ? "Ulanmoqda..." : (remoteUser.status === 'online' ? "Jiringlamoqda..." : "Kutilmoqda...")}</span>
                 </p>
               </div>
             </div>

@@ -17,6 +17,9 @@ import { twMerge } from 'tailwind-merge';
 import { LandingPage } from './LandingPage';
 import { LiveStreamModal } from './components/LiveStreamModal';
 import { AudioRoomModal } from './components/AudioRoomModal';
+import { OneOnOneCallModal } from './components/OneOnOneCallModal';
+import { IncomingCallModal } from './components/IncomingCallModal';
+import { callNotification } from './services/callNotification';
 import { VideoPlayer, VoiceMessage } from './components/ChatMedia';
 import { CandidateSkeleton, ChatSkeleton } from './components/Skeleton';
 import { 
@@ -236,6 +239,10 @@ export default function App() {
   const [audioRoomCode, setAudioRoomCode] = useState<string>('alov_general_room');
   const [audioRoomTitle, setAudioRoomTitle] = useState<string>('Alov.uz Jonli Ovozli Xona 🎙️');
 
+  // 1-on-1 WebRTC Video Call & Screen Sharing states
+  const [activeCallUser, setActiveCallUser] = useState<any | null>(null);
+  const [incomingCallData, setIncomingCallData] = useState<{ caller: any; offer: any; callerSocketId?: string } | null>(null);
+
   const [activeRoom, setActiveRoom] = useState<any | null>(null);
   const [roomList, setRoomList] = useState<any[]>([]);
 
@@ -356,14 +363,26 @@ export default function App() {
         return next;
       });
 
-      // Update chatsList so this chat never disappears
+      // Update chatsList so this chat never disappears and keeps partner profile
       if (chatId) {
         setChatsList(prev => {
           const existingIdx = prev.findIndex(c => c.id === chatId);
           let updated = [...prev];
           const lastMsg = msg.text || (msg.type === 'image' ? 'Rasm 🖼️' : 'Xabar');
+          const partnerInfo = payload.message?.sender || (partnerId ? {
+            uid: partnerId,
+            id: partnerId,
+            name: msg.senderName || selectedChatUser?.name || 'Foydalanuvchi',
+            avatar: msg.senderAvatar || selectedChatUser?.avatar || ''
+          } : undefined);
+
           if (existingIdx > -1) {
-            const item = { ...updated[existingIdx], lastMessage: lastMsg, updatedAt: msg.createdAt || new Date().toISOString() };
+            const item = { 
+              ...updated[existingIdx], 
+              lastMessage: lastMsg, 
+              updatedAt: msg.createdAt || new Date().toISOString(),
+              partner: updated[existingIdx].partner || partnerInfo
+            };
             updated.splice(existingIdx, 1);
             updated.unshift(item);
           } else {
@@ -371,7 +390,8 @@ export default function App() {
               id: chatId,
               participants: [myUid, partnerId].filter(Boolean),
               lastMessage: lastMsg,
-              updatedAt: msg.createdAt || new Date().toISOString()
+              updatedAt: msg.createdAt || new Date().toISOString(),
+              partner: partnerInfo
             });
           }
           if (myUid) {
@@ -447,6 +467,25 @@ export default function App() {
       }
     });
 
+    // 1-on-1 WebRTC Video Call Signaling & Notifications
+    const handleIncomingCall = ({ offer, caller, callerSocketId }: any) => {
+      setIncomingCallData({ caller, offer, callerSocketId });
+      callNotification.requestPermission().catch(() => {});
+    };
+
+    socket.on('incoming-call', handleIncomingCall);
+    socket.on('call-made', handleIncomingCall);
+
+    socket.on('call-rejected', () => {
+      setIncomingCallData(null);
+      setActiveCallUser(null);
+    });
+
+    socket.on('call-ended', () => {
+      setIncomingCallData(null);
+      setActiveCallUser(null);
+    });
+
     return () => {
       socket.off('connect', registerSocketUser);
       socket.off('active_users_count');
@@ -455,6 +494,10 @@ export default function App() {
       socket.off('message_ack');
       socket.off('message_read');
       socket.off('user_typing');
+      socket.off('incoming-call', handleIncomingCall);
+      socket.off('call-made', handleIncomingCall);
+      socket.off('call-rejected');
+      socket.off('call-ended');
       socket.disconnect();
     };
   }, []);
@@ -2251,9 +2294,13 @@ export default function App() {
                       <p className="text-xs text-slate-400 font-medium">Hozircha xabarlar yo'q. Nomzodlar bilan suhbatni boshlang!</p>
                     </div>
                   ) : chatsList.map((chat, idx) => {
-                    const otherUid = chat.participants.find((p: string) => p !== firebaseUser?.uid);
-                    const otherUser = usersList.find(u => u.uid === otherUid) || (otherUid === ALOV_AI_USER.uid ? ALOV_AI_USER : null);
-                    const unread = chat.unreadCount?.[firebaseUser?.uid || ''] || 0;
+                    const myUid = currentUser?.uid || firebaseUser?.uid;
+                    const otherUid = chat.participants?.find((p: string) => p !== myUid) || chat.partner?.uid || chat.partner?.id;
+                    const otherUser = usersList.find(u => u.uid === otherUid || u.id === otherUid) || 
+                                      (otherUid === ALOV_AI_USER.uid ? ALOV_AI_USER : null) || 
+                                      chat.partner || 
+                                      { uid: otherUid, name: 'Foydalanuvchi' };
+                    const unread = chat.unreadCount?.[myUid || ''] || 0;
                     
                     return (
                       <motion.div 
@@ -2261,7 +2308,7 @@ export default function App() {
                         initial={{ opacity: 0, x: -10 }}
                         animate={{ opacity: 1, x: 0 }}
                         onClick={() => { 
-                          setSelectedChatUser(otherUser || { uid: otherUid, name: 'Foydalanuvchi' }); 
+                          setSelectedChatUser(otherUser); 
                           setChatView('conversation'); 
                         }}
                         className={cn(
@@ -2333,10 +2380,17 @@ export default function App() {
                     </div>
                   </div>
                   <div className="flex items-center space-x-1">
-                    <button onClick={handleCreateMeetLink} className="p-2 rounded-full hover:bg-rose-50 text-[#E8474A] transition active:scale-90">
+                    <button 
+                      onClick={() => {
+                        if (selectedChatUser) {
+                          setActiveCallUser(selectedChatUser);
+                        }
+                      }} 
+                      title="Video qo'ng'iroq va Ekran ulashish 📹"
+                      className="p-2 rounded-full hover:bg-rose-50 text-[#E8474A] transition active:scale-90"
+                    >
                       <Video className="w-5 h-5" />
                     </button>
-                    {/* Phone button removed */}
                   </div>
                 </div>
 
@@ -3391,17 +3445,28 @@ export default function App() {
                 onClick={() => handleToggleFollow(selectedProfile.id)} 
                 className={`flex-1 py-2.5 rounded-full font-bold text-xs shadow-sm transition-all active:scale-95 ${followingIds.includes(selectedProfile.id) ? 'bg-slate-200 text-slate-800' : 'bg-[#E8474A] text-white hover:bg-[#CB2E31]'}`}
               >
-                {followingIds.includes(selectedProfile.id) ? 'Obuna bo\'lingan' : '+ Obuna bo\'lish'}
+                {followingIds.includes(selectedProfile.id) ? 'Obuna bo\'lingan' : '+ Obuna'}
               </button>
               <button 
                 onClick={() => {
                   openChatWithUser(selectedProfile);
                   setSelectedProfile(null);
                 }} 
-                className="flex-1 py-2.5 rounded-full bg-[#E8474A] hover:bg-[#CB2E31] text-white font-bold text-xs shadow-sm flex items-center justify-center space-x-1 active:scale-95 transition-all"
+                className="flex-1 py-2.5 rounded-full bg-slate-100 hover:bg-slate-200 text-slate-800 font-bold text-xs shadow-sm flex items-center justify-center space-x-1 active:scale-95 transition-all"
               >
-                <MessageCircle className="w-3.5 h-3.5" />
-                <span>Chat yozish</span>
+                <MessageCircle className="w-3.5 h-3.5 text-[#E8474A]" />
+                <span>Chat</span>
+              </button>
+              <button 
+                onClick={() => {
+                  setActiveCallUser(selectedProfile);
+                  setSelectedProfile(null);
+                }} 
+                className="px-3.5 py-2.5 rounded-full bg-rose-600 hover:bg-rose-500 text-white font-bold text-xs shadow-sm flex items-center justify-center space-x-1 active:scale-95 transition-all"
+                title="Video qo'ng'iroq va ekran ulashish"
+              >
+                <Video className="w-3.5 h-3.5" />
+                <span>Qo'ng'iroq</span>
               </button>
             </div>
 
@@ -3450,6 +3515,47 @@ export default function App() {
             avatar: currentUser?.avatar || firebaseUser?.photoURL || ''
           }}
           onClose={() => setShowAudioRoomModal(false)}
+        />
+      )}
+
+      {/* --- WHATSAPP / TELEGRAM STYLE INCOMING CALL MODAL WITH RINGTONE --- */}
+      {incomingCallData && !activeCallUser && (
+        <IncomingCallModal
+          caller={incomingCallData.caller}
+          onAccept={() => {
+            setActiveCallUser(incomingCallData.caller);
+          }}
+          onReject={() => {
+            const targetUid = incomingCallData.caller?.uid || incomingCallData.caller?.id;
+            socketRef.current?.emit('reject-call', {
+              targetUid,
+              targetSocketId: incomingCallData.callerSocketId
+            });
+            socketRef.current?.emit('end-call', {
+              targetUid,
+              targetSocketId: incomingCallData.callerSocketId
+            });
+            setIncomingCallData(null);
+          }}
+        />
+      )}
+
+      {/* --- 1-ON-1 WEBRTC VIDEO CALL & SCREEN SHARING MODAL --- */}
+      {activeCallUser && (
+        <OneOnOneCallModal
+          socket={socketRef.current}
+          currentUser={{
+            uid: currentUser?.uid || firebaseUser?.uid || 'user_' + Date.now(),
+            name: currentUser?.name || firebaseUser?.displayName || 'Alov Foydalanuvchisi',
+            avatar: currentUser?.avatar || firebaseUser?.photoURL || ''
+          }}
+          remoteUser={activeCallUser}
+          isIncoming={!!incomingCallData}
+          incomingOffer={incomingCallData?.offer}
+          onClose={() => {
+            setActiveCallUser(null);
+            setIncomingCallData(null);
+          }}
         />
       )}
 

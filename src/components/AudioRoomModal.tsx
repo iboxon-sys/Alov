@@ -4,6 +4,7 @@ import {
   X, Plus, Send, Heart, Flame, Image as ImageIcon, Settings, LogOut, Check
 } from 'lucide-react';
 import { io, Socket } from 'socket.io-client';
+import { Room, RoomEvent, Track } from 'livekit-client';
 import { getBaseUrl } from '../config/api';
 
 export interface AudioSeat {
@@ -83,8 +84,9 @@ export const AudioRoomModal: React.FC<AudioRoomModalProps> = ({
   const [showBgModal, setShowBgModal] = useState(false);
   const [moderationError, setModerationError] = useState<string | null>(null);
 
-  // Audio / WebRTC Refs
+  // Audio / LiveKit / WebRTC Refs
   const socketRef = useRef<Socket | null>(null);
+  const livekitRoomRef = useRef<Room | null>(null);
   const localStreamRef = useRef<MediaStream | null>(null);
   const peerConnectionsRef = useRef<Map<string, RTCPeerConnection>>(new Map());
   const audioContextRef = useRef<AudioContext | null>(null);
@@ -94,7 +96,7 @@ export const AudioRoomModal: React.FC<AudioRoomModalProps> = ({
 
   const isOwner = ownerUid === currentUser.uid || (!ownerUid && roomCode === `room_${currentUser.uid}`);
 
-  // 1. Connect to Socket.io & Join Room
+  // 1. Connect to Socket.io & LiveKit SFU Cloud
   useEffect(() => {
     const socket = io(getBaseUrl());
     socketRef.current = socket;
@@ -109,6 +111,69 @@ export const AudioRoomModal: React.FC<AudioRoomModalProps> = ({
         }
       });
     });
+
+    // Initialize LiveKit Cloud SFU Room
+    const initLiveKit = async () => {
+      try {
+        const response = await fetch(`${getBaseUrl()}/api/livekit/get-token`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            roomCode,
+            uid: currentUser.uid,
+            name: currentUser.name
+          })
+        });
+        const data = await response.json();
+        if (data?.success && data?.token && data?.serverUrl) {
+          const lkRoom = new Room({
+            adaptiveStream: true,
+            dynacast: true,
+            publishDefaults: {
+              dtx: true,
+              simulcast: false
+            },
+            audioCaptureDefaults: {
+              echoCancellation: true,
+              noiseSuppression: true,
+              autoGainControl: true
+            }
+          });
+
+          // Remote participant audio subscribed
+          lkRoom.on(RoomEvent.TrackSubscribed, (track, _publication, participant) => {
+            if (track.kind === Track.Kind.Audio) {
+              const el = track.attach();
+              el.id = `livekit_audio_${participant.identity}`;
+              document.body.appendChild(el);
+            }
+          });
+
+          lkRoom.on(RoomEvent.TrackUnsubscribed, (track, _publication, participant) => {
+            track.detach();
+            const el = document.getElementById(`livekit_audio_${participant.identity}`);
+            if (el) el.remove();
+          });
+
+          // LiveKit Active Speakers Detection (Aura highlight)
+          lkRoom.on(RoomEvent.ActiveSpeakersChanged, (speakers) => {
+            const speakerIds = new Set(speakers.map(s => s.identity));
+            setSeats(prev => prev.map(s => {
+              if (!s.user) return s;
+              const isSpeaking = speakerIds.has(s.user.uid);
+              return { ...s, isSpeaking };
+            }));
+          });
+
+          await lkRoom.connect(data.serverUrl, data.token);
+          livekitRoomRef.current = lkRoom;
+        }
+      } catch (err) {
+        console.warn("LiveKit Cloud SFU fallback notice:", err);
+      }
+    };
+
+    initLiveKit();
 
     // Room Initial State
     socket.on('audio_room_state', (roomData: any) => {
@@ -248,6 +313,11 @@ export const AudioRoomModal: React.FC<AudioRoomModalProps> = ({
       socket.off('user_left_audio');
       socket.emit('leave_audio_room', { roomCode, user: currentUser });
       socket.disconnect();
+
+      if (livekitRoomRef.current) {
+        livekitRoomRef.current.disconnect();
+        livekitRoomRef.current = null;
+      }
       cleanupAudio();
     };
   }, [roomCode, currentUser]);
@@ -380,6 +450,12 @@ export const AudioRoomModal: React.FC<AudioRoomModalProps> = ({
   const handleToggleMute = () => {
     const nextMute = !isMuted;
     setIsMuted(nextMute);
+
+    // LiveKit SFU mic mute control
+    if (livekitRoomRef.current) {
+      livekitRoomRef.current.localParticipant.setMicrophoneEnabled(!nextMute).catch(() => {});
+    }
+
     if (localStreamRef.current) {
       localStreamRef.current.getAudioTracks().forEach(t => {
         t.enabled = !nextMute;
@@ -432,6 +508,19 @@ export const AudioRoomModal: React.FC<AudioRoomModalProps> = ({
     socketRef.current?.emit('room:join_seat', seatPayload);
     socketRef.current?.emit('take_seat', seatPayload);
 
+    // LiveKit publish microphone with Opus DTX + Noise Suppression
+    if (livekitRoomRef.current) {
+      try {
+        await livekitRoomRef.current.localParticipant.setMicrophoneEnabled(true, {
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true
+        });
+      } catch (err) {
+        console.warn("LiveKit publish fallback:", err);
+      }
+    }
+
     await startLocalAudio();
 
     if (socketRef.current) {
@@ -454,6 +543,12 @@ export const AudioRoomModal: React.FC<AudioRoomModalProps> = ({
       socketRef.current?.emit('room:leave_seat', leavePayload);
       socketRef.current?.emit('leave_seat', leavePayload);
       setMySeatIndex(null);
+
+      // Disable LiveKit microphone
+      if (livekitRoomRef.current) {
+        livekitRoomRef.current.localParticipant.setMicrophoneEnabled(false).catch(() => {});
+      }
+
       cleanupAudio();
     }
   };

@@ -5,6 +5,7 @@ import http from 'http';
 import { Server as SocketIOServer } from 'socket.io';
 import { createServer as createViteServer } from 'vite';
 import { GoogleGenAI } from '@google/genai';
+import { AccessToken } from 'livekit-server-sdk';
 import dotenv from 'dotenv';
 
 dotenv.config();
@@ -78,6 +79,47 @@ async function startServer() {
       });
     } catch (err: any) {
       res.status(500).json({ error: err.message || 'Failed to create Meet link' });
+    }
+  });
+
+  // LiveKit Cloud Token Generator API for Real-time SFU Audio Rooms
+  app.post('/api/livekit/get-token', async (req, res) => {
+    try {
+      const { roomCode, uid, name } = req.body;
+      if (!roomCode || !uid) {
+        return res.status(400).json({ error: 'roomCode and uid are required' });
+      }
+
+      const apiKey = process.env.LIVEKIT_API_KEY || 'APINzuEApS3axbe';
+      const apiSecret = process.env.LIVEKIT_API_SECRET || 'secret';
+      const livekitUrl = process.env.LIVEKIT_URL || 'wss://loyiham-o76iza24.livekit.cloud';
+
+      const at = new AccessToken(apiKey, apiSecret, {
+        identity: String(uid),
+        name: name || 'Foydalanuvchi',
+        ttl: '6h',
+      });
+
+      at.addGrant({
+        roomJoin: true,
+        room: roomCode,
+        canPublish: true,
+        canSubscribe: true,
+        canPublishData: true,
+      });
+
+      const token = await at.toJwt();
+
+      res.json({
+        success: true,
+        token,
+        serverUrl: livekitUrl,
+        roomCode,
+        identity: uid
+      });
+    } catch (err: any) {
+      console.error("LiveKit token generation error:", err);
+      res.status(500).json({ error: err.message || 'Failed to create LiveKit token' });
     }
   });
 
@@ -454,6 +496,15 @@ Suhbatlashish qoidalaringiz:
         socket.join(`user_${uid}`);
         const currentData = activeSocketsMap.get(socket.id) || {};
         activeSocketsMap.set(socket.id, { ...currentData, uid });
+
+        // Update online status in store without altering profile
+        const user = usersStore.get(uid);
+        if (user) {
+          user.isOnline = true;
+          user.lastSeen = new Date().toISOString();
+          usersStore.set(uid, user);
+          io.emit('user_updated', user);
+        }
         broadcastActiveUsersCount();
       }
     });
@@ -464,8 +515,19 @@ Suhbatlashish qoidalaringiz:
 
     const handleIncomingMessage = async (data: any, callback?: Function) => {
       const { chatId, message, senderId, recipientId } = data;
+      const senderUser = usersStore.get(senderId);
+
       const deliveredMessage = {
         ...message,
+        senderId: senderId,
+        senderName: message.senderName || senderUser?.name || 'Foydalanuvchi',
+        senderAvatar: message.senderAvatar || senderUser?.avatar || '',
+        sender: {
+          _id: senderId,
+          uid: senderId,
+          name: message.senderName || senderUser?.name || 'Foydalanuvchi',
+          avatar: message.senderAvatar || senderUser?.avatar || ''
+        },
         status: 'sent',
         read: false
       };
@@ -871,12 +933,26 @@ Suhbatlashish qoidalaringiz:
     });
 
     socket.on('send_room_chat_message', ({ roomCode, message }) => {
-      const room = audioRoomsStore.get(roomCode);
-      if (room && message) {
-        room.messages.push(message);
-        if (room.messages.length > 80) room.messages.shift();
-        io.to(roomCode).emit('receive_room_chat_message', message);
+      if (!roomCode || !message) return;
+      let room = audioRoomsStore.get(roomCode);
+      if (!room) {
+        room = {
+          code: roomCode,
+          title: 'Ovozli Xona 🎙️',
+          ownerUid: message.senderUid || 'guest',
+          ownerName: message.senderName || 'Boshlovchi',
+          ownerAvatar: message.senderAvatar || '',
+          backgroundUrl: '',
+          seats: Array.from({ length: 8 }, (_, i) => ({ seatIndex: i, user: null, isMuted: false, isSpeaking: false })),
+          messages: [],
+          membersCount: 1,
+          createdAt: new Date().toISOString()
+        };
+        audioRoomsStore.set(roomCode, room);
       }
+      room.messages.push(message);
+      if (room.messages.length > 100) room.messages.shift();
+      io.to(roomCode).emit('receive_room_chat_message', message);
     });
 
     socket.on('update_room_background', ({ roomCode, backgroundUrl }) => {
@@ -911,6 +987,100 @@ Suhbatlashish qoidalaringiz:
       });
     });
 
+    // --- 1-on-1 P2P WebRTC Video Call & Screen Sharing Signaling ---
+    socket.on('call-user', ({ targetUid, targetSocketId, offer, caller }) => {
+      const payload = {
+        offer,
+        caller: caller || { uid: activeSocketsMap.get(socket.id)?.uid, socketId: socket.id },
+        callerSocketId: socket.id
+      };
+      if (targetSocketId) {
+        io.to(targetSocketId).emit('incoming-call', payload);
+        io.to(targetSocketId).emit('call-made', payload);
+      }
+      if (targetUid) {
+        io.to(`user_${targetUid}`).emit('incoming-call', payload);
+        io.to(`user_${targetUid}`).emit('call-made', payload);
+      }
+    });
+
+    socket.on('accept-call', ({ targetSocketId, targetUid, answer, callee }) => {
+      const payload = {
+        answer,
+        callee: callee || { uid: activeSocketsMap.get(socket.id)?.uid, socketId: socket.id },
+        calleeSocketId: socket.id
+      };
+      if (targetSocketId) {
+        io.to(targetSocketId).emit('call-accepted', payload);
+        io.to(targetSocketId).emit('answer-made', payload);
+      }
+      if (targetUid) {
+        io.to(`user_${targetUid}`).emit('call-accepted', payload);
+        io.to(`user_${targetUid}`).emit('answer-made', payload);
+      }
+    });
+
+    socket.on('make-answer', ({ targetSocketId, targetUid, answer, callee }) => {
+      const payload = {
+        answer,
+        callee: callee || { uid: activeSocketsMap.get(socket.id)?.uid, socketId: socket.id },
+        calleeSocketId: socket.id
+      };
+      if (targetSocketId) {
+        io.to(targetSocketId).emit('call-accepted', payload);
+        io.to(targetSocketId).emit('answer-made', payload);
+      }
+      if (targetUid) {
+        io.to(`user_${targetUid}`).emit('call-accepted', payload);
+        io.to(`user_${targetUid}`).emit('answer-made', payload);
+      }
+    });
+
+    socket.on('reject-call', ({ targetSocketId, targetUid }) => {
+      const payload = { senderSocketId: socket.id };
+      if (targetSocketId) {
+        io.to(targetSocketId).emit('call-rejected', payload);
+      }
+      if (targetUid) {
+        io.to(`user_${targetUid}`).emit('call-rejected', payload);
+      }
+    });
+
+    socket.on('ice-candidate', ({ targetSocketId, targetUid, candidate }) => {
+      const payload = {
+        candidate,
+        senderSocketId: socket.id
+      };
+      if (targetSocketId) {
+        io.to(targetSocketId).emit('ice-candidate', payload);
+        io.to(targetSocketId).emit('ice-candidate-received', payload);
+      }
+      if (targetUid) {
+        io.to(`user_${targetUid}`).emit('ice-candidate', payload);
+        io.to(`user_${targetUid}`).emit('ice-candidate-received', payload);
+      }
+    });
+
+    socket.on('screen-share-toggle', ({ targetSocketId, targetUid, isSharing }) => {
+      const payload = { isSharing, senderSocketId: socket.id };
+      if (targetSocketId) {
+        io.to(targetSocketId).emit('screen-share-changed', payload);
+      }
+      if (targetUid) {
+        io.to(`user_${targetUid}`).emit('screen-share-changed', payload);
+      }
+    });
+
+    socket.on('end-call', ({ targetSocketId, targetUid }) => {
+      const payload = { senderSocketId: socket.id };
+      if (targetSocketId) {
+        io.to(targetSocketId).emit('call-ended', payload);
+      }
+      if (targetUid) {
+        io.to(`user_${targetUid}`).emit('call-ended', payload);
+      }
+    });
+
     socket.on('leave_audio_room', ({ roomCode, user }) => {
       socket.leave(roomCode);
       const room = audioRoomsStore.get(roomCode);
@@ -934,6 +1104,20 @@ Suhbatlashish qoidalaringiz:
     socket.on('disconnect', () => {
       console.log('Client disconnected:', socket.id);
       const socketInfo = activeSocketsMap.get(socket.id);
+      const uid = socketInfo?.uid;
+
+      // When user disconnects, do NOT delete them from usersStore!
+      // Only set isOnline to false and record lastSeen.
+      if (uid) {
+        const user = usersStore.get(uid);
+        if (user) {
+          user.isOnline = false;
+          user.lastSeen = new Date().toISOString();
+          usersStore.set(uid, user);
+          io.emit('user_updated', user);
+        }
+      }
+
       if (socketInfo?.streamId && streamViewersMap[socketInfo.streamId]) {
         streamViewersMap[socketInfo.streamId].delete(socket.id);
         const count = streamViewersMap[socketInfo.streamId].size;
@@ -942,6 +1126,7 @@ Suhbatlashish qoidalaringiz:
           count 
         });
       }
+
       activeSocketsMap.delete(socket.id);
       broadcastActiveUsersCount();
     });

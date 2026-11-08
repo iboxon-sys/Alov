@@ -547,8 +547,16 @@ async function startServer() {
 
       const formattedTgUrl = cleanUsername ? `https://t.me/${cleanUsername}` : undefined;
 
-      // Duplicate search across usersStore to ensure single unique account
+      const matchedBotUser = telegramBotUsers.get(cleanUsername) || 
+                             telegramBotUsers.get(`@${cleanUsername}`) ||
+                             telegramBotUsers.get(cleanPhone) || 
+                             telegramBotUsers.get(rawInput);
+      const userChatId = matchedBotUser ? matchedBotUser.chatId : undefined;
+
+      // 2. Lookup existing user by any identifier
       let existingUser: any = null;
+      
+      // Match by ChatID first
       if (userChatId) {
         for (const u of usersStore.values()) {
           if (u.telegramChatId === userChatId) {
@@ -557,6 +565,8 @@ async function startServer() {
           }
         }
       }
+      
+      // Match by Phone/Username
       if (!existingUser) {
         for (const u of usersStore.values()) {
           const uTgClean = (u.telegram || '').replace(/^(https?:\/\/t\.me\/|@)/i, '').toLowerCase();
@@ -572,12 +582,7 @@ async function startServer() {
       const uid = existingUser ? existingUser.uid : `tg_${cleanUsername || cleanPhone || rawInput}`;
 
       let user = existingUser;
-      const matchedBotUser = telegramBotUsers.get(cleanUsername) || 
-                             telegramBotUsers.get(`@${cleanUsername}`) ||
-                             telegramBotUsers.get(cleanPhone) || 
-                             telegramBotUsers.get(rawInput);
-      const userChatId = matchedBotUser ? matchedBotUser.chatId : undefined;
-
+      
       if (!user) {
         user = {
           uid,
@@ -609,8 +614,14 @@ async function startServer() {
         if (userChatId && !user.telegramChatId) {
           user.telegramChatId = userChatId;
         }
-        usersStore.set(uid, user);
+        if (cleanPhone && !user.phone) {
+          user.phone = `+${cleanPhone}`;
+        }
+        user.isOnline = true;
+        user.status = 'online';
+        usersStore.set(user.uid, user);
         saveUsersToDisk();
+        io.emit('user_updated', user);
       }
 
       if (userChatId) {

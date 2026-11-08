@@ -25,9 +25,9 @@ import { CandidateSkeleton, ChatSkeleton } from './components/Skeleton';
 import { 
   auth, googleProvider, GoogleAuthProvider,
   signInWithPopup, signInWithRedirect, getRedirectResult, signOut, onAuthStateChanged, 
-  setPersistence, browserLocalPersistence, User
+  setPersistence, browserLocalPersistence, signInWithEmailAndPassword, createUserWithEmailAndPassword, User
 } from './firebase';
-import { getApiUrl, getBaseUrl } from './config/api';
+import { getApiUrl, getBaseUrl, safeFetchJson } from './config/api';
 import { io, Socket } from 'socket.io-client';
 
 /** Utility for Tailwind class merging */
@@ -125,7 +125,7 @@ const ALOV_AI_USER = {
   uid: 'alov_ai_bot',
   id: 'ALOV-AI',
   name: 'Alov AI',
-  avatar: '/src/assets/images/alov_app_logo_1793451330582.jpg',
+  avatar: '/assets/aistudio/image_e20a1307.png',
   bio: 'Sizning samimiy va mehribon virtual suhbatdoshingiz. Sevgi va munosabatlar haqida gaplashamizmi? 😊✨',
   status: 'online',
   isAI: true
@@ -178,6 +178,16 @@ export default function App() {
   const [showAuthModal, setShowAuthModal] = useState(false);
   const [showProfileModal, setShowProfileModal] = useState(false);
   const [errorMsg, setErrorMsg] = useState('');
+  const [authMode, setAuthMode] = useState<'login' | 'register' | 'google_setup' | 'telegram'>('login');
+  const [authEmail, setAuthEmail] = useState('');
+  const [authPassword, setAuthPassword] = useState('');
+  const [pendingGoogleUser, setPendingGoogleUser] = useState<any | null>(null);
+  const [telegramInput, setTelegramInput] = useState('');
+  const [telegramStep, setTelegramStep] = useState<'input_phone' | 'input_code' | 'profile_setup'>('input_phone');
+  const [generatedTgCode, setGeneratedTgCode] = useState('');
+  const [enteredTgCode, setEnteredTgCode] = useState('');
+  const [pendingTgUser, setPendingTgUser] = useState<any | null>(null);
+  const [hasStartedBotError, setHasStartedBotError] = useState<boolean>(false);
 
   // Profile Form Fields (including Avatar URL and Location Visibility)
   const [regName, setRegName] = useState('');
@@ -273,6 +283,28 @@ export default function App() {
   const [userCoords, setUserCoords] = useState<{lat: number, lng: number, accuracy?: number}>({ lat: 41.2995, lng: 69.2401, accuracy: 20 });
   const [gpsStatusMsg, setGpsStatusMsg] = useState<string>('');
   const [activeUsersCount, setActiveUsersCount] = useState<number>(1);
+  const [mobileChatViewportHeight, setMobileChatViewportHeight] = useState<number | null>(null);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const handleViewportChange = () => {
+      if (window.visualViewport) {
+        setMobileChatViewportHeight(window.visualViewport.height);
+        window.scrollTo(0, 0);
+        document.body.scrollTop = 0;
+      }
+    };
+
+    if (window.visualViewport) {
+      window.visualViewport.addEventListener('resize', handleViewportChange);
+      window.visualViewport.addEventListener('scroll', handleViewportChange);
+      return () => {
+        window.visualViewport?.removeEventListener('resize', handleViewportChange);
+        window.visualViewport?.removeEventListener('scroll', handleViewportChange);
+      };
+    }
+  }, []);
+
   const socketRef = useRef<Socket | null>(null);
 
   const currentUserRef = useRef<any>(null);
@@ -582,6 +614,41 @@ export default function App() {
     };
   }, []);
 
+  // Telegram WebApp Auto-login & Integration
+  useEffect(() => {
+    try {
+      const tg = (window as any).Telegram?.WebApp;
+      if (tg) {
+        tg.ready();
+        tg.expand();
+        const tgUser = tg.initDataUnsafe?.user;
+        if (tgUser) {
+          const telegramUserObj = {
+            uid: `tg_${tgUser.id}`,
+            id: `TG-${tgUser.id}`,
+            name: `${tgUser.first_name || ''} ${tgUser.last_name || ''}`.trim() || 'Telegram Foydalanuvchi',
+            username: tgUser.username ? `@${tgUser.username}` : '@telegram_user',
+            avatar: tgUser.photo_url || 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&q=80&w=600',
+            bio: 'Telegram Mini App orqali ulandim! ✨',
+            isOnline: true,
+            region: 'Toshkent shahri',
+            district: 'Yunusobod tumani',
+            gender: 'female'
+          };
+          setCurrentUser(telegramUserObj);
+          setIsAuthChecking(false);
+          fetch(getBaseUrl() + '/api/users/sync', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ user: telegramUserObj })
+          }).catch(() => {});
+        }
+      }
+    } catch (e) {
+      console.warn("Telegram WebApp init warning:", e);
+    }
+  }, []);
+
   // Safety Timeout Fallback to prevent infinite loading ("Sessiya tiklanmoqda...")
   useEffect(() => {
     const timeout = setTimeout(() => {
@@ -634,13 +701,12 @@ export default function App() {
 
       // 3. Render serveriga sinxronizatsiya qilish
       try {
-        const res = await fetch(getApiUrl('/api/users/sync'), {
+        const data = await safeFetchJson(getApiUrl('/api/users/sync'), {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ user: userData })
         });
-        const data = await res.json();
-        if (data.success && data.user) {
+        if (data && data.success && data.user) {
           userData = data.user;
         }
       } catch (e) {
@@ -735,9 +801,8 @@ export default function App() {
   useEffect(() => {
     const fetchUsers = async () => {
       try {
-        const res = await fetch(getApiUrl('/api/users'));
-        const data = await res.json();
-        if (data.success && Array.isArray(data.users)) {
+        const data = await safeFetchJson(getApiUrl('/api/users'));
+        if (data && data.success && Array.isArray(data.users)) {
           setUsersList(data.users);
           setIsLoadingCandidates(false);
         }
@@ -785,9 +850,8 @@ export default function App() {
   useEffect(() => {
     const fetchRooms = async () => {
       try {
-        const res = await fetch(getApiUrl('/api/audio-rooms'));
-        const data = await res.json();
-        if (data.success && Array.isArray(data.rooms)) {
+        const data = await safeFetchJson(getApiUrl('/api/audio-rooms'));
+        if (data && data.success && Array.isArray(data.rooms)) {
           setRoomList(data.rooms);
         }
       } catch (err) {
@@ -799,6 +863,19 @@ export default function App() {
     const socket = io(getBaseUrl());
     socket.on('audio_room_created', (newRoom: any) => {
       setRoomList(prev => [...prev.filter(r => r.code !== newRoom.code), newRoom]);
+    });
+    socket.on('audio_room_state', (roomData: any) => {
+      if (roomData?.code) {
+        setRoomList(prev => {
+          const idx = prev.findIndex(r => r.code === roomData.code);
+          if (idx > -1) {
+            const updated = [...prev];
+            updated[idx] = roomData;
+            return updated;
+          }
+          return [...prev, roomData];
+        });
+      }
     });
     socket.on('audio_room_deleted', ({ roomCode }: { roomCode: string }) => {
       setRoomList(prev => prev.filter(r => r.code !== roomCode));
@@ -820,9 +897,8 @@ export default function App() {
     const fetchChats = async () => {
       let serverChats: any[] = [];
       try {
-        const res = await fetch(getApiUrl(`/api/chats/user/${myUid}`));
-        const data = await res.json();
-        if (data.success && Array.isArray(data.chats)) {
+        const data = await safeFetchJson(getApiUrl(`/api/chats/user/${myUid}`));
+        if (data && data.success && Array.isArray(data.chats)) {
           serverChats = data.chats;
         }
       } catch (e) {
@@ -894,10 +970,9 @@ export default function App() {
     }
 
     // 2. Sync from Render API
-    fetch(getApiUrl(`/api/chats/${chatId}/messages`))
-      .then(res => res.json())
+    safeFetchJson(getApiUrl(`/api/chats/${chatId}/messages`))
       .then(data => {
-        if (data.success && Array.isArray(data.messages)) {
+        if (data && data.success && Array.isArray(data.messages)) {
           const msgMap = new Map<string, any>();
           [...sanitizedLocalMsgs, ...data.messages].forEach(m => {
             const sanitized = {
@@ -1078,10 +1153,9 @@ export default function App() {
       const destLng = activeRouteUser.location.lng;
       const destLat = activeRouteUser.location.lat;
 
-      fetch(`https://router.project-osrm.org/route/v1/driving/${originLng},${originLat};${destLng},${destLat}?overview=full&geometries=geojson`)
-        .then(res => res.json())
+      safeFetchJson(`https://router.project-osrm.org/route/v1/driving/${originLng},${originLat};${destLng},${destLat}?overview=full&geometries=geojson`)
         .then(data => {
-          if (data.routes && data.routes.length > 0) {
+          if (data && data.routes && data.routes.length > 0) {
             const route = data.routes[0];
             const latLngs = route.geometry.coordinates.map((c: [number, number]) => [c[1], c[0]]);
 
@@ -1444,13 +1518,12 @@ export default function App() {
         location: userCoords
       };
 
-      const res = await fetch(getApiUrl('/api/users/sync'), {
+      const data = await safeFetchJson(getApiUrl('/api/users/sync'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ user: newUserData })
       });
-      const data = await res.json();
-      const savedUser = (data.success && data.user) ? data.user : newUserData;
+      const savedUser = (data && data.success && data.user) ? data.user : newUserData;
 
       try {
         localStorage.setItem('alov_user_' + firebaseUser.uid, JSON.stringify(savedUser));
@@ -1484,32 +1557,346 @@ export default function App() {
     }
   };
 
+  const handleEmailLogin = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!authEmail || !authPassword) {
+      setErrorMsg("Iltimos, Username/Email va parolni kiriting!");
+      return;
+    }
+    try {
+      setIsLoggingIn(true);
+      setErrorMsg('');
+
+      // Universal Backend Login by Username, Email, Telegram or Phone + Password
+      const serverLoginRes = await safeFetchJson(getApiUrl('/api/auth/login'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ loginInput: authEmail.trim(), password: authPassword.trim() })
+      });
+
+      if (serverLoginRes && serverLoginRes.success && serverLoginRes.user) {
+        const userData = serverLoginRes.user;
+        setCurrentUser(userData);
+        try {
+          localStorage.setItem('alov_user_' + userData.uid, JSON.stringify(userData));
+        } catch(e) {}
+        setShowAuthModal(false);
+        setActiveTab('discover');
+        return;
+      }
+
+      // Fallback: Firebase Sign In if input was formatted as an email
+      if (authEmail.includes('@') && !authEmail.startsWith('@')) {
+        const userCredential = await signInWithEmailAndPassword(auth, authEmail.trim(), authPassword.trim());
+        if (userCredential.user) {
+          await syncUserWithBackend(userCredential.user);
+          setShowAuthModal(false);
+          setActiveTab('discover');
+          return;
+        }
+      }
+
+      setErrorMsg(serverLoginRes?.error || "Username, Email yoki parol xato.");
+    } catch (err: any) {
+      setErrorMsg(err.message || "Kirishda xatolik yuz berdi.");
+    } finally {
+      setIsLoggingIn(false);
+    }
+  };
+
+  const handleEmailRegister = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!authEmail || !authPassword || !regName) {
+      setErrorMsg("Iltimos, email, parol va ism-familiyani to'ldiring!");
+      return;
+    }
+    try {
+      setIsLoggingIn(true);
+      setErrorMsg('');
+      const userCredential = await createUserWithEmailAndPassword(auth, authEmail, authPassword);
+      if (userCredential.user) {
+        const newUserData = {
+          uid: userCredential.user.uid,
+          id: `ALOV-${userCredential.user.uid.slice(0, 5).toUpperCase()}`,
+          name: regName,
+          email: authEmail,
+          avatar: regAvatar,
+          role: 'user',
+          age: Number(regAge) || 22,
+          birthDate: regBirthDate,
+          gender: regGender,
+          region: regRegion,
+          district: regDistrict,
+          phone: regPhone,
+          bio: regBio,
+          status: 'online',
+          isLocationEnabled: isLocationEnabled,
+          locationVisibility: regLocationVisibility,
+          location: { lat: 41.3111, lng: 69.2797 }
+        };
+        await fetch(getApiUrl('/api/users/sync'), {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ user: newUserData })
+        });
+        setCurrentUser(newUserData);
+        setShowAuthModal(false);
+        setAuthMode('login');
+        setActiveTab('discover');
+      }
+    } catch (err: any) {
+      setErrorMsg(err.message || "Ro'yxatdan o'tishda xatolik.");
+    } finally {
+      setIsLoggingIn(false);
+    }
+  };
+
   const handleGoogleLogin = async () => {
     try {
       setIsLoggingIn(true);
       setErrorMsg('');
       const provider = new GoogleAuthProvider();
       provider.setCustomParameters({ prompt: 'select_account' });
+      const result = await signInWithPopup(auth, provider);
+      if (result?.user) {
+        let existing = null;
+        try {
+          const cached = localStorage.getItem('alov_user_' + result.user.uid);
+          if (cached) existing = JSON.parse(cached);
+        } catch(e) {}
 
-      // Mobil va kompyuterlarda bir xil barqaror popup usulidan foydalanamiz
-      try {
-        const result = await signInWithPopup(auth, provider);
-        if (result?.user) {
+        if (!existing) {
+          // 1st time Google registration: open registration setup form
+          setRegName(result.user.displayName || '');
+          setRegAvatar(result.user.photoURL || regAvatar);
+          setPendingGoogleUser(result.user);
+          setAuthMode('google_setup');
+          setIsLoggingIn(false);
+        } else {
           await syncUserWithBackend(result.user);
           setShowAuthModal(false);
           setActiveTab('discover');
         }
-      } catch (popupErr: any) {
-        if (popupErr.code === 'auth/popup-closed-by-user' || popupErr.code === 'auth/cancelled-popup-request') {
-          setIsLoggingIn(false);
-          return; // Foydalanuvchi popup oynasini yopdi
+      }
+    } catch (popupErr: any) {
+      if (popupErr.code === 'auth/popup-closed-by-user' || popupErr.code === 'auth/cancelled-popup-request') {
+        setIsLoggingIn(false);
+        return;
+      }
+      setErrorMsg(popupErr.message || "Google orqali kirishda xatolik.");
+      setIsLoggingIn(false);
+    }
+  };
+
+  const handleCompleteGoogleRegistration = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!pendingGoogleUser) return;
+    if (!regName.trim()) {
+      setErrorMsg("Iltimos, ism va familiyangizni kiriting!");
+      return;
+    }
+    try {
+      setIsLoggingIn(true);
+      setErrorMsg('');
+      const cleanTg = (regTelegram || '').replace(/^(https?:\/\/t\.me\/|@)/i, '').toLowerCase();
+      const formattedTg = cleanTg ? `https://t.me/${cleanTg}` : undefined;
+
+      const newUserData = {
+        uid: pendingGoogleUser.uid,
+        id: `ALOV-${pendingGoogleUser.uid.slice(0, 5).toUpperCase()}`,
+        name: regName.trim(),
+        email: pendingGoogleUser.email || '',
+        telegram: formattedTg,
+        password: authPassword.trim() || undefined,
+        avatar: regAvatar,
+        role: 'user',
+        age: Number(regAge) || calculateAge(regBirthDate, 22),
+        birthDate: regBirthDate,
+        gender: regGender,
+        region: regRegion,
+        district: regDistrict,
+        phone: regPhone,
+        bio: regBio || 'Alov.uz da yangi tanishuvlar uchun.',
+        status: 'online',
+        isProfileCompleted: true,
+        isLocationEnabled: isLocationEnabled,
+        locationVisibility: regLocationVisibility,
+        location: { lat: 41.3111, lng: 69.2797 }
+      };
+      await fetch(getApiUrl('/api/users/sync'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ user: newUserData })
+      });
+      setCurrentUser(newUserData);
+      try {
+        localStorage.setItem('alov_user_' + newUserData.uid, JSON.stringify(newUserData));
+      } catch(e) {}
+      setPendingGoogleUser(null);
+      setShowAuthModal(false);
+      setAuthMode('login');
+      setActiveTab('discover');
+    } catch (err: any) {
+      setErrorMsg(err.message || "Profil yaratishda xatolik.");
+    } finally {
+      setIsLoggingIn(false);
+    }
+  };
+
+  const handleStartTelegramAuth = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!telegramInput.trim()) {
+      setErrorMsg("Iltimos, Telegram telefon raqami yoki username'ni kiriting!");
+      return;
+    }
+    try {
+      setIsLoggingIn(true);
+      setErrorMsg('');
+      setHasStartedBotError(false);
+
+      // Check if user has previously saved telegramChatId in localStorage
+      let cachedChatId = undefined;
+      try {
+        const cleanKey = telegramInput.trim().replace(/^(https?:\/\/t\.me\/|@)/i, '').toLowerCase();
+        cachedChatId = localStorage.getItem('alov_tg_chat_' + cleanKey);
+        if (!cachedChatId && currentUser) {
+          cachedChatId = currentUser.telegramChatId || currentUser.chatId;
         }
-        console.warn("Popup oyna bloklandi, redirect usuliga o'tilmoqda:", popupErr);
-        await signInWithRedirect(auth, provider);
+      } catch (e) {}
+
+      const data = await safeFetchJson(getApiUrl('/api/auth/send-telegram-code'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ 
+          phoneNumber: telegramInput.trim(),
+          chatId: cachedChatId
+        })
+      });
+      if (data && data.success && data.hasStartedBot) {
+        setTelegramStep('input_code');
+        try {
+          const cleanKey = telegramInput.trim().replace(/^(https?:\/\/t\.me\/|@)/i, '').toLowerCase();
+          if (data.chatId) {
+            localStorage.setItem('alov_tg_chat_' + cleanKey, String(data.chatId));
+            localStorage.setItem('alov_last_tg_chat', String(data.chatId));
+          }
+          localStorage.setItem('alov_tg_started_' + cleanKey, 'true');
+        } catch (e) {}
+      } else if (data && data.hasStartedBot === false) {
+        setHasStartedBotError(true);
+        setErrorMsg(data.error || "Botimiz ro'yxatida topilmadingiz! Iltimos, avval @alovuz_bot ga kirib /start tugmasini bir marta bosing.");
+      } else {
+        setErrorMsg(data?.error || "Kod yuborishda xatolik.");
       }
     } catch (err: any) {
-      console.error("Google Login Error:", err);
-      setErrorMsg(err.message || "Google orqali kirishda xatolik yuz berdi.");
+      setErrorMsg(err.message || "Tarmoq xatoligi.");
+    } finally {
+      setIsLoggingIn(false);
+    }
+  };
+
+  const handleVerifyTelegramCode = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!enteredTgCode.trim()) {
+      setErrorMsg("Iltimos, kodni kiriting!");
+      return;
+    }
+    try {
+      setIsLoggingIn(true);
+      setErrorMsg('');
+      const data = await safeFetchJson(getApiUrl('/api/auth/verify-telegram-code'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ phoneNumber: telegramInput.trim(), code: enteredTgCode.trim() })
+      });
+      if (data && data.success && data.user) {
+        // Remember chatId for this user so they NEVER have to press start again
+        try {
+          const cleanKey = telegramInput.trim().replace(/^(https?:\/\/t\.me\/|@)/i, '').toLowerCase();
+          if (data.user.telegramChatId) {
+            localStorage.setItem('alov_tg_chat_' + cleanKey, String(data.user.telegramChatId));
+          }
+          localStorage.setItem('alov_tg_started_' + cleanKey, 'true');
+        } catch (e) {}
+
+        if (data.isNewUser || !data.user.isProfileCompleted) {
+          setPendingTgUser(data.user);
+          setTelegramStep('profile_setup');
+          setRegName(data.user.name && !data.user.name.startsWith('@') ? data.user.name : '');
+          const cleanUserTg = telegramInput.replace(/^(https?:\/\/t\.me\/|@)/i, '').toLowerCase();
+          setRegTelegram(cleanUserTg ? `https://t.me/${cleanUserTg}` : (data.user.telegram || ''));
+        } else {
+          const userData = data.user;
+          setCurrentUser(userData);
+          try {
+            localStorage.setItem('alov_user_' + userData.uid, JSON.stringify(userData));
+          } catch(e) {}
+          setShowAuthModal(false);
+          setAuthMode('login');
+          setTelegramStep('input_phone');
+          setActiveTab('discover');
+        }
+      } else {
+        setErrorMsg(data?.error || "Kiritilgan tasdiqlash kodi noto'g'ri!");
+      }
+    } catch (err: any) {
+      setErrorMsg(err.message || "Tasdiqlashda xatolik.");
+    } finally {
+      setIsLoggingIn(false);
+    }
+  };
+
+  const handleCompleteTelegramRegistration = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!pendingTgUser) return;
+    if (!regName.trim()) {
+      setErrorMsg("Iltimos, ism va familiyangizni kiriting!");
+      return;
+    }
+    try {
+      setIsLoggingIn(true);
+      setErrorMsg('');
+      const cleanTg = (regTelegram || telegramInput || '').replace(/^(https?:\/\/t\.me\/|@)/i, '').toLowerCase();
+      const formattedTg = cleanTg ? `https://t.me/${cleanTg}` : undefined;
+
+      const newUserData = {
+        uid: pendingTgUser.uid,
+        id: `ALOV-TG-${pendingTgUser.uid.slice(0, 5).toUpperCase()}`,
+        name: regName.trim(),
+        telegram: formattedTg,
+        telegramChatId: pendingTgUser.telegramChatId,
+        password: authPassword.trim() || undefined,
+        avatar: regAvatar || 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&q=80&w=600',
+        role: 'user',
+        age: Number(regAge) || calculateAge(regBirthDate, 22),
+        birthDate: regBirthDate,
+        gender: regGender,
+        region: regRegion,
+        district: regDistrict,
+        phone: regPhone,
+        bio: regBio || 'Alov.uz da yangi tanishuvlar va suhbatlar uchun.',
+        status: 'online',
+        isProfileCompleted: true,
+        isLocationEnabled: isLocationEnabled,
+        locationVisibility: regLocationVisibility,
+        location: { lat: 41.3111, lng: 69.2797 }
+      };
+      await fetch(getApiUrl('/api/users/sync'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ user: newUserData })
+      });
+      setCurrentUser(newUserData);
+      try {
+        localStorage.setItem('alov_user_' + newUserData.uid, JSON.stringify(newUserData));
+      } catch(e) {}
+      setPendingTgUser(null);
+      setShowAuthModal(false);
+      setAuthMode('login');
+      setTelegramStep('input_phone');
+      setActiveTab('discover');
+    } catch (err: any) {
+      setErrorMsg(err.message || "Profil yaratishda xatolik.");
     } finally {
       setIsLoggingIn(false);
     }
@@ -1545,13 +1932,12 @@ export default function App() {
   const handleCreateMeetLink = async () => {
     let meetUrl = 'https://meet.google.com/abc-defg-hij';
     try {
-      const res = await fetch(getApiUrl('/api/meet/create-link'), {
+      const data = await safeFetchJson(getApiUrl('/api/meet/create-link'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ title: `${currentUser?.name} va ${selectedChatUser?.name} Google Meet Qo'ng'irog'i` })
       });
-      const data = await res.json();
-      if (data.success && data.meetUrl) {
+      if (data && data.success && data.meetUrl) {
         meetUrl = data.meetUrl;
       }
     } catch (e) {
@@ -1668,7 +2054,7 @@ export default function App() {
     }
 
     try {
-      const res = await fetch(getApiUrl('/api/audio-rooms/create'), {
+      const data = await safeFetchJson(getApiUrl('/api/audio-rooms/create'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -1678,8 +2064,7 @@ export default function App() {
           title: `${myName} Ovozli Xonasi 🎙️`
         })
       });
-      const data = await res.json();
-      if (data.success && data.room) {
+      if (data && data.success && data.room) {
         setAudioRoomCode(data.room.code);
         setAudioRoomTitle(data.room.title);
         setShowAudioRoomModal(true);
@@ -1907,6 +2292,7 @@ export default function App() {
       {/* Top Header inside mockup */}
       <header className="shrink-0 bg-white border-b border-[rgba(28,28,28,0.06)] px-3 h-13 flex items-center justify-between">
         <div className="flex items-center space-x-2 cursor-pointer" onClick={() => setActiveTab('discover')}>
+          <img src="/assets/aistudio/image_e20a1307.png" alt="Alov.uz Logo" className="w-7 h-7 rounded-xl object-cover border border-[#E8474A]/30 shadow-xs" />
           <span className="text-lg font-black tracking-tight text-[#1C1C1C]">
             alov<span className="text-[#E8474A]">.uz</span>
           </span>
@@ -1985,6 +2371,24 @@ export default function App() {
                   <CandidateSkeleton />
                   <CandidateSkeleton />
                 </>
+              ) : filteredCandidates.length === 0 ? (
+                <div className="col-span-2 p-6 text-center bg-white rounded-[20px] border border-slate-100 card-shadow space-y-3">
+                  <div className="w-12 h-12 bg-rose-50 text-[#E8474A] rounded-full flex items-center justify-center mx-auto">
+                    <Users className="w-6 h-6" />
+                  </div>
+                  <h4 className="text-sm font-bold text-slate-800">Ushbu filtr bo'yicha nomzodlar topilmadi</h4>
+                  <p className="text-xs text-slate-500">Filtrni tozalab barcha viloyatdagi nomzodlarni ko'rishingiz mumkin.</p>
+                  <button 
+                    onClick={() => {
+                      setFilterRegion('Barchasi');
+                      setFilterDistrict('Barchasi');
+                      setSearchQuery('');
+                    }}
+                    className="px-4 py-2 rounded-full bg-[#E8474A] text-white text-xs font-bold hover:bg-[#d4383b] transition active:scale-95 shadow-xs"
+                  >
+                    Barcha nomzodlarni ko'rish
+                  </button>
+                </div>
               ) : filteredCandidates.map((user, idx) => (
                 <div key={user.uid ? `${user.uid}_${idx}` : `${user.id}_${idx}`} className="bg-white rounded-[20px] p-2.5 card-shadow flex flex-col justify-between space-y-2 border border-slate-100 hover:shadow-md transition-all">
                   <div className="relative aspect-[3/4] w-full rounded-[14px] overflow-hidden bg-slate-100">
@@ -2007,6 +2411,15 @@ export default function App() {
                     <span className="absolute top-2 right-2 px-2 py-0.5 rounded-full bg-[#E8474A] text-white text-[8px] font-bold shadow-xs">
                       {user.id}
                     </span>
+
+                    {/* Online / Offline Status Badge */}
+                    <div className={cn(
+                      "absolute bottom-2 left-2 px-2 py-0.5 rounded-full backdrop-blur-md text-[8px] font-semibold flex items-center space-x-1 shadow-xs border border-white/20 text-white",
+                      (user.status === 'online' || user.isOnline) ? "bg-emerald-600/90" : "bg-slate-700/80"
+                    )}>
+                      <span className={cn("w-1.5 h-1.5 rounded-full bg-white", (user.status === 'online' || user.isOnline) && "animate-pulse")} />
+                      <span>{(user.status === 'online' || user.isOnline) ? "Onlayn" : "Oflayn"}</span>
+                    </div>
                   </div>
 
                   <div className="min-w-0">
@@ -2384,7 +2797,13 @@ export default function App() {
                 </div>
               </div>
             ) : (
-              <div className="fixed inset-0 md:absolute md:inset-0 z-50 bg-white flex flex-col h-[100dvh] md:h-full max-h-[100dvh] overflow-hidden animate-in fade-in zoom-in-95 duration-200">
+              <div 
+                style={{ 
+                  height: mobileChatViewportHeight ? `${mobileChatViewportHeight}px` : '100dvh',
+                  maxHeight: mobileChatViewportHeight ? `${mobileChatViewportHeight}px` : '100dvh'
+                }}
+                className="fixed inset-x-0 top-0 bottom-0 md:absolute md:inset-0 z-50 bg-white flex flex-col overflow-hidden animate-in fade-in zoom-in-95 duration-200"
+              >
                 <div className="sticky top-0 z-30 shrink-0 p-3 border-b border-slate-100 flex items-center justify-between bg-white/95 backdrop-blur-md shadow-subtle">
                   <div className="flex items-center space-x-2">
                     <button onClick={() => setChatView('list')} className="p-2 rounded-full hover:bg-slate-100 text-slate-700 transition active:scale-90">
@@ -2523,6 +2942,13 @@ export default function App() {
                       placeholder="Xabar yozing..." 
                       rows={1}
                       value={inputMessage}
+                      onFocus={() => {
+                        setTimeout(() => {
+                          window.scrollTo(0, 0);
+                          document.body.scrollTop = 0;
+                          commentsEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+                        }, 120);
+                      }}
                       onChange={(e) => {
                         setInputMessage(e.target.value);
                         handleTyping();
@@ -2847,65 +3273,9 @@ export default function App() {
     <div className="min-h-screen bg-[#FAFAFB] text-[#1C1C1C] font-sans selection:bg-[#E8474A] selection:text-white">
       
       {/* Landing Page */}
-      {(!firebaseUser || activeTab === 'landing') && (
-        <div>
-          <header className="sticky top-0 z-50 backdrop-blur-xl bg-white/90 border-b border-[rgba(28,28,28,0.06)] shadow-subtle">
-            <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 h-20 flex items-center justify-between">
-              <div className="flex items-center space-x-3 cursor-pointer" onClick={() => setActiveTab('landing')}>
-                <span className="text-2xl font-black tracking-tight text-[#1C1C1C]">
-                  alov<span className="text-[#E8474A]">.uz</span>
-                </span>
-              </div>
-              <button 
-                onClick={() => setShowAuthModal(true)}
-                className="bg-[#E8474A] text-white px-7 py-3 rounded-full font-semibold text-sm shadow-medium hover:bg-[#CB2E31] transition-all card-shadow-hover flex items-center space-x-2"
-              >
-                <LogIn className="w-4 h-4" />
-                <span>Kirish / Ro'yxatdan o'tish</span>
-              </button>
-            </div>
-          </header>
-
-          <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-16 space-y-20">
-            <div className="grid grid-cols-1 lg:grid-cols-12 gap-12 items-center">
-              <div className="lg:col-span-7 space-y-8">
-                <span className="inline-flex items-center space-x-2 px-4 py-1.5 rounded-full bg-[#FCEAEA] text-[#E8474A] text-xs font-bold uppercase tracking-wider">
-                  <Sparkles className="w-3.5 h-3.5 text-[#E8474A]" />
-                  <span>Jiddiy Tanishuv va Jonli Efir Platformasi</span>
-                </span>
-                <h1 className="text-6xl md:text-[104px] font-editorial leading-[1.02] tracking-[-2.6px] text-[#1C1C1C]">
-                  Oila <span className="italic text-[#E8474A]">shu yerdan</span> boshlanadi.
-                </h1>
-                <p className="text-[#57534E] text-lg font-normal leading-[1.65] max-w-xl">
-                  Alov.uz — o'z juftini qidirayotganlar uchun maxsus yaratilgan ishonchli platforma. Google orqali kiring, jonli ovozli xonalar va video qo'ng'iroqlardan foydalaning!
-                </p>
-                <button 
-                  onClick={() => setShowAuthModal(true)}
-                  className="bg-[#E8474A] text-white px-8 py-4 rounded-full font-semibold text-base shadow-medium hover:bg-[#CB2E31] transition-all card-shadow-hover flex items-center space-x-2"
-                >
-                  <span>Xoziroq ro'yxatdan o'ting !</span>
-                  <ArrowUpRight className="w-5 h-5" />
-                </button>
-              </div>
-
-              <div className="lg:col-span-5 flex justify-center">
-                <div className="bg-white p-6 rounded-[28px] card-shadow border w-full max-w-md relative overflow-hidden">
-                  <div className="relative h-[480px] rounded-[20px] overflow-hidden bg-gradient-to-tr from-rose-100 to-pink-50">
-                    <img 
-                      src="https://i.pinimg.com/1200x/76/ef/1d/76ef1d3d0a406603cfbdd02b21d2a23c.jpg" 
-                      alt="Alov.uz" 
-                      className="w-full h-full object-cover"
-                    />
-                  </div>
-                </div>
-              </div>
-            </div>
-          </main>
-        </div>
-      )}
-
-      {/* Dashboard inside smartphone mockup */}
-      {firebaseUser && activeTab !== 'landing' && (
+      {(!firebaseUser && !currentUser) || activeTab === 'landing' ? (
+        <LandingPage onLogin={() => setShowAuthModal(true)} />
+      ) : (
         <div className="min-h-screen bg-gradient-to-br from-slate-950 via-rose-950 to-purple-950 flex flex-col items-center justify-center p-0 md:p-6 overflow-hidden">
           {showUpdateBanner && (
             <motion.div 
@@ -2931,53 +3301,544 @@ export default function App() {
         </div>
       )}
 
-      {/* --- AUTHENTICATION MODAL (Google & Phone SMS Auth) --- */}
+      {/* --- AUTHENTICATION MODAL --- */}
       {showAuthModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-md animate-fadeIn">
-          <div className="bg-white rounded-[32px] max-w-sm w-full p-6 text-left space-y-4 relative shadow-2xl border border-slate-100">
+          <div className="bg-white rounded-[32px] max-w-sm w-full p-6 text-left space-y-4 relative shadow-2xl border border-slate-100 max-h-[90vh] overflow-y-auto">
             <button 
               onClick={() => {
                 setShowAuthModal(false);
+                setAuthMode('login');
+                setTelegramStep('input_phone');
               }} 
               className="absolute top-5 right-5 p-1.5 rounded-full text-slate-400 hover:text-slate-700 hover:bg-slate-100 transition"
             >
               <X className="w-4 h-4" />
             </button>
 
-            <div className="space-y-4 text-center">
-              <div className="space-y-1">
-                <h2 className="text-xl font-black text-slate-900 tracking-tight">Alov.uz ga xush kelibsiz</h2>
-                <p className="text-xs text-slate-500 font-medium">Platformaga kirish uchun Google akkauntingizdan foydalaning</p>
-              </div>
+            {authMode === 'google_setup' ? (
+              <div className="space-y-4">
+                <div className="space-y-1 text-center">
+                  <h2 className="text-xl font-black text-slate-900 tracking-tight">Profilni yakunlash ✨</h2>
+                  <p className="text-xs text-slate-500 font-medium">Google akkauntingiz ulandi. Ma'lumotlarni to'ldiring:</p>
+                </div>
 
-              <div className="space-y-4 pt-2">
-                <button 
-                  onClick={handleGoogleLogin}
-                  disabled={isLoggingIn}
-                  className="w-full flex items-center justify-center space-x-3 py-4 px-4 rounded-2xl border border-slate-200 hover:border-slate-300 hover:bg-slate-50 font-bold text-sm shadow-xs bg-white text-slate-800 active:scale-98 transition duration-200 disabled:opacity-60 disabled:cursor-not-allowed"
-                >
-                  {isLoggingIn ? (
-                    <div className="flex items-center space-x-2">
-                      <RefreshCw className="w-4 h-4 text-rose-500 animate-spin" />
-                      <span>Kirilmoqda...</span>
+                {errorMsg && (
+                  <div className="p-3 bg-rose-50 border border-rose-200 rounded-xl text-rose-600 text-xs font-semibold">
+                    {errorMsg}
+                  </div>
+                )}
+
+                <form onSubmit={handleCompleteGoogleRegistration} className="space-y-3">
+                  <div>
+                    <label className="block text-[11px] font-bold text-slate-700 mb-1">Ism va Familiya</label>
+                    <input 
+                      type="text" 
+                      value={regName}
+                      onChange={(e) => setRegName(e.target.value)}
+                      required
+                      className="w-full px-3.5 py-2.5 rounded-xl bg-slate-50 border border-slate-200 text-xs font-semibold text-slate-900 focus:border-red-500 focus:bg-white outline-none"
+                      placeholder="Ismingiz..."
+                    />
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-2">
+                    <div>
+                      <label className="block text-[11px] font-bold text-slate-700 mb-1">Tug'ilgan sana</label>
+                      <input 
+                        type="date" 
+                        value={regBirthDate}
+                        onChange={(e) => {
+                          const bDate = e.target.value;
+                          setRegBirthDate(bDate);
+                          setRegAge(String(calculateAge(bDate)));
+                        }}
+                        className="w-full px-3 py-2.5 rounded-xl bg-slate-50 border border-slate-200 text-xs font-semibold text-slate-900 focus:border-red-500 focus:bg-white outline-none"
+                      />
                     </div>
-                  ) : (
-                    <>
-                      <svg className="w-5 h-5 shrink-0" viewBox="0 0 24 24">
-                        <path fill="#4285F4" d="M23.745 12.27c0-.7-.06-1.4-.19-2.07H12v4.51h6.6c-.29 1.52-1.14 2.82-2.4 3.68v3.05h3.88c2.27-2.09 3.665-5.17 3.665-9.17z"/>
-                        <path fill="#34A853" d="M12 24c3.24 0 5.95-1.08 7.93-2.91l-3.88-3.05c-1.08.72-2.45 1.16-4.05 1.16-3.13 0-5.78-2.11-6.73-4.96H1.18v3.15C3.165 21.33 7.21 24 12 24z"/>
-                        <path fill="#FBBC05" d="M5.27 14.24c-.25-.72-.38-1.49-.38-2.24s.13-1.52.38-2.24V6.61H1.18C.43 8.13 0 9.87 0 12s.43 3.87 1.18 5.39l4.09-3.15z"/>
-                        <path fill="#EA4335" d="M12 4.75c1.77 0 3.35.61 4.6 1.8l3.42-3.42C17.95 1.19 15.24 0 12 0 7.21 0 3.165 2.67 1.18 6.61l4.09 3.15c.95-2.85 3.6-4.96 6.73-4.96z"/>
-                      </svg>
-                      <span>Google orqali davom ettirish</span>
-                    </>
-                  )}
-                </button>
-                <p className="text-[10px] text-slate-400 text-center px-4">
-                  Kirish orqali siz foydalanish shartlari va maxfiylik siyosatiga rozilik bildirasiz.
-                </p>
+                    <div>
+                      <label className="block text-[11px] font-bold text-slate-700 mb-1">Jinsi</label>
+                      <select 
+                        value={regGender}
+                        onChange={(e) => setRegGender(e.target.value as any)}
+                        className="w-full px-3 py-2.5 rounded-xl bg-slate-50 border border-slate-200 text-xs font-semibold text-slate-900 focus:border-red-500 focus:bg-white outline-none"
+                      >
+                        <option value="female">Ayol 👩</option>
+                        <option value="male">Erkak 👨</option>
+                      </select>
+                    </div>
+                  </div>
+
+                  <div>
+                    <label className="block text-[11px] font-bold text-slate-700 mb-1">Viloyat</label>
+                    <select 
+                      value={regRegion}
+                      onChange={(e) => {
+                        const reg = e.target.value;
+                        setRegRegion(reg);
+                        const dists = UZ_LOCATIONS[reg] || [];
+                        if (dists.length > 0) setRegDistrict(dists[0]);
+                      }}
+                      className="w-full px-3.5 py-2.5 rounded-xl bg-slate-50 border border-slate-200 text-xs font-semibold text-slate-900 focus:border-red-500 focus:bg-white outline-none"
+                    >
+                      {Object.keys(UZ_LOCATIONS).map((reg) => (
+                        <option key={reg} value={reg}>{reg}</option>
+                      ))}
+                    </select>
+                  </div>
+
+                  <div>
+                    <label className="block text-[11px] font-bold text-slate-700 mb-1">Telegram (Havola / Username)</label>
+                    <input 
+                      type="text" 
+                      value={regTelegram}
+                      onChange={(e) => setRegTelegram(e.target.value)}
+                      className="w-full px-3.5 py-2.5 rounded-xl bg-slate-50 border border-slate-200 text-xs font-semibold text-slate-900 focus:border-red-500 focus:bg-white outline-none"
+                      placeholder="https://t.me/username yoki @username"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-[11px] font-bold text-slate-700 mb-1">Akkaunt uchun Parol (Kirish uchun)</label>
+                    <input 
+                      type="password" 
+                      value={authPassword}
+                      onChange={(e) => setAuthPassword(e.target.value)}
+                      required
+                      className="w-full px-3.5 py-2.5 rounded-xl bg-slate-50 border border-slate-200 text-xs font-semibold text-slate-900 focus:border-red-500 focus:bg-white outline-none"
+                      placeholder="••••••••"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-[11px] font-bold text-slate-700 mb-1">Bio / O'zingiz haqingizda</label>
+                    <textarea 
+                      value={regBio}
+                      onChange={(e) => setRegBio(e.target.value)}
+                      rows={2}
+                      className="w-full px-3.5 py-2 rounded-xl bg-slate-50 border border-slate-200 text-xs font-semibold text-slate-900 focus:border-red-500 focus:bg-white outline-none resize-none"
+                      placeholder="Qanday insonlarni qidiryapsiz..."
+                    />
+                  </div>
+
+                  <button 
+                    type="submit"
+                    disabled={isLoggingIn}
+                    className="w-full py-3 px-4 rounded-2xl bg-[#E8474A] text-white font-bold text-sm shadow-md hover:bg-[#cb2e31] transition disabled:opacity-60"
+                  >
+                    {isLoggingIn ? "Saqlanmoqda..." : "Profilni yaratish va boshlash ✨"}
+                  </button>
+                </form>
               </div>
-            </div>
+            ) : telegramStep === 'input_phone' && authMode === 'telegram' ? (
+              <div className="space-y-4">
+                <div className="space-y-1 text-center">
+                  <h2 className="text-xl font-black text-slate-900 tracking-tight">Telegram orqali kirish</h2>
+                  <p className="text-xs text-slate-500 font-medium">Telefon raqamingiz yoki @username'ingizni kiriting:</p>
+                </div>
+
+                {errorMsg && (
+                  <div className="p-3 bg-rose-50 border border-rose-200 rounded-xl text-rose-600 text-xs font-semibold">
+                    {errorMsg}
+                  </div>
+                )}
+
+                {hasStartedBotError && (
+                  <div className="p-3.5 bg-amber-50 border border-amber-200 rounded-2xl space-y-3 text-left">
+                    <div className="flex items-start space-x-2">
+                      <AlertTriangle className="w-5 h-5 text-amber-600 shrink-0 mt-0.5" />
+                      <div className="text-xs text-amber-900 font-medium leading-relaxed">
+                        <p className="font-bold text-amber-950">Botimizga ruxsat berilmagan!</p>
+                        <p className="mt-1">Kodni Telegram xabarnomasida olish uchun avval rasmiy botimizga kirib <b>/start</b> tugmasini bosing:</p>
+                      </div>
+                    </div>
+                    
+                    <a 
+                      href={
+                        telegramInput.trim() 
+                          ? `https://t.me/alovuz_bot?start=${encodeURIComponent(telegramInput.trim().replace(/^(https?:\/\/t\.me\/|@)/i, ''))}`
+                          : "https://t.me/alovuz_bot"
+                      } 
+                      target="_blank" 
+                      rel="noopener noreferrer"
+                      onClick={() => {
+                        try {
+                          const cleanKey = telegramInput.trim().replace(/^(https?:\/\/t\.me\/|@)/i, '').toLowerCase();
+                          localStorage.setItem('alov_tg_opened_' + cleanKey, 'true');
+                        } catch(e) {}
+                      }}
+                      className="flex items-center justify-center space-x-2 w-full py-2.5 px-4 rounded-xl bg-[#229ED9] text-white font-bold text-xs hover:bg-[#1f8fc6] transition shadow-xs"
+                    >
+                      <svg className="w-4 h-4 fill-current" viewBox="0 0 24 24">
+                        <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm4.64 6.8c-.15 1.58-.8 5.42-1.13 7.19-.14.75-.42 1-.68 1.03-.58.05-1.02-.38-1.58-.75-.88-.58-1.38-.94-2.23-1.5-.99-.65-.35-1.01.22-1.59.15-.15 2.71-2.48 2.76-2.69.01-.03.01-.14-.07-.2-.08-.06-.19-.04-.27 0-.12.05-1.98 1.26-5.6 3.7-.53.36-1.01.54-1.44.53-.47-.01-1.38-.26-2.06-.48-.83-.27-1.49-.42-1.43-.88.03-.24.37-.49 1.02-.75 3.99-1.74 6.65-2.89 7.98-3.45 3.8-1.6 4.59-1.88 5.1-1.89.11 0 .37.03.54.17.14.12.18.28.2.4-.02.07-.02.13-.04.2z"/>
+                      </svg>
+                      <span>🤖 Botga o'tish (@alovuz_bot)</span>
+                      <ArrowUpRight className="w-3.5 h-3.5" />
+                    </a>
+                  </div>
+                )}
+
+                <form onSubmit={handleStartTelegramAuth} className="space-y-3">
+                  <div>
+                    <label className="block text-[11px] font-bold text-slate-700 mb-1">Telefon raqam yoki Username</label>
+                    <input 
+                      type="text" 
+                      value={telegramInput}
+                      onChange={(e) => {
+                        setTelegramInput(e.target.value);
+                        if (hasStartedBotError) setHasStartedBotError(false);
+                      }}
+                      required
+                      className="w-full px-3.5 py-2.5 rounded-xl bg-slate-50 border border-slate-200 text-xs font-semibold text-slate-900 focus:border-red-500 focus:bg-white outline-none"
+                      placeholder="+998901234567 yoki @username"
+                    />
+                  </div>
+
+                  <button 
+                    type="submit"
+                    disabled={isLoggingIn}
+                    className="w-full py-3 px-4 rounded-2xl bg-[#229ED9] text-white font-bold text-sm shadow-md hover:bg-[#1f8fc6] transition disabled:opacity-60"
+                  >
+                    {isLoggingIn ? "Tekshirilmoqda..." : hasStartedBotError ? "🔄 Botni yoqdim (Kodni yuborish)" : "Tasdiqlash kodi olish 📨"}
+                  </button>
+
+                  <button 
+                    type="button"
+                    onClick={() => { setAuthMode('login'); setTelegramStep('input_phone'); setHasStartedBotError(false); setErrorMsg(''); }}
+                    className="w-full text-center text-xs font-bold text-slate-500 hover:text-slate-800 pt-1"
+                  >
+                    Orqaga qaytish
+                  </button>
+                </form>
+              </div>
+            ) : telegramStep === 'input_code' ? (
+              <div className="space-y-4 text-center">
+                <div className="space-y-1">
+                  <h2 className="text-xl font-black text-slate-900 tracking-tight">Tasdiqlash Kodini Kiriting 🔐</h2>
+                  <p className="text-xs text-slate-500 font-medium">
+                    Kodingiz Telegram botimiz (<b>@alovuz_bot</b>) chatiga yuborildi:
+                  </p>
+                </div>
+
+                <a 
+                  href="https://t.me/alovuz_bot" 
+                  target="_blank" 
+                  rel="noopener noreferrer"
+                  className="flex items-center justify-center space-x-2 w-full py-3 px-4 rounded-2xl bg-[#229ED9] text-white font-bold text-xs hover:bg-[#1f8fc6] transition shadow-sm"
+                >
+                  <svg className="w-4 h-4 fill-current shrink-0" viewBox="0 0 24 24">
+                    <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm4.64 6.8c-.15 1.58-.8 5.42-1.13 7.19-.14.75-.42 1-.68 1.03-.58.05-1.02-.38-1.58-.75-.88-.58-1.38-.94-2.23-1.5-.99-.65-.35-1.01.22-1.59.15-.15 2.71-2.48 2.76-2.69.01-.03.01-.14-.07-.2-.08-.06-.19-.04-.27 0-.12.05-1.98 1.26-5.6 3.7-.53.36-1.01.54-1.44.53-.47-.01-1.38-.26-2.06-.48-.83-.27-1.49-.42-1.43-.88.03-.24.37-.49 1.02-.75 3.99-1.74 6.65-2.89 7.98-3.45 3.8-1.6 4.59-1.88 5.1-1.89.11 0 .37.03.54.17.14.12.18.28.2.4-.02.07-.02.13-.04.2z"/>
+                  </svg>
+                  <span>🤖 Botga o'tish va kodni ko'rish (@alovuz_bot)</span>
+                  <ArrowUpRight className="w-4 h-4" />
+                </a>
+
+                {errorMsg && (
+                  <div className="p-3 bg-rose-50 border border-rose-200 rounded-xl text-rose-600 text-xs font-semibold text-left">
+                    {errorMsg}
+                  </div>
+                )}
+
+                <form onSubmit={handleVerifyTelegramCode} className="space-y-3 text-left">
+                  <div>
+                    <label className="block text-[11px] font-bold text-slate-700 mb-1">6 xonali tasdiqlash kodi</label>
+                    <input 
+                      type="text" 
+                      maxLength={6}
+                      value={enteredTgCode}
+                      onChange={(e) => setEnteredTgCode(e.target.value)}
+                      required
+                      className="w-full px-4 py-3 rounded-xl bg-slate-50 border border-slate-200 text-center text-xl font-black tracking-widest text-slate-900 focus:border-red-500 focus:bg-white outline-none"
+                      placeholder="123456"
+                    />
+                  </div>
+
+                  <button 
+                    type="submit"
+                    disabled={isLoggingIn}
+                    className="w-full py-3 px-4 rounded-2xl bg-[#E8474A] text-white font-bold text-sm shadow-md hover:bg-[#cb2e31] transition disabled:opacity-60"
+                  >
+                    {isLoggingIn ? "Tekshirilmoqda..." : "Tasdiqlash va kirish 🚀"}
+                  </button>
+
+                  <button 
+                    type="button"
+                    onClick={() => { setTelegramStep('input_phone'); setEnteredTgCode(''); setErrorMsg(''); }}
+                    className="w-full text-center text-xs font-bold text-slate-500 hover:text-slate-800 pt-1"
+                  >
+                    Raqamni qayta kiritish
+                  </button>
+                </form>
+              </div>
+            ) : telegramStep === 'profile_setup' ? (
+              <div className="space-y-4">
+                <div className="space-y-1 text-center">
+                  <h2 className="text-xl font-black text-slate-900 tracking-tight">Profilni yakunlash ✨</h2>
+                  <p className="text-xs text-slate-500 font-medium">Telegram orqali ro'yxatdan o'tish uchun ma'lumotlarni to'ldiring:</p>
+                </div>
+
+                {errorMsg && (
+                  <div className="p-3 bg-rose-50 border border-rose-200 rounded-xl text-rose-600 text-xs font-semibold">
+                    {errorMsg}
+                  </div>
+                )}
+
+                <form onSubmit={handleCompleteTelegramRegistration} className="space-y-3">
+                  <div>
+                    <label className="block text-[11px] font-bold text-slate-700 mb-1">Ism va Familiya</label>
+                    <input 
+                      type="text" 
+                      value={regName}
+                      onChange={(e) => setRegName(e.target.value)}
+                      required
+                      className="w-full px-3.5 py-2.5 rounded-xl bg-slate-50 border border-slate-200 text-xs font-semibold text-slate-900 focus:border-red-500 focus:bg-white outline-none"
+                      placeholder="Ismingiz..."
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-[11px] font-bold text-slate-700 mb-1">Telegram (Havola / Username)</label>
+                    <input 
+                      type="text" 
+                      value={regTelegram}
+                      onChange={(e) => setRegTelegram(e.target.value)}
+                      className="w-full px-3.5 py-2.5 rounded-xl bg-slate-50 border border-slate-200 text-xs font-semibold text-slate-900 focus:border-red-500 focus:bg-white outline-none"
+                      placeholder="https://t.me/username yoki @username"
+                    />
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-2">
+                    <div>
+                      <label className="block text-[11px] font-bold text-slate-700 mb-1">Tug'ilgan sana</label>
+                      <input 
+                        type="date" 
+                        value={regBirthDate}
+                        onChange={(e) => {
+                          const bDate = e.target.value;
+                          setRegBirthDate(bDate);
+                          setRegAge(String(calculateAge(bDate)));
+                        }}
+                        className="w-full px-3 py-2.5 rounded-xl bg-slate-50 border border-slate-200 text-xs font-semibold text-slate-900 focus:border-red-500 focus:bg-white outline-none"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-[11px] font-bold text-slate-700 mb-1">Jinsi</label>
+                      <select 
+                        value={regGender}
+                        onChange={(e) => setRegGender(e.target.value as any)}
+                        className="w-full px-3 py-2.5 rounded-xl bg-slate-50 border border-slate-200 text-xs font-semibold text-slate-900 focus:border-red-500 focus:bg-white outline-none"
+                      >
+                        <option value="female">Ayol 👩</option>
+                        <option value="male">Erkak 👨</option>
+                      </select>
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-2">
+                    <div>
+                      <label className="block text-[11px] font-bold text-slate-700 mb-1">Viloyat</label>
+                      <select 
+                        value={regRegion}
+                        onChange={(e) => {
+                          const reg = e.target.value;
+                          setRegRegion(reg);
+                          const dists = UZ_LOCATIONS[reg] || [];
+                          if (dists.length > 0) setRegDistrict(dists[0]);
+                        }}
+                        className="w-full px-3 py-2.5 rounded-xl bg-slate-50 border border-slate-200 text-xs font-semibold text-slate-900 focus:border-red-500 focus:bg-white outline-none"
+                      >
+                        {Object.keys(UZ_LOCATIONS).map((reg) => (
+                          <option key={reg} value={reg}>{reg}</option>
+                        ))}
+                      </select>
+                    </div>
+                    <div>
+                      <label className="block text-[11px] font-bold text-slate-700 mb-1">Tuman / Shahar</label>
+                      <select 
+                        value={regDistrict}
+                        onChange={(e) => setRegDistrict(e.target.value)}
+                        className="w-full px-3 py-2.5 rounded-xl bg-slate-50 border border-slate-200 text-xs font-semibold text-slate-900 focus:border-red-500 focus:bg-white outline-none"
+                      >
+                        {(UZ_LOCATIONS[regRegion] || []).map((dist) => (
+                          <option key={dist} value={dist}>{dist}</option>
+                        ))}
+                      </select>
+                    </div>
+                  </div>
+
+                  <div>
+                    <label className="block text-[11px] font-bold text-slate-700 mb-1">Akkaunt uchun Parol (Kirish uchun)</label>
+                    <input 
+                      type="password" 
+                      value={authPassword}
+                      onChange={(e) => setAuthPassword(e.target.value)}
+                      required
+                      className="w-full px-3.5 py-2.5 rounded-xl bg-slate-50 border border-slate-200 text-xs font-semibold text-slate-900 focus:border-red-500 focus:bg-white outline-none"
+                      placeholder="••••••••"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-[11px] font-bold text-slate-700 mb-1">Bio / O'zingiz haqingizda</label>
+                    <textarea 
+                      value={regBio}
+                      onChange={(e) => setRegBio(e.target.value)}
+                      rows={2}
+                      className="w-full px-3.5 py-2 rounded-xl bg-slate-50 border border-slate-200 text-xs font-semibold text-slate-900 focus:border-red-500 focus:bg-white outline-none resize-none"
+                      placeholder="Qanday insonlarni qidiryapsiz..."
+                    />
+                  </div>
+
+                  <button 
+                    type="submit"
+                    disabled={isLoggingIn}
+                    className="w-full py-3 px-4 rounded-2xl bg-[#E8474A] text-white font-bold text-sm shadow-md hover:bg-[#cb2e31] transition disabled:opacity-60"
+                  >
+                    {isLoggingIn ? "Saqlanmoqda..." : "Profilni yaratish va boshlash ✨"}
+                  </button>
+                </form>
+              </div>
+            ) : (
+              <div className="space-y-4 text-center">
+                <div className="space-y-1">
+                  <h2 className="text-xl font-black text-slate-900 tracking-tight">Alov.uz ga xush kelibsiz</h2>
+                  <p className="text-xs text-slate-500 font-medium">Tanishuv va muloqot dunyosiga kiring</p>
+                </div>
+
+                {/* Tab Switcher */}
+                <div className="grid grid-cols-2 p-1 bg-slate-100 rounded-2xl">
+                  <button 
+                    type="button"
+                    onClick={() => { setAuthMode('login'); setErrorMsg(''); }}
+                    className={`py-2 rounded-xl text-xs font-bold transition ${authMode === 'login' ? 'bg-white text-slate-900 shadow-sm' : 'text-slate-500 hover:text-slate-900'}`}
+                  >
+                    Kirish (Login)
+                  </button>
+                  <button 
+                    type="button"
+                    onClick={() => { setAuthMode('register'); setErrorMsg(''); }}
+                    className={`py-2 rounded-xl text-xs font-bold transition ${authMode === 'register' ? 'bg-white text-slate-900 shadow-sm' : 'text-slate-500 hover:text-slate-900'}`}
+                  >
+                    Ro'yxatdan o'tish
+                  </button>
+                </div>
+
+                {errorMsg && (
+                  <div className="p-3 bg-rose-50 border border-rose-200 rounded-xl text-rose-600 text-xs font-semibold text-left">
+                    {errorMsg}
+                  </div>
+                )}
+
+                {authMode === 'login' ? (
+                  <form onSubmit={handleEmailLogin} className="space-y-3 text-left">
+                    <div>
+                      <label className="block text-[11px] font-bold text-slate-700 mb-1">Username, Email yoki Telefon</label>
+                      <input 
+                        type="text" 
+                        value={authEmail}
+                        onChange={(e) => setAuthEmail(e.target.value)}
+                        required
+                        className="w-full px-3.5 py-2.5 rounded-xl bg-slate-50 border border-slate-200 text-xs font-semibold text-slate-900 focus:border-red-500 focus:bg-white outline-none"
+                        placeholder="@username, email yoki telefon..."
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-[11px] font-bold text-slate-700 mb-1">Parol</label>
+                      <input 
+                        type="password" 
+                        value={authPassword}
+                        onChange={(e) => setAuthPassword(e.target.value)}
+                        required
+                        className="w-full px-3.5 py-2.5 rounded-xl bg-slate-50 border border-slate-200 text-xs font-semibold text-slate-900 focus:border-red-500 focus:bg-white outline-none"
+                        placeholder="••••••••"
+                      />
+                    </div>
+                    <button 
+                      type="submit"
+                      disabled={isLoggingIn}
+                      className="w-full py-3 px-4 rounded-2xl bg-[#E8474A] text-white font-bold text-sm shadow-md hover:bg-[#cb2e31] transition disabled:opacity-60"
+                    >
+                      {isLoggingIn ? "Kirilmoqda..." : "Kirish 🚀"}
+                    </button>
+                  </form>
+                ) : (
+                  <form onSubmit={handleEmailRegister} className="space-y-3 text-left">
+                    <div>
+                      <label className="block text-[11px] font-bold text-slate-700 mb-1">Ism va Familiya</label>
+                      <input 
+                        type="text" 
+                        value={regName}
+                        onChange={(e) => setRegName(e.target.value)}
+                        required
+                        className="w-full px-3.5 py-2.5 rounded-xl bg-slate-50 border border-slate-200 text-xs font-semibold text-slate-900 focus:border-red-500 focus:bg-white outline-none"
+                        placeholder="Ismingiz..."
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-[11px] font-bold text-slate-700 mb-1">Email</label>
+                      <input 
+                        type="email" 
+                        value={authEmail}
+                        onChange={(e) => setAuthEmail(e.target.value)}
+                        required
+                        className="w-full px-3.5 py-2.5 rounded-xl bg-slate-50 border border-slate-200 text-xs font-semibold text-slate-900 focus:border-red-500 focus:bg-white outline-none"
+                        placeholder="example@gmail.com"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-[11px] font-bold text-slate-700 mb-1">Parol</label>
+                      <input 
+                        type="password" 
+                        value={authPassword}
+                        onChange={(e) => setAuthPassword(e.target.value)}
+                        required
+                        className="w-full px-3.5 py-2.5 rounded-xl bg-slate-50 border border-slate-200 text-xs font-semibold text-slate-900 focus:border-red-500 focus:bg-white outline-none"
+                        placeholder="••••••••"
+                      />
+                    </div>
+                    <button 
+                      type="submit"
+                      disabled={isLoggingIn}
+                      className="w-full py-3 px-4 rounded-2xl bg-[#E8474A] text-white font-bold text-sm shadow-md hover:bg-[#cb2e31] transition disabled:opacity-60"
+                    >
+                      {isLoggingIn ? "Ro'yxatdan o'tmoqda..." : "Ro'yxatdan o'tish ✨"}
+                    </button>
+                  </form>
+                )}
+
+                <div className="relative flex py-2 items-center">
+                  <div className="flex-grow border-t border-slate-200"></div>
+                  <span className="flex-shrink mx-4 text-[10px] font-bold text-slate-400 uppercase">yoki</span>
+                  <div className="flex-grow border-t border-slate-200"></div>
+                </div>
+
+                <div className="space-y-2">
+                  <button 
+                    onClick={handleGoogleLogin}
+                    disabled={isLoggingIn}
+                    className="w-full flex items-center justify-center space-x-3 py-3.5 px-4 rounded-2xl border border-slate-200 hover:border-slate-300 hover:bg-slate-50 font-bold text-sm shadow-xs bg-white text-slate-800 active:scale-98 transition duration-200 disabled:opacity-60 disabled:cursor-not-allowed"
+                  >
+                    <svg className="w-5 h-5 shrink-0" viewBox="0 0 24 24">
+                      <path fill="#4285F4" d="M23.745 12.27c0-.7-.06-1.4-.19-2.07H12v4.51h6.6c-.29 1.52-1.14 2.82-2.4 3.68v3.05h3.88c2.27-2.09 3.665-5.17 3.665-9.17z"/>
+                      <path fill="#34A853" d="M12 24c3.24 0 5.95-1.08 7.93-2.91l-3.88-3.05c-1.08.72-2.45 1.16-4.05 1.16-3.13 0-5.78-2.11-6.73-4.96H1.18v3.15C3.165 21.33 7.21 24 12 24z"/>
+                      <path fill="#FBBC05" d="M5.27 14.24c-.25-.72-.38-1.49-.38-2.24s.13-1.52.38-2.24V6.61H1.18C.43 8.13 0 9.87 0 12s.43 3.87 1.18 5.39l4.09-3.15z"/>
+                      <path fill="#EA4335" d="M12 4.75c1.77 0 3.35.61 4.6 1.8l3.42-3.42C17.95 1.19 15.24 0 12 0 7.21 0 3.165 2.67 1.18 6.61l4.09 3.15c.95-2.85 3.6-4.96 6.73-4.96z"/>
+                    </svg>
+                    <span>Google orqali davom ettirish</span>
+                  </button>
+
+                  <button 
+                    onClick={() => { setAuthMode('telegram'); setTelegramStep('input_phone'); }}
+                    className="w-full flex items-center justify-center space-x-3 py-3.5 px-4 rounded-2xl bg-[#229ED9] hover:bg-[#1f8fc6] font-bold text-sm shadow-sm text-white active:scale-98 transition duration-200"
+                  >
+                    <svg className="w-5 h-5 shrink-0 fill-current" viewBox="0 0 24 24">
+                      <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm4.64 6.8c-.15 1.58-.8 5.42-1.13 7.19-.14.75-.42 1-.68 1.03-.58.05-1.02-.38-1.58-.75-.88-.58-1.38-.94-2.23-1.5-.99-.65-.35-1.01.22-1.59.15-.15 2.71-2.48 2.76-2.69.01-.03.01-.14-.07-.2-.08-.06-.19-.04-.27 0-.12.05-1.98 1.26-5.6 3.7-.53.36-1.01.54-1.44.53-.47-.01-1.38-.26-2.06-.48-.83-.27-1.49-.42-1.43-.88.03-.24.37-.49 1.02-.75 3.99-1.74 6.65-2.89 7.98-3.45 3.8-1.6 4.59-1.88 5.1-1.89.11 0 .37.03.54.17.14.12.18.28.2.4-.02.07-.02.13-.04.2z"/>
+                    </svg>
+                    <span>Telegram orqali davom etish</span>
+                  </button>
+                </div>
+              </div>
+            )}
           </div>
         </div>
       )}
@@ -3533,10 +4394,12 @@ export default function App() {
       {/* --- AUDIO ROOM (OVOZLI XONA) MODAL --- */}
       {showAudioRoomModal && (
         <AudioRoomModal
+          socket={socketRef.current}
           roomCode={audioRoomCode}
           roomTitle={audioRoomTitle}
           currentUser={{
             uid: currentUser?.uid || firebaseUser?.uid || 'user_' + Date.now(),
+            id: currentUser?.id,
             name: currentUser?.name || firebaseUser?.displayName || 'Alov Foydalanuvchisi',
             avatar: currentUser?.avatar || firebaseUser?.photoURL || ''
           }}

@@ -5,7 +5,7 @@ import {
 } from 'lucide-react';
 import { io, Socket } from 'socket.io-client';
 import { Room, RoomEvent, Track } from 'livekit-client';
-import { getBaseUrl } from '../config/api';
+import { getBaseUrl, safeFetchJson } from '../config/api';
 
 export interface AudioSeat {
   seatIndex: number;
@@ -30,6 +30,7 @@ export interface RoomChatMessage {
 }
 
 interface AudioRoomModalProps {
+  socket?: Socket | null;
   roomCode?: string;
   roomTitle?: string;
   currentUser: {
@@ -58,6 +59,7 @@ const PRESET_BACKGROUNDS = [
 ];
 
 export const AudioRoomModal: React.FC<AudioRoomModalProps> = ({
+  socket: socketProp,
   roomCode = 'room_general',
   roomTitle = 'Alov.uz Jonli Ovozli Xona 🎙️',
   currentUser,
@@ -98,24 +100,31 @@ export const AudioRoomModal: React.FC<AudioRoomModalProps> = ({
 
   // 1. Connect to Socket.io & LiveKit SFU Cloud
   useEffect(() => {
-    const socket = io(getBaseUrl());
+    const socket = socketProp || io(getBaseUrl());
     socketRef.current = socket;
 
-    socket.on('connect', () => {
+    const emitJoinRoom = () => {
       socket.emit('join_audio_room', {
         roomCode,
         user: {
           uid: currentUser.uid,
+          id: currentUser.id || currentUser.uid,
           name: currentUser.name,
           avatar: currentUser.avatar
         }
       });
-    });
+    };
+
+    if (socket.connected) {
+      emitJoinRoom();
+    } else {
+      socket.on('connect', emitJoinRoom);
+    }
 
     // Initialize LiveKit Cloud SFU Room
     const initLiveKit = async () => {
       try {
-        const response = await fetch(`${getBaseUrl()}/api/livekit/get-token`, {
+        const data = await safeFetchJson(`${getBaseUrl()}/api/livekit/get-token`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
@@ -124,7 +133,6 @@ export const AudioRoomModal: React.FC<AudioRoomModalProps> = ({
             name: currentUser.name
           })
         });
-        const data = await response.json();
         if (data?.success && data?.token && data?.serverUrl) {
           const lkRoom = new Room({
             adaptiveStream: true,

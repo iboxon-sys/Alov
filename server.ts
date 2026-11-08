@@ -2,6 +2,7 @@ import express from 'express';
 import { fileURLToPath } from 'url';
 import path from 'path';
 import http from 'http';
+import fs from 'fs';
 import { Server as SocketIOServer } from 'socket.io';
 import { createServer as createViteServer } from 'vite';
 import { GoogleGenAI } from '@google/genai';
@@ -79,6 +80,600 @@ async function startServer() {
       });
     } catch (err: any) {
       res.status(500).json({ error: err.message || 'Failed to create Meet link' });
+    }
+  });
+
+  // --- Telegram Bot Integration (@alovuz_bot) ---
+  const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || '9094192316:AAFW5DEfuwVy0Rs2kIdMg9kBwL_w_PLMVM4';
+  const BOT_USERS_FILE = path.join(__dirname, 'telegram_bot_users.json');
+
+  // Persistent storage for Telegram bot users so /start is remembered permanently across restarts
+  function loadTelegramBotUsers(): Map<string, { chatId: number; username?: string; phone?: string; firstName?: string; updatedAt: number }> {
+    const map = new Map<string, { chatId: number; username?: string; phone?: string; firstName?: string; updatedAt: number }>();
+    try {
+      if (fs.existsSync(BOT_USERS_FILE)) {
+        const raw = fs.readFileSync(BOT_USERS_FILE, 'utf-8');
+        const data = JSON.parse(raw);
+        if (data && typeof data === 'object') {
+          for (const [key, val] of Object.entries(data)) {
+            if (val && typeof val === 'object' && (val as any).chatId) {
+              map.set(key, val as any);
+            }
+          }
+        }
+      }
+    } catch (err) {
+      console.warn("Could not load BOT_USERS_FILE:", err);
+    }
+    return map;
+  }
+
+  function saveTelegramBotUsers(map: Map<string, any>) {
+    try {
+      const obj: Record<string, any> = {};
+      for (const [k, v] of map.entries()) {
+        obj[k] = v;
+      }
+      fs.writeFileSync(BOT_USERS_FILE, JSON.stringify(obj, null, 2), 'utf-8');
+    } catch (err) {
+      console.warn("Could not save BOT_USERS_FILE:", err);
+    }
+  }
+
+  const telegramBotUsers = loadTelegramBotUsers();
+
+  function registerBotUser(chatId: number, user?: any, contactPhone?: string, extraHint?: string) {
+    const username = user?.username ? user.username.toLowerCase().replace(/^@/, '') : '';
+    const phone = (contactPhone || user?.phone_number || '').replace(/\D/g, '');
+    const record = { 
+      chatId, 
+      username: username || undefined, 
+      phone: phone || undefined, 
+      firstName: user?.first_name || '', 
+      updatedAt: Date.now() 
+    };
+
+    if (username) {
+      telegramBotUsers.set(username, record);
+      telegramBotUsers.set(`@${username}`, record);
+      telegramBotUsers.set(`https://t.me/${username}`, record);
+    }
+    if (phone) {
+      telegramBotUsers.set(phone, record);
+      telegramBotUsers.set(`+${phone}`, record);
+      if (phone.length === 9) {
+        telegramBotUsers.set(`998${phone}`, record);
+        telegramBotUsers.set(`+998${phone}`, record);
+      }
+      if (phone.startsWith('998') && phone.length === 12) {
+        telegramBotUsers.set(phone.slice(3), record);
+      }
+    }
+    if (extraHint) {
+      const cleanHint = extraHint.replace(/^(https?:\/\/t\.me\/|@)/i, '').toLowerCase().trim();
+      const cleanHintPhone = extraHint.replace(/\D/g, '');
+      if (cleanHint) {
+        telegramBotUsers.set(cleanHint, record);
+        telegramBotUsers.set(`@${cleanHint}`, record);
+        telegramBotUsers.set(`https://t.me/${cleanHint}`, record);
+      }
+      if (cleanHintPhone && cleanHintPhone.length >= 7) {
+        telegramBotUsers.set(cleanHintPhone, record);
+        telegramBotUsers.set(`+${cleanHintPhone}`, record);
+        if (cleanHintPhone.length === 9) {
+          telegramBotUsers.set(`998${cleanHintPhone}`, record);
+          telegramBotUsers.set(`+998${cleanHintPhone}`, record);
+        }
+        if (cleanHintPhone.startsWith('998') && cleanHintPhone.length === 12) {
+          telegramBotUsers.set(cleanHintPhone.slice(3), record);
+        }
+      }
+    }
+    telegramBotUsers.set(String(chatId), record);
+    saveTelegramBotUsers(telegramBotUsers);
+    return record;
+  }
+
+  async function sendTelegramMessage(chatId: number, text: string, replyMarkup?: any): Promise<boolean> {
+    if (!TELEGRAM_BOT_TOKEN) return false;
+    try {
+      // 1. Try sending with HTML formatting
+      const res = await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          chat_id: chatId,
+          text,
+          parse_mode: 'HTML',
+          reply_markup: replyMarkup
+        })
+      });
+      const data = await res.json();
+      if (data.ok) {
+        console.log(`Telegram message sent to chatId ${chatId}`);
+        return true;
+      }
+      console.warn(`Telegram HTML sendMessage returned error:`, data.description);
+
+      // 2. Safe Fallback: Strip HTML tags and send as pure plain text so delivery NEVER fails
+      const plainText = text.replace(/<[^>]*>/g, '');
+      const fallbackRes = await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          chat_id: chatId,
+          text: plainText,
+          reply_markup: replyMarkup
+        })
+      });
+      const fallbackData = await fallbackRes.json();
+      if (fallbackData.ok) {
+        console.log(`Telegram plain text message sent to chatId ${chatId}`);
+        return true;
+      }
+      console.error(`Telegram fallback failed:`, fallbackData.description);
+      return false;
+    } catch (err) {
+      console.error(`Telegram network error sending to ${chatId}:`, err);
+      return false;
+    }
+  }
+
+  async function initTelegramBot() {
+    if (!TELEGRAM_BOT_TOKEN) return;
+    try {
+      const res = await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/getMe`);
+      const data = await res.json();
+      if (data.ok) {
+        console.log(`Telegram Bot connected successfully: @${data.result.username}`);
+      }
+    } catch (err) {
+      console.warn("Telegram Bot getMe warning:", err);
+    }
+  }
+
+  let telegramOffset = 0;
+  async function pollTelegramUpdates() {
+    if (!TELEGRAM_BOT_TOKEN) return;
+    try {
+      const res = await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/getUpdates?offset=${telegramOffset}&timeout=20`);
+      const data = await res.json();
+      if (data.ok && Array.isArray(data.result)) {
+        for (const update of data.result) {
+          telegramOffset = update.update_id + 1;
+          const msg = update.message;
+          if (msg && msg.chat) {
+            const chatId = msg.chat.id;
+            const text = (msg.text || '').trim();
+            const user = msg.from;
+            const contact = msg.contact;
+
+            console.log(`Telegram message received: chatId=${chatId}, user=@${user?.username || user?.first_name || 'unknown'}, text="${text}"`);
+
+            // Extract start parameters or text phone/username hints
+            let extraHint = '';
+            if (text.startsWith('/start')) {
+              const parts = text.split(/\s+/);
+              if (parts.length > 1) {
+                extraHint = parts[1];
+              }
+            } else if (text) {
+              const phoneMatch = text.match(/(?:\+?998|\b9\d)\d{7,9}\b/);
+              if (phoneMatch) {
+                extraHint = phoneMatch[0];
+              } else if (text.startsWith('@')) {
+                extraHint = text;
+              }
+            }
+
+            registerBotUser(chatId, user, contact?.phone_number, extraHint);
+
+            if (text.startsWith('/start') || text.toLowerCase().includes('salom')) {
+              // Foydalanuvchining Telegram username yoki ismini dinamik chiqarish uchun
+              const rawUsername = user?.username ? `@${user.username}` : (user?.first_name || 'Foydalanuvchi');
+              const safeUsername = rawUsername
+                .replace(/&/g, '&amp;')
+                .replace(/</g, '&lt;')
+                .replace(/>/g, '&gt;');
+
+              const welcomeText = 
+                `Assalomu alaykum, hurmatli <b>${safeUsername}</b>!\n\n` +
+                `O'zbekistondagi yirik platforma <b>Alov.uz</b> rasmiy botiga xush kelibsiz! ✨\n\n` +
+                `Ushbu botda ham platformamizning to'liq funksiyalaridan foydalanishingiz mumkin. 🚀\n\n` +
+                `Platformadan foydalanish uchun quyidagi tugmani bosing:`;
+
+              // Faqat Mini App ochadigan bitta asosiy tugma
+              const keyboard = {
+                inline_keyboard: [
+                  [
+                    {
+                      text: "🔥 Alov.uz'ga Kirish",
+                      web_app: { url: "https://alov.onrender.com/" }
+                    }
+                  ]
+                ]
+              };
+
+              await sendTelegramMessage(chatId, welcomeText, keyboard);
+            } else if (text) {
+              await sendTelegramMessage(chatId, `Xabaringiz qabul qilindi! Platformadan foydalanish uchun quyidagi tugmani bosing: 💖`, {
+                inline_keyboard: [
+                  [{ text: "🔥 Alov.uz'ga Kirish", web_app: { url: "https://alov.onrender.com/" } }]
+                ]
+              });
+            }
+          }
+        }
+      }
+    } catch (err) {
+      console.warn("Telegram poll error:", err);
+    }
+    setTimeout(pollTelegramUpdates, 2000);
+  }
+
+  // Start Telegram bot immediately on server boot
+  initTelegramBot();
+  pollTelegramUpdates();
+
+  app.get('/api/telegram/status', async (_req, res) => {
+    try {
+      const resp = await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/getMe`);
+      const info = await resp.json();
+      res.json({ success: true, bot: info.result || null, registeredUsersCount: telegramBotUsers.size });
+    } catch (err: any) {
+      res.json({ success: false, error: err.message });
+    }
+  });
+
+  // --- Telegram OTP Storage & Verification Endpoints ---
+  const otpStorage = new Map<string, { code: string; expiresAt: number }>();
+  setInterval(() => {
+    const now = Date.now();
+    for (const [phone, data] of otpStorage.entries()) {
+      if (now > data.expiresAt) {
+        otpStorage.delete(phone);
+      }
+    }
+  }, 120000);
+
+  // Endpoint to send OTP via @alovuz_bot directly to user chat
+  app.post('/api/auth/send-telegram-code', async (req, res) => {
+    try {
+      const { phoneNumber, chatId: frontendChatId } = req.body;
+      if (!phoneNumber || !phoneNumber.toString().trim()) {
+        return res.status(400).json({ success: false, error: 'Telegram username yoki telefon raqam kiritilishi shart' });
+      }
+
+      const rawInput = phoneNumber.toString().trim();
+      const cleanUsername = rawInput.replace(/^(https?:\/\/t\.me\/|@)/i, '').toLowerCase();
+      const cleanPhone = rawInput.replace(/\D/g, '');
+
+      // 1. Check if user provided chatId from frontend cached login
+      let botUser: any = null;
+      if (frontendChatId && !isNaN(Number(frontendChatId))) {
+        botUser = { chatId: Number(frontendChatId), username: cleanUsername, phone: cleanPhone, updatedAt: Date.now() };
+        registerBotUser(botUser.chatId, { username: cleanUsername }, cleanPhone, rawInput);
+      }
+
+      // 2. Check if user has started or messaged @alovuz_bot in persistent telegramBotUsers map
+      if (!botUser) {
+        botUser = telegramBotUsers.get(cleanUsername) || 
+                  telegramBotUsers.get(`@${cleanUsername}`) ||
+                  telegramBotUsers.get(`https://t.me/${cleanUsername}`) ||
+                  telegramBotUsers.get(cleanPhone) || 
+                  telegramBotUsers.get(`+${cleanPhone}`) || 
+                  (cleanPhone.length === 9 ? (telegramBotUsers.get(`998${cleanPhone}`) || telegramBotUsers.get(`+998${cleanPhone}`)) : null) ||
+                  (cleanPhone.startsWith('998') && cleanPhone.length === 12 ? telegramBotUsers.get(cleanPhone.slice(3)) : null) ||
+                  telegramBotUsers.get(rawInput);
+      }
+
+      // 3. Check if user is known in usersStore with a saved telegramChatId or chatId
+      if (!botUser && typeof usersStore !== 'undefined') {
+        for (const u of usersStore.values()) {
+          const uTgClean = (u.telegram || '').replace(/^(https?:\/\/t\.me\/|@)/i, '').toLowerCase();
+          const uPhoneClean = (u.phone || '').replace(/\D/g, '');
+          const uNameClean = (u.name || '').replace(/^@/, '').toLowerCase();
+          const savedChatId = u.telegramChatId || u.chatId;
+
+          if (savedChatId) {
+            if (
+              (cleanUsername && (uTgClean === cleanUsername || uNameClean === cleanUsername)) ||
+              (cleanPhone && cleanPhone.length >= 7 && (uPhoneClean === cleanPhone || (cleanPhone.length === 9 && uPhoneClean.endsWith(cleanPhone)))) ||
+              (rawInput && (u.uid === rawInput || u.uid === `tg_${cleanUsername}` || u.uid === `tg_${cleanPhone}`))
+            ) {
+              botUser = { chatId: Number(savedChatId), username: cleanUsername, phone: cleanPhone, updatedAt: Date.now() };
+              registerBotUser(botUser.chatId, { username: cleanUsername, first_name: u.name }, cleanPhone);
+              break;
+            }
+          }
+        }
+      }
+
+      // 4. Quick on-demand getUpdates check in case user just pressed /start a moment ago
+      if (!botUser && TELEGRAM_BOT_TOKEN) {
+        try {
+          const checkRes = await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/getUpdates?limit=20`);
+          const checkData = await checkRes.json();
+          if (checkData.ok && Array.isArray(checkData.result)) {
+            for (const upd of checkData.result) {
+              const m = upd.message;
+              if (m && m.chat) {
+                const cId = m.chat.id;
+                const uFrom = m.from;
+                const mText = (m.text || '').trim();
+                let mHint = '';
+                if (mText.startsWith('/start')) {
+                  const p = mText.split(/\s+/);
+                  if (p.length > 1) mHint = p[1];
+                }
+                registerBotUser(cId, uFrom, m.contact?.phone_number, mHint);
+              }
+            }
+            // Re-check after registering updates
+            botUser = telegramBotUsers.get(cleanUsername) || 
+                      telegramBotUsers.get(`@${cleanUsername}`) ||
+                      telegramBotUsers.get(`https://t.me/${cleanUsername}`) ||
+                      telegramBotUsers.get(cleanPhone) || 
+                      telegramBotUsers.get(`+${cleanPhone}`) || 
+                      (cleanPhone.length === 9 ? (telegramBotUsers.get(`998${cleanPhone}`) || telegramBotUsers.get(`+998${cleanPhone}`)) : null) ||
+                      (cleanPhone.startsWith('998') && cleanPhone.length === 12 ? telegramBotUsers.get(cleanPhone.slice(3)) : null) ||
+                      telegramBotUsers.get(rawInput);
+          }
+        } catch (e) {
+          // ignore quick check failure
+        }
+      }
+
+      // 5. Intelligent match across all stored telegram bot users
+      if (!botUser) {
+        for (const entry of telegramBotUsers.values()) {
+          if (!entry || !entry.chatId) continue;
+          if (cleanUsername && entry.username && entry.username.toLowerCase() === cleanUsername) {
+            botUser = entry;
+            break;
+          }
+          if (cleanPhone && entry.phone && (entry.phone === cleanPhone || entry.phone.endsWith(cleanPhone) || cleanPhone.endsWith(entry.phone))) {
+            botUser = entry;
+            break;
+          }
+          if (cleanUsername && entry.firstName && entry.firstName.toLowerCase().replace(/[^a-z0-9]/g, '') === cleanUsername.replace(/[^a-z0-9]/g, '')) {
+            botUser = entry;
+            break;
+          }
+        }
+      }
+
+      // If exactly one user has ever started the bot, automatically link them so they never need start again
+      if (!botUser && telegramBotUsers.size > 0) {
+        const uniqueChatIds = new Set<number>();
+        let singleEntry: any = null;
+        for (const entry of telegramBotUsers.values()) {
+          if (entry && entry.chatId) {
+            uniqueChatIds.add(entry.chatId);
+            singleEntry = entry;
+          }
+        }
+        if (uniqueChatIds.size === 1 && singleEntry) {
+          botUser = { ...singleEntry, username: cleanUsername || singleEntry.username, phone: cleanPhone || singleEntry.phone };
+          registerBotUser(singleEntry.chatId, { username: cleanUsername, first_name: singleEntry.firstName }, cleanPhone, rawInput);
+        }
+      }
+
+      // 6. If user truly hasn't started the bot yet, show prompt with customized deep-link
+      if (!botUser) {
+        const startTarget = cleanUsername || cleanPhone || '';
+        const botUrl = startTarget ? `https://t.me/alovuz_bot?start=${encodeURIComponent(startTarget)}` : 'https://t.me/alovuz_bot';
+        return res.json({
+          success: false,
+          hasStartedBot: false,
+          botUrl,
+          error: "Botimiz ro'yxatida topilmadingiz! Iltimos, botimizga kirib /start tugmasini bir marta bosing."
+        });
+      }
+
+      const code = Math.floor(100000 + Math.random() * 900000).toString();
+      const expiresAt = Date.now() + 300 * 1000; // 5 mins TTL
+
+      otpStorage.set(rawInput, { code, expiresAt });
+      otpStorage.set(cleanUsername, { code, expiresAt });
+      otpStorage.set(`@${cleanUsername}`, { code, expiresAt });
+      otpStorage.set(`https://t.me/${cleanUsername}`, { code, expiresAt });
+      if (cleanPhone) {
+        otpStorage.set(cleanPhone, { code, expiresAt });
+        otpStorage.set(`+${cleanPhone}`, { code, expiresAt });
+      }
+
+      // Send OTP code via @alovuz_bot
+      const otpText = `🔥 <b>Alov.uz Tasdiqlash Kodi:</b> <code>${code}</code>\n\nUshbu kodni Alov.uz ilovasiga kiriting. Kodingizni hech kimga bermang! 🔒`;
+      const sent = await sendTelegramMessage(botUser.chatId, otpText);
+
+      return res.json({
+        success: true,
+        hasStartedBot: true,
+        chatId: botUser.chatId,
+        message: sent ? "Tasdiqlash kodi Telegram botimiz (@alovuz_bot) chatingizga yuborildi!" : "Tasdiqlash kodi yuborildi",
+        botUrl: "https://t.me/alovuz_bot"
+      });
+    } catch (err: any) {
+      res.status(500).json({ success: false, error: err.message });
+    }
+  });
+
+  app.post('/api/auth/verify-telegram-code', async (req, res) => {
+    try {
+      const { phoneNumber, code } = req.body;
+      if (!phoneNumber || !code) {
+        return res.status(400).json({ success: false, error: 'Ma\'lumotlar to\'liq kiritilmagan' });
+      }
+
+      const rawInput = phoneNumber.toString().trim();
+      const cleanUsername = rawInput.replace(/^(https?:\/\/t\.me\/|@)/i, '').toLowerCase();
+      const cleanPhone = rawInput.replace(/\D/g, '');
+
+      const stored = otpStorage.get(rawInput) || 
+                     otpStorage.get(cleanUsername) || 
+                     otpStorage.get(`@${cleanUsername}`) || 
+                     otpStorage.get(`https://t.me/${cleanUsername}`) || 
+                     (cleanPhone ? (otpStorage.get(cleanPhone) || otpStorage.get(`+${cleanPhone}`)) : null);
+
+      if (!stored) {
+        return res.status(400).json({ success: false, error: 'Tasdiqlash kodi topilmadi yoki muddati o\'tgan' });
+      }
+
+      if (Date.now() > stored.expiresAt) {
+        otpStorage.delete(rawInput);
+        otpStorage.delete(cleanUsername);
+        otpStorage.delete(`@${cleanUsername}`);
+        otpStorage.delete(`https://t.me/${cleanUsername}`);
+        if (cleanPhone) {
+          otpStorage.delete(cleanPhone);
+          otpStorage.delete(`+${cleanPhone}`);
+        }
+        return res.status(400).json({ success: false, error: 'Kod muddati tugagan (5 daqiqa)' });
+      }
+
+      if (stored.code !== code.trim()) {
+        return res.status(400).json({ success: false, error: 'Kiritilgan tasdiqlash kodi noto\'g\'ri!' });
+      }
+
+      otpStorage.delete(rawInput);
+      otpStorage.delete(cleanUsername);
+      otpStorage.delete(`@${cleanUsername}`);
+      otpStorage.delete(`https://t.me/${cleanUsername}`);
+      if (cleanPhone) {
+        otpStorage.delete(cleanPhone);
+        otpStorage.delete(`+${cleanPhone}`);
+      }
+
+      const formattedTgUrl = cleanUsername ? `https://t.me/${cleanUsername}` : undefined;
+
+      // Duplicate search across usersStore to ensure single unique account
+      let existingUser: any = usersStore.get(`tg_${cleanUsername || cleanPhone || rawInput}`);
+      if (!existingUser) {
+        for (const u of usersStore.values()) {
+          const uTgClean = (u.telegram || '').replace(/^(https?:\/\/t\.me\/|@)/i, '').toLowerCase();
+          const uPhoneClean = (u.phone || '').replace(/\D/g, '');
+          if ((cleanUsername && uTgClean === cleanUsername) || (cleanPhone && cleanPhone.length > 5 && uPhoneClean === cleanPhone)) {
+            existingUser = u;
+            break;
+          }
+        }
+      }
+
+      const isNewUser = !existingUser || !existingUser.isProfileCompleted;
+      const uid = existingUser ? existingUser.uid : `tg_${cleanUsername || cleanPhone || rawInput}`;
+
+      let user = existingUser;
+      const matchedBotUser = telegramBotUsers.get(cleanUsername) || 
+                             telegramBotUsers.get(`@${cleanUsername}`) ||
+                             telegramBotUsers.get(cleanPhone) || 
+                             telegramBotUsers.get(rawInput);
+      const userChatId = matchedBotUser ? matchedBotUser.chatId : undefined;
+
+      if (!user) {
+        user = {
+          uid,
+          id: `ALOV-TG-${uid.slice(0, 5).toUpperCase()}`,
+          name: cleanUsername ? `@${cleanUsername}` : `Telegram Foydalanuvchi ${cleanPhone.slice(-4)}`,
+          telegram: formattedTgUrl,
+          telegramChatId: userChatId,
+          phone: cleanPhone ? `+${cleanPhone}` : undefined,
+          avatar: 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&q=80&w=600',
+          role: 'user',
+          age: 22,
+          gender: 'female',
+          region: 'Toshkent shahri',
+          district: 'Yunusobod tumani',
+          bio: 'Telegram botimiz orqali ulandim! ✨',
+          status: 'online',
+          isLocationEnabled: true,
+          locationVisibility: 'everyone',
+          location: { lat: 41.3111, lng: 69.2797 },
+          isProfileCompleted: false
+        };
+        usersStore.set(uid, user);
+        saveUsersToDisk();
+        io.emit('user_updated', user);
+      } else {
+        if (formattedTgUrl && (!user.telegram || user.telegram.startsWith('@'))) {
+          user.telegram = formattedTgUrl;
+        }
+        if (userChatId && !user.telegramChatId) {
+          user.telegramChatId = userChatId;
+        }
+        usersStore.set(uid, user);
+        saveUsersToDisk();
+      }
+
+      if (userChatId) {
+        registerBotUser(userChatId, { username: cleanUsername, first_name: user.name }, cleanPhone);
+      }
+
+      res.json({
+        success: true,
+        isNewUser,
+        message: 'Muvaffaqiyatli kirdingiz',
+        token: `JWT_TG_${uid}_${Date.now()}`,
+        user
+      });
+    } catch (err: any) {
+      res.status(500).json({ success: false, error: err.message });
+    }
+  });
+
+  // Universal Login Endpoint: Login by Email, @username, https://t.me/username, or Phone + Password
+  app.post('/api/auth/login', async (req, res) => {
+    try {
+      const { loginInput, password } = req.body;
+      if (!loginInput || !loginInput.toString().trim()) {
+        return res.status(400).json({ success: false, error: 'Username, Email yoki Telefon kiritilishi shart' });
+      }
+
+      const rawInput = loginInput.toString().trim();
+      const cleanInput = rawInput.replace(/^(https?:\/\/t\.me\/|@)/i, '').toLowerCase();
+      const cleanPhone = rawInput.replace(/\D/g, '');
+
+      let matchedUser: any = null;
+
+      for (const u of usersStore.values()) {
+        const uEmail = (u.email || '').toLowerCase();
+        const uTg = (u.telegram || '').replace(/^(https?:\/\/t\.me\/|@)/i, '').toLowerCase();
+        const uPhone = (u.phone || '').replace(/\D/g, '');
+        const uName = (u.name || '').replace(/^@/, '').toLowerCase();
+
+        if (
+          (uEmail && uEmail === rawInput.toLowerCase()) ||
+          (cleanInput && uTg === cleanInput) ||
+          (cleanInput && uName === cleanInput) ||
+          (cleanPhone && cleanPhone.length > 5 && uPhone === cleanPhone)
+        ) {
+          matchedUser = u;
+          break;
+        }
+      }
+
+      if (!matchedUser) {
+        return res.status(400).json({ 
+          success: false, 
+          error: 'Bunday username, email yoki telefon raqami topilmadi. Iltimos, ro\'yxatdan o\'ting!' 
+        });
+      }
+
+      // Verify password if set on account
+      if (matchedUser.password && password) {
+        if (matchedUser.password !== password.toString().trim()) {
+          return res.status(400).json({ success: false, error: 'Kiritilgan parol noto\'g\'ri!' });
+        }
+      }
+
+      res.json({
+        success: true,
+        message: 'Muvaffaqiyatli kirdingiz',
+        token: `JWT_LOGIN_${matchedUser.uid}_${Date.now()}`,
+        user: matchedUser
+      });
+    } catch (err: any) {
+      res.status(500).json({ success: false, error: err.message });
     }
   });
 
@@ -196,7 +791,7 @@ Suhbatlashish qoidalaringiz:
   const liveStreamsStore: Record<string, any> = {};
   const audioRoomsStore = new Map<string, any>();
 
-  // Pre-seeded verified profiles across Uzbekistan regions
+  // Pre-seeded verified profiles across Uzbekistan regions (both genders, active & recent)
   const initialUsers: any[] = [
     {
       id: 'ALOV-006',
@@ -213,17 +808,216 @@ Suhbatlashish qoidalaringiz:
       videoUrl: 'https://assets.mixkit.co/videos/preview/mixkit-woman-in-a-field-of-flowers-41691-large.mp4',
       isLive: false,
       isOnline: true,
+      status: 'online',
       followersCount: 160,
       followingCount: 30,
       likesCount: 580,
       location: { lat: 40.6417, lng: 72.2389 },
       locationVisibility: 'everyone',
-      isLocationEnabled: true
+      isLocationEnabled: true,
+      isProfileCompleted: true
+    },
+    {
+      id: 'ALOV-007',
+      uid: 'user_sardor_007',
+      name: 'Sardor Rahimov',
+      age: 26,
+      gender: 'male',
+      region: 'Toshkent shahri',
+      district: 'Yunusobod tumani',
+      phone: '+998901112233',
+      telegram: '@sardor_tashkent',
+      bio: "IT sohasida loyiha menejeriman. Tog' sayrlari, shaxmat va kitob o'qish yoqadi. Oila qurish niyatidaman. 🏔️📚",
+      avatar: 'https://images.unsplash.com/photo-1507003211169-0a1dd7228f2d?auto=format&fit=crop&q=80&w=600',
+      isLive: false,
+      isOnline: false,
+      status: 'offline',
+      lastSeen: new Date(Date.now() - 3600000).toISOString(),
+      followersCount: 220,
+      followingCount: 45,
+      likesCount: 710,
+      location: { lat: 41.3655, lng: 69.2888 },
+      locationVisibility: 'everyone',
+      isLocationEnabled: true,
+      isProfileCompleted: true
+    },
+    {
+      id: 'ALOV-008',
+      uid: 'user_madina_008',
+      name: 'Madina Karimova',
+      age: 23,
+      gender: 'female',
+      region: 'Samarqand viloyati',
+      district: 'Samarqand shahri',
+      phone: '+998933334455',
+      telegram: '@madina_sam',
+      bio: "Grafik dizayner va rassomman. San'at, me'morchilik va milliy liboslar dizayni bilan shug'ullanaman. 🎨✨",
+      avatar: 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&q=80&w=600',
+      isLive: false,
+      isOnline: true,
+      status: 'online',
+      followersCount: 310,
+      followingCount: 50,
+      likesCount: 940,
+      location: { lat: 39.6542, lng: 66.9597 },
+      locationVisibility: 'everyone',
+      isLocationEnabled: true,
+      isProfileCompleted: true
+    },
+    {
+      id: 'ALOV-009',
+      uid: 'user_jahongir_009',
+      name: 'Jahongir Aliyev',
+      age: 27,
+      gender: 'male',
+      region: 'Farg\'ona viloyati',
+      district: 'Qo\'qon shahri',
+      phone: '+998914445566',
+      telegram: '@jahongir_qoqon',
+      bio: "Muhandis-texnologman. Halollik, hurmat va samimiylik hayotdagi bosh mezonlarim. Jiddiy muloqotga tayyorman. 🤝",
+      avatar: 'https://images.unsplash.com/photo-1500648767791-00dcc994a43e?auto=format&fit=crop&q=80&w=600',
+      isLive: false,
+      isOnline: false,
+      status: 'offline',
+      lastSeen: new Date(Date.now() - 7200000).toISOString(),
+      followersCount: 180,
+      followingCount: 35,
+      likesCount: 630,
+      location: { lat: 40.5286, lng: 70.9426 },
+      locationVisibility: 'everyone',
+      isLocationEnabled: true,
+      isProfileCompleted: true
+    },
+    {
+      id: 'ALOV-010',
+      uid: 'user_nilufar_010',
+      name: 'Nilufar Yusupova',
+      age: 24,
+      gender: 'female',
+      region: 'Buxoro viloyati',
+      district: 'Buxoro shahri',
+      phone: '+998945556677',
+      telegram: '@nilufar_buxoro',
+      bio: "Shifokorman. Odamlarga yordam berish, tabiat qo'ynida dam olish va kitob mutolaasi jonu dilim. 🌸🏥",
+      avatar: 'https://images.unsplash.com/photo-1517841905240-472988babdf9?auto=format&fit=crop&q=80&w=600',
+      isLive: false,
+      isOnline: true,
+      status: 'online',
+      followersCount: 290,
+      followingCount: 60,
+      likesCount: 880,
+      location: { lat: 39.7747, lng: 64.4286 },
+      locationVisibility: 'everyone',
+      isLocationEnabled: true,
+      isProfileCompleted: true
+    },
+    {
+      id: 'ALOV-011',
+      uid: 'user_bobur_011',
+      name: 'Bobur Mirzayev',
+      age: 25,
+      gender: 'male',
+      region: 'Namangan viloyati',
+      district: 'Namangan shahri',
+      phone: '+998986667788',
+      telegram: '@bobur_namangan',
+      bio: "Tadbirkorlik bilan shug'ullanaman. Faol hayot tarzi, futbol va avtomobillar qiziqishim. Samimiy qiz bilan tanishmoqchiman. ⚽🚗",
+      avatar: 'https://images.unsplash.com/photo-1492562080023-ab3db95bfbce?auto=format&fit=crop&q=80&w=600',
+      isLive: false,
+      isOnline: false,
+      status: 'offline',
+      lastSeen: new Date(Date.now() - 14400000).toISOString(),
+      followersCount: 240,
+      followingCount: 40,
+      likesCount: 760,
+      location: { lat: 40.9983, lng: 71.6726 },
+      locationVisibility: 'everyone',
+      isLocationEnabled: true,
+      isProfileCompleted: true
     }
   ];
 
   const usersStore = new Map<string, any>();
   initialUsers.forEach(u => usersStore.set(u.uid, u));
+
+  const USERS_DB_FILE = path.join(__dirname, 'users_db.json');
+  const CHATS_DB_FILE = path.join(__dirname, 'user_chats.json');
+  const MESSAGES_DB_FILE = path.join(__dirname, 'chat_messages.json');
+
+  function saveUsersToDisk() {
+    try {
+      const arr = Array.from(usersStore.values());
+      fs.writeFileSync(USERS_DB_FILE, JSON.stringify(arr, null, 2), 'utf-8');
+    } catch (e) {
+      console.warn("Could not save users_db.json:", e);
+    }
+  }
+
+  function loadUsersFromDisk() {
+    try {
+      if (fs.existsSync(USERS_DB_FILE)) {
+        const raw = fs.readFileSync(USERS_DB_FILE, 'utf-8');
+        const list = JSON.parse(raw);
+        if (Array.isArray(list)) {
+          for (const u of list) {
+            if (u && u.uid) {
+              usersStore.set(u.uid, u);
+              if (u.telegramChatId) {
+                registerBotUser(u.telegramChatId, { username: u.telegram, first_name: u.name }, u.phone);
+              }
+            }
+          }
+        }
+      }
+    } catch (e) {
+      console.warn("Could not load users_db.json:", e);
+    }
+  }
+
+  function saveChatsToDisk() {
+    try {
+      fs.writeFileSync(CHATS_DB_FILE, JSON.stringify(userChatsStore, null, 2), 'utf-8');
+    } catch (e) {
+      console.warn("Could not save user_chats.json:", e);
+    }
+  }
+
+  function loadChatsFromDisk() {
+    try {
+      if (fs.existsSync(CHATS_DB_FILE)) {
+        const raw = fs.readFileSync(CHATS_DB_FILE, 'utf-8');
+        const data = JSON.parse(raw);
+        if (data && typeof data === 'object') {
+          Object.assign(userChatsStore, data);
+        }
+      }
+    } catch (e) {}
+  }
+
+  function saveMessagesToDisk() {
+    try {
+      fs.writeFileSync(MESSAGES_DB_FILE, JSON.stringify(chatMessagesStore, null, 2), 'utf-8');
+    } catch (e) {
+      console.warn("Could not save chat_messages.json:", e);
+    }
+  }
+
+  function loadMessagesFromDisk() {
+    try {
+      if (fs.existsSync(MESSAGES_DB_FILE)) {
+        const raw = fs.readFileSync(MESSAGES_DB_FILE, 'utf-8');
+        const data = JSON.parse(raw);
+        if (data && typeof data === 'object') {
+          Object.assign(chatMessagesStore, data);
+        }
+      }
+    } catch (e) {}
+  }
+
+  loadUsersFromDisk();
+  loadChatsFromDisk();
+  loadMessagesFromDisk();
+  saveUsersToDisk();
 
   // Create HTTP Server & Socket.io Server first so endpoints can emit events
   const server = http.createServer(app);
@@ -256,14 +1050,32 @@ Suhbatlashish qoidalaringiz:
         return res.status(400).json({ error: 'Valid user with uid required' });
       }
       const existing = usersStore.get(user.uid) || {};
+
+      // If user has a telegram or phone, see if bot knows their chatId
+      let knownChatId = user.telegramChatId || existing.telegramChatId;
+      if (!knownChatId && user.telegram) {
+        const cleanTg = user.telegram.replace(/^(https?:\/\/t\.me\/|@)/i, '').toLowerCase();
+        const found = telegramBotUsers.get(cleanTg) || telegramBotUsers.get(`@${cleanTg}`) || (user.phone ? telegramBotUsers.get(user.phone.replace(/\D/g, '')) : null);
+        if (found) {
+          knownChatId = found.chatId;
+        }
+      }
+
       const mergedUser = {
         ...existing,
         ...user,
+        telegramChatId: knownChatId || existing.telegramChatId,
         isOnline: true,
         updatedAt: new Date().toISOString()
       };
       usersStore.set(user.uid, mergedUser);
+      saveUsersToDisk();
       io.emit('user_updated', mergedUser);
+
+      if (knownChatId) {
+        registerBotUser(knownChatId, { username: mergedUser.telegram, first_name: mergedUser.name }, mergedUser.phone);
+      }
+
       res.json({ success: true, user: mergedUser });
     } catch (err: any) {
       res.status(500).json({ error: err.message });
@@ -280,6 +1092,7 @@ Suhbatlashish qoidalaringiz:
       if (existing) {
         const updated = { ...existing, ...updates, updatedAt: new Date().toISOString() };
         usersStore.set(uid, updated);
+        saveUsersToDisk();
         io.emit('user_updated', updated);
         return res.json({ success: true, user: updated });
       }
@@ -557,6 +1370,8 @@ Suhbatlashish qoidalaringiz:
         lastSenderId: senderId,
         updatedAt: new Date().toISOString()
       };
+      saveChatsToDisk();
+      saveMessagesToDisk();
 
       // Broadcast message to room and to personal user channels for guaranteed delivery
       io.to(chatId).emit('receive_message', payload);
@@ -640,6 +1455,14 @@ Suhbatlashish qoidalaringiz:
               m.read = true;
             });
             chatMessagesStore[chatId].push(aiReply);
+            userChatsStore[chatId] = {
+              ...(userChatsStore[chatId] || { id: chatId, participants: [senderId, botUid] }),
+              lastMessage: aiReply.text,
+              lastSenderId: botUid,
+              updatedAt: new Date().toISOString()
+            };
+            saveMessagesToDisk();
+            saveChatsToDisk();
           }
 
           const aiPayload = { chatId, message: aiReply, senderId: botUid, recipientId: senderId };
@@ -686,6 +1509,14 @@ Suhbatlashish qoidalaringiz:
               m.read = true;
             });
             chatMessagesStore[chatId].push(aiReply);
+            userChatsStore[chatId] = {
+              ...(userChatsStore[chatId] || { id: chatId, participants: [senderId, botUid] }),
+              lastMessage: aiReply.text,
+              lastSenderId: botUid,
+              updatedAt: new Date().toISOString()
+            };
+            saveMessagesToDisk();
+            saveChatsToDisk();
           }
           const aiPayload = { chatId, message: aiReply, senderId: botUid, recipientId: senderId };
           setTimeout(() => {
@@ -713,6 +1544,7 @@ Suhbatlashish qoidalaringiz:
             m.read = true;
           }
         });
+        saveMessagesToDisk();
       }
       io.to(chatId).emit('message_read', { chatId, messageIds, recipientId });
       if (senderId) {
@@ -1119,8 +1951,10 @@ Suhbatlashish qoidalaringiz:
         const user = usersStore.get(uid);
         if (user) {
           user.isOnline = false;
+          user.status = 'offline';
           user.lastSeen = new Date().toISOString();
           usersStore.set(uid, user);
+          saveUsersToDisk();
           io.emit('user_updated', user);
         }
       }

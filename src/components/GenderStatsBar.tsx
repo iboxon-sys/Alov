@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { Users, Heart } from 'lucide-react';
-import { getApiUrl, getBaseUrl } from '../config/api';
+import { getApiUrl, getBaseUrl, safeFetchJson } from '../config/api';
 import { io } from 'socket.io-client';
 
 export const GenderStatsBar: React.FC = () => {
@@ -10,9 +10,8 @@ export const GenderStatsBar: React.FC = () => {
 
   const fetchStats = async () => {
     try {
-      const res = await fetch(getApiUrl('/api/stats/gender'));
-      const data = await res.json();
-      if (data.success) {
+      const data = await safeFetchJson(getApiUrl('/api/stats/gender'));
+      if (data && data.success) {
         setMalePercent(data.malePercent ?? 50);
         setFemalePercent(data.femalePercent ?? 50);
         setTotalCount(data.totalUsers ?? 0);

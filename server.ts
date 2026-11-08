@@ -87,9 +87,19 @@ async function startServer() {
   const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || '9094192316:AAFW5DEfuwVy0Rs2kIdMg9kBwL_w_PLMVM4';
   const BOT_USERS_FILE = path.join(__dirname, 'telegram_bot_users.json');
 
+  interface TelegramBotUser {
+    chatId: number;
+    username?: string;
+    phone?: string;
+    firstName?: string;
+    lastName?: string;
+    avatar?: string;
+    updatedAt: number;
+  }
+
   // Persistent storage for Telegram bot users so /start is remembered permanently across restarts
-  function loadTelegramBotUsers(): Map<string, { chatId: number; username?: string; phone?: string; firstName?: string; updatedAt: number }> {
-    const map = new Map<string, { chatId: number; username?: string; phone?: string; firstName?: string; updatedAt: number }>();
+  function loadTelegramBotUsers(): Map<string, TelegramBotUser> {
+    const map = new Map<string, TelegramBotUser>();
     try {
       if (fs.existsSync(BOT_USERS_FILE)) {
         const raw = fs.readFileSync(BOT_USERS_FILE, 'utf-8');
@@ -122,14 +132,44 @@ async function startServer() {
 
   const telegramBotUsers = loadTelegramBotUsers();
 
-  function registerBotUser(chatId: number, user?: any, contactPhone?: string, extraHint?: string) {
+  async function getTelegramPhoto(chatId: number): Promise<string | undefined> {
+    if (!TELEGRAM_BOT_TOKEN) return undefined;
+    try {
+      const res = await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/getUserProfilePhotos?user_id=${chatId}&limit=1`);
+      const data = await res.json();
+      if (data.ok && data.result && data.result.total_count > 0) {
+        const photos = data.result.photos[0];
+        const photo = photos[photos.length - 1]; // get high res
+        const fileRes = await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/getFile?file_id=${photo.file_id}`);
+        const fileData = await fileRes.json();
+        if (fileData.ok) {
+          return `https://api.telegram.org/file/bot${TELEGRAM_BOT_TOKEN}/${fileData.result.file_path}`;
+        }
+      }
+    } catch (e) {}
+    return undefined;
+  }
+
+  async function registerBotUser(chatId: number, user?: any, contactPhone?: string, extraHint?: string) {
     const username = user?.username ? user.username.toLowerCase().replace(/^@/, '') : '';
     const phone = (contactPhone || user?.phone_number || '').replace(/\D/g, '');
+    
+    // Try to get photo if not already in record
+    let avatarUrl = undefined;
+    const existingEntry = Array.from(telegramBotUsers.values()).find(e => e.chatId === chatId);
+    if (existingEntry?.avatar) {
+      avatarUrl = existingEntry.avatar;
+    } else {
+      avatarUrl = await getTelegramPhoto(chatId);
+    }
+
     const record = { 
       chatId, 
       username: username || undefined, 
       phone: phone || undefined, 
-      firstName: user?.first_name || '', 
+      firstName: user?.first_name || user?.name || '', 
+      lastName: user?.last_name || '',
+      avatar: avatarUrl,
       updatedAt: Date.now() 
     };
 
@@ -586,14 +626,15 @@ async function startServer() {
       let user = existingUser;
       
       if (!user) {
+        const tgName = matchedBotUser?.firstName ? (matchedBotUser.firstName + (matchedBotUser.lastName ? ` ${matchedBotUser.lastName}` : '')) : (cleanUsername ? `@${cleanUsername}` : `Telegram Foydalanuvchi ${cleanPhone.slice(-4)}`);
         user = {
           uid,
           id: `ALOV-TG-${uid.slice(0, 5).toUpperCase()}`,
-          name: cleanUsername ? `@${cleanUsername}` : `Telegram Foydalanuvchi ${cleanPhone.slice(-4)}`,
+          name: tgName,
           telegram: formattedTgUrl,
           telegramChatId: userChatId,
           phone: cleanPhone ? `+${cleanPhone}` : undefined,
-          avatar: 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&q=80&w=600',
+          avatar: matchedBotUser?.avatar || 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&q=80&w=600',
           role: 'user',
           age: 22,
           gender: 'female',
@@ -615,6 +656,9 @@ async function startServer() {
         }
         if (userChatId && !user.telegramChatId) {
           user.telegramChatId = userChatId;
+        }
+        if (matchedBotUser?.avatar && (!user.avatar || user.avatar.includes('unsplash'))) {
+          user.avatar = matchedBotUser.avatar;
         }
         if (cleanPhone && !user.phone) {
           user.phone = `+${cleanPhone}`;
@@ -813,150 +857,7 @@ Suhbatlashish qoidalaringiz:
   const audioRoomsStore = new Map<string, any>();
 
   // Pre-seeded verified profiles across Uzbekistan regions (both genders, active & recent)
-  const initialUsers: any[] = [
-    {
-      id: 'ALOV-006',
-      uid: 'user_kamola_006',
-      name: 'Kamola Saidova',
-      age: 24,
-      gender: 'female',
-      region: 'Andijon viloyati',
-      district: 'Asaka tumani',
-      phone: '+998977890123',
-      telegram: '@kamola_asaka',
-      bio: "Ingliz tili o'qituvchisiman. Sayohat, san'at va shirinliklar tayyorlash hobbiylarim. Jiddiy va samimiy muloqot uchun. ✨",
-      avatar: 'https://images.unsplash.com/photo-1524504388940-b1c1722653e1?auto=format&fit=crop&q=80&w=600',
-      videoUrl: 'https://assets.mixkit.co/videos/preview/mixkit-woman-in-a-field-of-flowers-41691-large.mp4',
-      isLive: false,
-      isOnline: true,
-      status: 'online',
-      followersCount: 160,
-      followingCount: 30,
-      likesCount: 580,
-      location: { lat: 40.6417, lng: 72.2389 },
-      locationVisibility: 'everyone',
-      isLocationEnabled: true,
-      isProfileCompleted: true
-    },
-    {
-      id: 'ALOV-007',
-      uid: 'user_sardor_007',
-      name: 'Sardor Rahimov',
-      age: 26,
-      gender: 'male',
-      region: 'Toshkent shahri',
-      district: 'Yunusobod tumani',
-      phone: '+998901112233',
-      telegram: '@sardor_tashkent',
-      bio: "IT sohasida loyiha menejeriman. Tog' sayrlari, shaxmat va kitob o'qish yoqadi. Oila qurish niyatidaman. 🏔️📚",
-      avatar: 'https://images.unsplash.com/photo-1507003211169-0a1dd7228f2d?auto=format&fit=crop&q=80&w=600',
-      isLive: false,
-      isOnline: false,
-      status: 'offline',
-      lastSeen: new Date(Date.now() - 3600000).toISOString(),
-      followersCount: 220,
-      followingCount: 45,
-      likesCount: 710,
-      location: { lat: 41.3655, lng: 69.2888 },
-      locationVisibility: 'everyone',
-      isLocationEnabled: true,
-      isProfileCompleted: true
-    },
-    {
-      id: 'ALOV-008',
-      uid: 'user_madina_008',
-      name: 'Madina Karimova',
-      age: 23,
-      gender: 'female',
-      region: 'Samarqand viloyati',
-      district: 'Samarqand shahri',
-      phone: '+998933334455',
-      telegram: '@madina_sam',
-      bio: "Grafik dizayner va rassomman. San'at, me'morchilik va milliy liboslar dizayni bilan shug'ullanaman. 🎨✨",
-      avatar: 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&q=80&w=600',
-      isLive: false,
-      isOnline: true,
-      status: 'online',
-      followersCount: 310,
-      followingCount: 50,
-      likesCount: 940,
-      location: { lat: 39.6542, lng: 66.9597 },
-      locationVisibility: 'everyone',
-      isLocationEnabled: true,
-      isProfileCompleted: true
-    },
-    {
-      id: 'ALOV-009',
-      uid: 'user_jahongir_009',
-      name: 'Jahongir Aliyev',
-      age: 27,
-      gender: 'male',
-      region: 'Farg\'ona viloyati',
-      district: 'Qo\'qon shahri',
-      phone: '+998914445566',
-      telegram: '@jahongir_qoqon',
-      bio: "Muhandis-texnologman. Halollik, hurmat va samimiylik hayotdagi bosh mezonlarim. Jiddiy muloqotga tayyorman. 🤝",
-      avatar: 'https://images.unsplash.com/photo-1500648767791-00dcc994a43e?auto=format&fit=crop&q=80&w=600',
-      isLive: false,
-      isOnline: false,
-      status: 'offline',
-      lastSeen: new Date(Date.now() - 7200000).toISOString(),
-      followersCount: 180,
-      followingCount: 35,
-      likesCount: 630,
-      location: { lat: 40.5286, lng: 70.9426 },
-      locationVisibility: 'everyone',
-      isLocationEnabled: true,
-      isProfileCompleted: true
-    },
-    {
-      id: 'ALOV-010',
-      uid: 'user_nilufar_010',
-      name: 'Nilufar Yusupova',
-      age: 24,
-      gender: 'female',
-      region: 'Buxoro viloyati',
-      district: 'Buxoro shahri',
-      phone: '+998945556677',
-      telegram: '@nilufar_buxoro',
-      bio: "Shifokorman. Odamlarga yordam berish, tabiat qo'ynida dam olish va kitob mutolaasi jonu dilim. 🌸🏥",
-      avatar: 'https://images.unsplash.com/photo-1517841905240-472988babdf9?auto=format&fit=crop&q=80&w=600',
-      isLive: false,
-      isOnline: true,
-      status: 'online',
-      followersCount: 290,
-      followingCount: 60,
-      likesCount: 880,
-      location: { lat: 39.7747, lng: 64.4286 },
-      locationVisibility: 'everyone',
-      isLocationEnabled: true,
-      isProfileCompleted: true
-    },
-    {
-      id: 'ALOV-011',
-      uid: 'user_bobur_011',
-      name: 'Bobur Mirzayev',
-      age: 25,
-      gender: 'male',
-      region: 'Namangan viloyati',
-      district: 'Namangan shahri',
-      phone: '+998986667788',
-      telegram: '@bobur_namangan',
-      bio: "Tadbirkorlik bilan shug'ullanaman. Faol hayot tarzi, futbol va avtomobillar qiziqishim. Samimiy qiz bilan tanishmoqchiman. ⚽🚗",
-      avatar: 'https://images.unsplash.com/photo-1492562080023-ab3db95bfbce?auto=format&fit=crop&q=80&w=600',
-      isLive: false,
-      isOnline: false,
-      status: 'offline',
-      lastSeen: new Date(Date.now() - 14400000).toISOString(),
-      followersCount: 240,
-      followingCount: 40,
-      likesCount: 760,
-      location: { lat: 40.9983, lng: 71.6726 },
-      locationVisibility: 'everyone',
-      isLocationEnabled: true,
-      isProfileCompleted: true
-    }
-  ];
+  const initialUsers: any[] = [];
 
   const usersStore = new Map<string, any>();
   initialUsers.forEach(u => usersStore.set(u.uid, u));

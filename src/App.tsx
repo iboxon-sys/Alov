@@ -65,59 +65,76 @@ const UZ_LOCATIONS: Record<string, string[]> = {
   "Toshkent shahri": [
     "Yunusobod tumani", "Mirzo Ulug'bek tumani", "Chilonzor tumani", "Yakkasaroy tumani", 
     "Mirobod tumani", "Shayxontohur tumani", "Uchtepa tumani", "Sergeli tumani", 
-    "Bektemir tumani", "Olmazor tumani", "Yangihayot tumani"
+    "Bektemir tumani", "Olmazor tumani", "Yangihayot tumani", "Yashnobod tumani"
   ],
   "Toshkent viloyati": [
-    "Chirchiq shahri", "Angren shahri", "Olmaliq shahri", "Yangiyo'l shahri", 
-    "Bekobod shahri", "Parkent tumani", "Bo'stonliq tumani", "Zangiota tumani", "Qibray tumani"
-  ],
-  "Samarqand viloyati": [
-    "Samarqand shahri", "Urgut tumani", "Kattaqo'rg'on shahri", "Bulung'ur tumani", 
-    "Jomboy tumani", "Ishtixon tumani", "Payariq tumani", "Narpay tumani"
-  ],
-  "Farg'ona viloyati": [
-    "Farg'ona shahri", "Marg'ilon shahri", "Qo'qon shahri", "Rishton tumani", 
-    "Quva tumani", "Bag'dod tumani", "Beshariq tumani", "Oltiariq tumani"
+    "Nurafshon shahri", "Angren shahri", "Olmaliq shahri", "Chirchiq shahri", "Bekobod shahri", 
+    "Yangiyo'l shahri", "Ohangaron shahri", "Oqqo'rg'on tumani", "Bekobod tumani", 
+    "Bo'stonliq tumani", "Bo'ka tumani", "Qibray tumani", "Quyi Chirchiq tumani", 
+    "Zangiota tumani", "Yuqori Chirchiq tumani", "Piskent tumani", "Parkent tumani", 
+    "O'rta Chirchiq tumani", "Chinoz tumani", "Yangiyo'l tumani", "Toshkent tumani", "Ohangaron tumani"
   ],
   "Andijon viloyati": [
-    "Andijon shahri", "Xonobod shahri", "Asaka tumani", "Shahrixon tumani", 
-    "Xo'jaobod tumani", "Buloqboshi tumani", "Marhamat tumani", "Oltinko'l tumani"
+    "Andijon shahri", "Xonobod shahri", "Andijon tumani", "Asaka tumani", "Baliqchi tumani", 
+    "Buloqboshi tumani", "Bo'ston tumani", "Izboskan tumani", "Jalaquduq tumani", 
+    "Marhamat tumani", "Oltinko'l tumani", "Paxtaobod tumani", "Shahrixon tumani", 
+    "Ulug'nor tumani", "Xo'jaobod tumani", "Qo'rg'ontepa tumani"
+  ],
+  "Farg'ona viloyati": [
+    "Farg'ona shahri", "Marg'ilon shahri", "Qo'qon shahri", "Quvasoy shahri", "Oltiariq tumani", 
+    "Bag'dod tumani", "Beshariq tumani", "Buvayda tumani", "Dang'ara tumani", "Yozyovon tumani", 
+    "Quva tumani", "Qo'shtepa tumani", "Rishton tumani", "So'x tumani", "Toshloq tumani", 
+    "Uchko'prik tumani", "O'zbekiston tumani", "Farg'ona tumani", "Furqat tumani"
   ],
   "Namangan viloyati": [
-    "Namangan shahri", "Chust tumani", "Kosonsoy tumani", "Uychi tumani", 
-    "Mingbuloq tumani", "Pop tumani", "To'raqo'rg'on tumani", "Chortoq tumani"
+    "Namangan shahri", "Namangan tumani", "Chortoq tumani", "Chust tumani", "Kosonsoy tumani", 
+    "Mingbuloq tumani", "Norin tumani", "Pop tumani", "To'raqo'rg'on tumani", 
+    "Uychi tumani", "Uchqo'rg'on tumani", "Yangiqo'rg'on tumani", "Davlatobod tumani", "Yangi Namangan tumani"
   ],
   "Buxoro viloyati": [
-    "Buxoro shahri", "Kogon shahri", "G'ijduvon tumani", "Vobkent tumani", 
-    "Jondor tumani", "Olot tumani", "Peshku tumani"
+    "Buxoro shahri", "Kogon shahri", "Buxoro tumani", "Vobkent tumani", "G'ijduvon tumani", 
+    "Jondor tumani", "Kogon tumani", "Qorako'l tumani", "Qorovulbozor tumani", 
+    "Olot tumani", "Peshku tumani", "Romitan tumani", "Shofirkon tumani"
   ],
-  "Navoiy viloyati": [
-    "Navoiy shahri", "Zarafshon shahri", "Karmana tumani", "Nurota tumani", 
-    "Qiziltepa tumani", "Xatirchi tumani", "Konimex tumani"
-  ],
-  "Jizzax viloyati": [
-    "Jizzax shahri", "G'allaorol tumani", "Zomin tumani", "Paxtakor tumani", 
-    "Dustlik tumani", "Baxmal tumani", "Zarbdor tumani"
-  ],
-  "Sirdaryo viloyati": [
-    "Guliston shahri", "Yangiyer shahri", "Shirin shahri", "Sirdaryo tumani", 
-    "Boyovut tumani", "Mirzaobod tumani", "Sardoba tumani"
+  "Samarqand viloyati": [
+    "Samarqand shahri", "Kattaqo'rg'on shahri", "Oqdaryo tumani", "Bulung'ur tumani", 
+    "Jomboy tumani", "Ishtixon tumani", "Kattaqo'rg'on tumani", "Narpay tumani", 
+    "Nuropod tumani", "Payariq tumani", "Pastdarg'om tumani", 
+    "Paxtachi tumani", "Samarqand tumani", "Toyloq tumani", "Urgut tumani", "Qo'shrabot tumani"
   ],
   "Qashqadaryo viloyati": [
-    "Qarshi shahri", "Shahrisabz shahri", "Kitob tumani", "G'uzor tumani", 
-    "Qamashi tumani", "Kasbi tumani", "Koson tumani", "Dehqonobod tumani", "Ko'kdala tumani"
+    "Qarshi shahri", "Shahrisabz shahri", "G'uzor tumani", "Dehqonobod tumani", 
+    "Qamashi tumani", "Qarshi tumani", "Kasbi tumani", "Kitob tumani", "Koson tumani", 
+    "Mirishkor tumani", "Muborak tumani", "Nishon tumani", "Chiroqchi tumani", 
+    "Shahrisabz tumani", "Yakkabog' tumani", "Ko'kdala tumani"
   ],
   "Surxondaryo viloyati": [
-    "Termiz shahri", "Denov tumani", "Sherobod tumani", "Jarqo'rg'on tumani", 
-    "Qumqo'rg'on tumani", "Angor tumani", "Sariosiyo tumani", "Uzun tumani"
+    "Termiz shahri", "Angor tumani", "Boysun tumani", "Denov tumani", "Jarqo'rg'on tumani", 
+    "Qiziriq tumani", "Qumqo'rg'on tumani", "Muzrabot tumani", "Oltinsoy tumani", 
+    "Sariosiyo tumani", "Termiz tumani", "Uzun tumani", "Sherobod tumani", "Sho'rchi tumani", "Bandixon tumani"
+  ],
+  "Navoiy viloyati": [
+    "Navoiy shahri", "Zarafshon shahri", "G'ozg'on shahri", "Karmana tumani", "Konimex tumani", 
+    "Qiziltepa tumani", "Navbahor tumani", "Nurota tumani", "Tomdi tumani", "Uchquduq tumani", "Xatirchi tumani"
+  ],
+  "Jizzax viloyati": [
+    "Jizzax shahri", "Arnasoy tumani", "Baxmal tumani", "G'allaorol tumani", "Do'stlik tumani", 
+    "Sharof Rashidov tumani", "Zarbdor tumani", "Zafarobod tumani", "Zomin tumani", 
+    "Mirzachul tumani", "Paxtakor tumani", "Yangiobod tumani", "Forish tumani"
+  ],
+  "Sirdaryo viloyati": [
+    "Guliston shahri", "Shirin shahri", "Yangiyer shahri", "Boyovut tumani", "Guliston tumani", 
+    "Sardoba tumani", "Mirzaobod tumani", "Sayxunobod tumani", "Sirdaryo tumani", "Oqoltin tumani", "Xovos tumani"
   ],
   "Xorazm viloyati": [
-    "Urganch shahri", "Xiva shahri", "Shovot tumani", "Gurlan tumani", 
-    "Xonqa tumani", "Yangiariq tumani", "Yangibozor tumani"
+    "Urganch shahri", "Xiva shahri", "Bog'ot tumani", "Gurlan tumani", "Qo'shko'pir tumani", 
+    "Shovot tumani", "Urganch tumani", "Xiva tumani", "Xonqa tumani", "Hazorasp tumani", "Yangiarik tumani", "Yangibozor tumani", "Tuproqqala tumani"
   ],
   "Qoraqalpog'iston Respublikasi": [
-    "Nukus shahri", "To'rtko'l tumani", "Beruniy tumani", "Chimboy tumani", 
-    "Xo'jayli tumani", "Qo'ng'irot tumani", "Mo'ynoq tumani", "Ellikqal'a tumani"
+    "Nukus shahri", "Amudaryo tumani", "Beruniy tumani", "Kegeyli tumani", "Qonlikul tumani", 
+    "Qorao'zak tumani", "Qo'ng'irot tumani", "Mo'ynoq tumani", "Nukus tumani", 
+    "Taxtako'pir tumani", "To'rtko'l tumani", "Xo'jayli tumani", "Chimboy tumani", 
+    "Sho'manoy tumani", "Ellikqal'a tumani", "Taxiatosh tumani", "Bo'zatov tumani"
   ]
 };
 
@@ -1653,24 +1670,43 @@ export default function App() {
       provider.setCustomParameters({ prompt: 'select_account' });
       const result = await signInWithPopup(auth, provider);
       if (result?.user) {
-        let existing = null;
-        try {
-          const cached = localStorage.getItem('alov_user_' + result.user.uid);
-          if (cached) existing = JSON.parse(cached);
-        } catch(e) {}
+        // 1. Sync with backend first to check for existing canonical user (by UID or Email)
+        const partialUser = {
+          uid: result.user.uid,
+          email: result.user.email,
+          name: result.user.displayName,
+          avatar: result.user.photoURL
+        };
 
-        if (!existing) {
-          // 1st time Google registration: open registration setup form
-          setRegName(result.user.displayName || '');
-          setRegAvatar(result.user.photoURL || regAvatar);
-          setPendingGoogleUser(result.user);
-          setAuthMode('google_setup');
-          setIsLoggingIn(false);
-        } else {
-          await syncUserWithBackend(result.user);
-          setShowAuthModal(false);
-          setActiveTab('discover');
+        const response = await fetch(getApiUrl('/api/users/sync'), {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ user: partialUser })
+        });
+        const data = await response.json();
+
+        if (data && data.success && data.user) {
+          const canonicalUser = data.user;
+          
+          if (canonicalUser.isProfileCompleted) {
+            // Profile exists and is complete: log in directly
+            setCurrentUser(canonicalUser);
+            try {
+              localStorage.setItem('alov_user_' + canonicalUser.uid, JSON.stringify(canonicalUser));
+            } catch(e) {}
+            setShowAuthModal(false);
+            setActiveTab('discover');
+            setIsLoggingIn(false);
+            return;
+          }
         }
+
+        // 2. If no existing completed profile, show registration setup form
+        setRegName(result.user.displayName || '');
+        setRegAvatar(result.user.photoURL || regAvatar);
+        setPendingGoogleUser(result.user);
+        setAuthMode('google_setup');
+        setIsLoggingIn(false);
       }
     } catch (popupErr: any) {
       if (popupErr.code === 'auth/popup-closed-by-user' || popupErr.code === 'auth/cancelled-popup-request') {
@@ -1816,9 +1852,16 @@ export default function App() {
         if (data.isNewUser || !data.user.isProfileCompleted) {
           setPendingTgUser(data.user);
           setTelegramStep('profile_setup');
+          // Pre-fill fields from Telegram if available
           setRegName(data.user.name && !data.user.name.startsWith('@') ? data.user.name : '');
+          setRegAvatar(data.user.avatar || 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&q=80&w=600');
+          setRegPhone(data.user.phone || telegramInput.trim());
           const cleanUserTg = telegramInput.replace(/^(https?:\/\/t\.me\/|@)/i, '').toLowerCase();
           setRegTelegram(cleanUserTg ? `https://t.me/${cleanUserTg}` : (data.user.telegram || ''));
+          setRegAge(String(data.user.age || 22));
+          setRegGender(data.user.gender || 'female');
+          setRegRegion(data.user.region || 'Toshkent shahri');
+          setRegDistrict(data.user.district || 'Yunusobod tumani');
         } else {
           const userData = data.user;
           setCurrentUser(userData);
@@ -3568,7 +3611,7 @@ export default function App() {
               <div className="space-y-4">
                 <div className="space-y-1 text-center">
                   <h2 className="text-xl font-black text-slate-900 tracking-tight">Profilni yakunlash ✨</h2>
-                  <p className="text-xs text-slate-500 font-medium">Telegram orqali ro'yxatdan o'tish uchun ma'lumotlarni to'ldiring:</p>
+                  <p className="text-xs text-slate-500 font-medium">Ma'lumotlaringiz Telegram orqali yuklandi.</p>
                 </div>
 
                 {errorMsg && (
@@ -3577,118 +3620,86 @@ export default function App() {
                   </div>
                 )}
 
-                <form onSubmit={handleCompleteTelegramRegistration} className="space-y-3">
-                  <div>
-                    <label className="block text-[11px] font-bold text-slate-700 mb-1">Ism va Familiya</label>
-                    <input 
-                      type="text" 
-                      value={regName}
-                      onChange={(e) => setRegName(e.target.value)}
-                      required
-                      className="w-full px-3.5 py-2.5 rounded-xl bg-slate-50 border border-slate-200 text-xs font-semibold text-slate-900 focus:border-red-500 focus:bg-white outline-none"
-                      placeholder="Ismingiz..."
-                    />
+                <div className="p-3.5 bg-emerald-50 border border-emerald-100 rounded-2xl flex items-center space-x-3 mb-1">
+                  <div className="w-12 h-12 rounded-full bg-white shadow-sm overflow-hidden shrink-0 border border-emerald-200">
+                    {regAvatar ? (
+                      <img src={regAvatar} alt="" className="w-full h-full object-cover" />
+                    ) : (
+                      <div className="w-full h-full flex items-center justify-center bg-emerald-100 text-emerald-400 font-black text-lg">
+                        {regName?.charAt(0) || 'U'}
+                      </div>
+                    )}
                   </div>
-
-                  <div>
-                    <label className="block text-[11px] font-bold text-slate-700 mb-1">Telegram (Havola / Username)</label>
-                    <input 
-                      type="text" 
-                      value={regTelegram}
-                      onChange={(e) => setRegTelegram(e.target.value)}
-                      className="w-full px-3.5 py-2.5 rounded-xl bg-slate-50 border border-slate-200 text-xs font-semibold text-slate-900 focus:border-red-500 focus:bg-white outline-none"
-                      placeholder="https://t.me/username yoki @username"
-                    />
+                  <div className="min-w-0 flex-1">
+                    <p className="text-[10px] text-emerald-600 font-bold uppercase tracking-wider">Tasdiqlangan Profil</p>
+                    <p className="text-sm font-black text-slate-900 truncate">{regName || 'Telegram Foydalanuvchisi'}</p>
+                    <p className="text-[10px] text-slate-400">Yoshingiz: 22 (Profil sozlamalarida o'zgartirish mumkin)</p>
                   </div>
+                </div>
 
-                  <div className="grid grid-cols-2 gap-2">
-                    <div>
-                      <label className="block text-[11px] font-bold text-slate-700 mb-1">Tug'ilgan sana</label>
-                      <input 
-                        type="date" 
-                        value={regBirthDate}
-                        onChange={(e) => {
-                          const bDate = e.target.value;
-                          setRegBirthDate(bDate);
-                          setRegAge(String(calculateAge(bDate)));
-                        }}
-                        className="w-full px-3 py-2.5 rounded-xl bg-slate-50 border border-slate-200 text-xs font-semibold text-slate-900 focus:border-red-500 focus:bg-white outline-none"
-                      />
-                    </div>
-                    <div>
-                      <label className="block text-[11px] font-bold text-slate-700 mb-1">Jinsi</label>
-                      <select 
-                        value={regGender}
-                        onChange={(e) => setRegGender(e.target.value as any)}
-                        className="w-full px-3 py-2.5 rounded-xl bg-slate-50 border border-slate-200 text-xs font-semibold text-slate-900 focus:border-red-500 focus:bg-white outline-none"
-                      >
-                        <option value="female">Ayol 👩</option>
-                        <option value="male">Erkak 👨</option>
-                      </select>
-                    </div>
-                  </div>
-
-                  <div className="grid grid-cols-2 gap-2">
+                <form onSubmit={handleCompleteTelegramRegistration} className="space-y-4">
+                  <div className="grid grid-cols-2 gap-3">
                     <div>
                       <label className="block text-[11px] font-bold text-slate-700 mb-1">Viloyat</label>
                       <select 
                         value={regRegion}
                         onChange={(e) => {
-                          const reg = e.target.value;
-                          setRegRegion(reg);
-                          const dists = UZ_LOCATIONS[reg] || [];
-                          if (dists.length > 0) setRegDistrict(dists[0]);
+                          setRegRegion(e.target.value);
+                          setRegDistrict(UZ_LOCATIONS[e.target.value][0]);
                         }}
-                        className="w-full px-3 py-2.5 rounded-xl bg-slate-50 border border-slate-200 text-xs font-semibold text-slate-900 focus:border-red-500 focus:bg-white outline-none"
+                        className="w-full px-3 py-2.5 rounded-xl bg-slate-50 border border-slate-200 text-xs font-semibold text-slate-900 focus:border-[#E8474A] outline-none"
                       >
                         {Object.keys(UZ_LOCATIONS).map((reg) => (
-                          <option key={reg} value={reg}>{reg}</option>
+                          <option key={`reg_setup_${reg}`} value={reg}>{reg}</option>
                         ))}
                       </select>
                     </div>
                     <div>
-                      <label className="block text-[11px] font-bold text-slate-700 mb-1">Tuman / Shahar</label>
+                      <label className="block text-[11px] font-bold text-slate-700 mb-1">Tuman</label>
                       <select 
                         value={regDistrict}
                         onChange={(e) => setRegDistrict(e.target.value)}
-                        className="w-full px-3 py-2.5 rounded-xl bg-slate-50 border border-slate-200 text-xs font-semibold text-slate-900 focus:border-red-500 focus:bg-white outline-none"
+                        className="w-full px-3 py-2.5 rounded-xl bg-slate-50 border border-slate-200 text-xs font-semibold text-slate-900 focus:border-[#E8474A] outline-none"
                       >
-                        {(UZ_LOCATIONS[regRegion] || []).map((dist) => (
-                          <option key={dist} value={dist}>{dist}</option>
+                        {UZ_LOCATIONS[regRegion]?.map((dist) => (
+                          <option key={`dist_setup_${dist}`} value={dist}>{dist}</option>
                         ))}
                       </select>
                     </div>
                   </div>
 
                   <div>
-                    <label className="block text-[11px] font-bold text-slate-700 mb-1">Akkaunt uchun Parol (Kirish uchun)</label>
+                    <label className="block text-[11px] font-bold text-slate-700 mb-1.5 flex items-center justify-between">
+                      <span>Akkaunt uchun Parol</span>
+                      <span className="text-[10px] text-rose-500 font-medium">* Majburiy</span>
+                    </label>
                     <input 
                       type="password" 
                       value={authPassword}
                       onChange={(e) => setAuthPassword(e.target.value)}
                       required
-                      className="w-full px-3.5 py-2.5 rounded-xl bg-slate-50 border border-slate-200 text-xs font-semibold text-slate-900 focus:border-red-500 focus:bg-white outline-none"
+                      autoFocus
+                      className="w-full px-4 py-3 rounded-2xl bg-slate-50 border border-slate-200 text-sm font-semibold text-slate-900 focus:border-[#E8474A] focus:bg-white outline-none transition-all shadow-sm"
                       placeholder="••••••••"
                     />
-                  </div>
-
-                  <div>
-                    <label className="block text-[11px] font-bold text-slate-700 mb-1">Bio / O'zingiz haqingizda</label>
-                    <textarea 
-                      value={regBio}
-                      onChange={(e) => setRegBio(e.target.value)}
-                      rows={2}
-                      className="w-full px-3.5 py-2 rounded-xl bg-slate-50 border border-slate-200 text-xs font-semibold text-slate-900 focus:border-red-500 focus:bg-white outline-none resize-none"
-                      placeholder="Qanday insonlarni qidiryapsiz..."
-                    />
+                    <p className="mt-2 text-[10px] text-slate-400 leading-relaxed px-1">
+                      Kelajakda boshqa qurilmalardan kirish uchun ushbu paroldan foydalanasiz.
+                    </p>
                   </div>
 
                   <button 
                     type="submit"
                     disabled={isLoggingIn}
-                    className="w-full py-3 px-4 rounded-2xl bg-[#E8474A] text-white font-bold text-sm shadow-md hover:bg-[#cb2e31] transition disabled:opacity-60"
+                    className="w-full py-4 px-4 rounded-2xl bg-[#E8474A] text-white font-bold text-sm shadow-lg shadow-rose-500/20 hover:bg-[#cb2e31] transition-all active:scale-[0.98] disabled:opacity-60 flex items-center justify-center space-x-2"
                   >
-                    {isLoggingIn ? "Saqlanmoqda..." : "Profilni yaratish va boshlash ✨"}
+                    {isLoggingIn ? (
+                      <>
+                        <div className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+                        <span>Saqlanmoqda...</span>
+                      </>
+                    ) : (
+                      <span>Platformaga kirish ✨</span>
+                    )}
                   </button>
                 </form>
               </div>

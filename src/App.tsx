@@ -319,6 +319,21 @@ export default function App() {
   }, [selectedChatUser]);
 
   useEffect(() => {
+    const socket = socketRef.current;
+    const myUid = currentUser?.uid || firebaseUser?.uid;
+    if (socket && myUid) {
+      socket.emit('register_user', myUid);
+      if (selectedChatUser) {
+        const otherUid = selectedChatUser.uid || selectedChatUser.id;
+        if (otherUid) {
+          const chatId = [myUid, otherUid].sort().join('_');
+          socket.emit('join_chat', chatId);
+        }
+      }
+    }
+  }, [currentUser, firebaseUser, selectedChatUser]);
+
+  useEffect(() => {
     const socket = io(getBaseUrl());
     socketRef.current = socket;
 
@@ -916,28 +931,7 @@ export default function App() {
       [...localChats, ...serverChats].forEach(c => chatMap.set(c.id, c));
       const combined = Array.from(chatMap.values());
 
-      // Always prepend Alov AI to the chat list
-      const aiChatId = [myUid, ALOV_AI_USER.uid].sort().join('_');
-      const hasAiChat = combined.some(c => c.id === aiChatId);
-
-      let finalChats = [...combined];
-      if (!hasAiChat) {
-        finalChats.unshift({
-          id: aiChatId,
-          participants: [myUid, ALOV_AI_USER.uid],
-          lastMessage: "Salom! Men Alov AI. Suhbatlashamizmi? 😊",
-          updatedAt: new Date().toISOString(),
-          isAI: true
-        });
-      } else {
-        const aiIndex = finalChats.findIndex(c => c.id === aiChatId);
-        if (aiIndex > -1) {
-          const aiChat = finalChats.splice(aiIndex, 1)[0];
-          finalChats.unshift({ ...aiChat, isAI: true });
-        }
-      }
-
-      setChatsList(finalChats);
+      setChatsList(combined);
       setIsLoadingChats(false);
     };
 

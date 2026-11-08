@@ -139,9 +139,12 @@ export const LandingPage: React.FC<LandingPageProps> = ({ onLogin }) => {
 
               <div className="relative rounded-3xl overflow-hidden shadow-2xl border-2 border-white/80 bg-white">
                 <img 
-                  src="/src/assets/images/hero_spring_dating_1794157256006.jpg" 
+                  src="/assets/images/hero_spring_dating_1794157256006.jpg" 
                   alt="Alov.uz Tanishuv" 
                   className="w-full h-80 sm:h-96 object-cover"
+                  onError={(e: any) => {
+                    e.target.src = 'https://images.unsplash.com/photo-1516589178581-6cd7833ae3b2?auto=format&fit=crop&q=80&w=800';
+                  }}
                 />
                 
                 {/* Overlay live tag */}
@@ -217,9 +220,12 @@ export const LandingPage: React.FC<LandingPageProps> = ({ onLogin }) => {
             {/* Card 2: Community Vibes Image */}
             <div className="bg-white rounded-3xl border border-slate-200 overflow-hidden shadow-sm flex flex-col">
               <img 
-                src="/src/assets/images/spring_community_vibes_1794157256761.jpg" 
+                src="/assets/images/spring_community_vibes_1794157256761.jpg" 
                 alt="Do'stona Jamoa" 
                 className="w-full h-48 object-cover" 
+                onError={(e: any) => {
+                  e.target.src = 'https://images.unsplash.com/photo-1529156069898-49953e39b3ac?auto=format&fit=crop&q=80&w=800';
+                }}
               />
               <div className="p-6 space-y-2 flex-1 flex flex-col justify-between">
                 <div>

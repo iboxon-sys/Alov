@@ -571,7 +571,9 @@ async function startServer() {
         for (const u of usersStore.values()) {
           const uTgClean = (u.telegram || '').replace(/^(https?:\/\/t\.me\/|@)/i, '').toLowerCase();
           const uPhoneClean = (u.phone || '').replace(/\D/g, '');
-          if ((cleanUsername && uTgClean === cleanUsername) || (cleanPhone && cleanPhone.length > 5 && uPhoneClean === cleanPhone)) {
+          const matchUsername = cleanUsername && uTgClean === cleanUsername;
+          const matchPhone = cleanPhone && cleanPhone.length >= 9 && uPhoneClean.endsWith(cleanPhone.slice(-9));
+          if (matchUsername || matchPhone) {
             existingUser = u;
             break;
           }
@@ -1068,13 +1070,57 @@ Suhbatlashish qoidalaringiz:
       if (!user || !user.uid) {
         return res.status(400).json({ error: 'Valid user with uid required' });
       }
-      const existing = usersStore.get(user.uid) || {};
+      // --- Robust Duplicate Check & Merge Logic ---
+      let canonicalUser = usersStore.get(user.uid);
+      const incomingTgChatId = user.telegramChatId;
+      const incomingPhone = user.phone ? user.phone.replace(/\D/g, '') : null;
+      const incomingTgHandle = user.telegram ? user.telegram.replace(/^(https?:\/\/t\.me\/|@)/i, '').toLowerCase() : null;
+
+      if (!canonicalUser) {
+        // Look for match by Telegram Chat ID
+        if (incomingTgChatId) {
+          for (const u of usersStore.values()) {
+            if (u.telegramChatId === incomingTgChatId) {
+              canonicalUser = u;
+              break;
+            }
+          }
+        }
+        
+        // Look for match by Phone
+        if (!canonicalUser && incomingPhone && incomingPhone.length >= 9) {
+          const searchTail = incomingPhone.slice(-9);
+          for (const u of usersStore.values()) {
+            const uPhone = u.phone ? u.phone.replace(/\D/g, '') : null;
+            if (uPhone && uPhone.length >= 9 && uPhone.endsWith(searchTail)) {
+              canonicalUser = u;
+              break;
+            }
+          }
+        }
+
+        // Look for match by Telegram Handle
+        if (!canonicalUser && incomingTgHandle) {
+          for (const u of usersStore.values()) {
+            const uTgHandle = u.telegram ? u.telegram.replace(/^(https?:\/\/t\.me\/|@)/i, '').toLowerCase() : null;
+            if (uTgHandle === incomingTgHandle) {
+              canonicalUser = u;
+              break;
+            }
+          }
+        }
+      }
+
+      const existing = canonicalUser || {};
+      const targetUid = canonicalUser ? canonicalUser.uid : user.uid;
+
+      // If we matched a user with a different UID, we might have a temporary entry at user.uid
+      // that we should eventually phase out. For now, we sync into targetUid.
 
       // If user has a telegram or phone, see if bot knows their chatId
-      let knownChatId = user.telegramChatId || existing.telegramChatId;
-      if (!knownChatId && user.telegram) {
-        const cleanTg = user.telegram.replace(/^(https?:\/\/t\.me\/|@)/i, '').toLowerCase();
-        const found = telegramBotUsers.get(cleanTg) || telegramBotUsers.get(`@${cleanTg}`) || (user.phone ? telegramBotUsers.get(user.phone.replace(/\D/g, '')) : null);
+      let knownChatId = incomingTgChatId || existing.telegramChatId;
+      if (!knownChatId && incomingTgHandle) {
+        const found = telegramBotUsers.get(incomingTgHandle) || telegramBotUsers.get(`@${incomingTgHandle}`) || (incomingPhone ? telegramBotUsers.get(incomingPhone) : null);
         if (found) {
           knownChatId = found.chatId;
         }
@@ -1083,11 +1129,15 @@ Suhbatlashish qoidalaringiz:
       const mergedUser = {
         ...existing,
         ...user,
+        uid: targetUid,
         telegramChatId: knownChatId || existing.telegramChatId,
         isOnline: true,
         updatedAt: new Date().toISOString()
       };
-      usersStore.set(user.uid, mergedUser);
+      usersStore.set(targetUid, mergedUser);
+      if (user.uid !== targetUid) {
+        usersStore.delete(user.uid);
+      }
       saveUsersToDisk();
       io.emit('user_updated', mergedUser);
 

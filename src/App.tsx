@@ -105,7 +105,7 @@ const UZ_LOCATIONS: Record<string, string[]> = {
   ],
   "Qashqadaryo viloyati": [
     "Qarshi shahri", "Shahrisabz shahri", "Kitob tumani", "G'uzor tumani", 
-    "Qamashi tumani", "Kasbi tumani", "Koson tumani", "Dehqonobod tumani"
+    "Qamashi tumani", "Kasbi tumani", "Koson tumani", "Dehqonobod tumani", "Ko'kdala tumani"
   ],
   "Surxondaryo viloyati": [
     "Termiz shahri", "Denov tumani", "Sherobod tumani", "Jarqo'rg'on tumani", 

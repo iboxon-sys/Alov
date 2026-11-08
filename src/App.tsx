@@ -1853,7 +1853,13 @@ export default function App() {
           setPendingTgUser(data.user);
           setTelegramStep('profile_setup');
           // Pre-fill fields from Telegram if available
-          setRegName(data.user.name && !data.user.name.startsWith('@') ? data.user.name : '');
+          const tgUser = (window as any).Telegram?.WebApp?.initDataUnsafe?.user;
+          if (tgUser) {
+            const fullName = [tgUser.first_name, tgUser.last_name].filter(Boolean).join(' ');
+            setRegName(fullName || data.user.name || '');
+          } else {
+            setRegName(data.user.name && !data.user.name.startsWith('@') ? data.user.name : '');
+          }
           setRegAvatar(data.user.avatar || 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&q=80&w=600');
           setRegPhone(data.user.phone || telegramInput.trim());
           const cleanUserTg = telegramInput.replace(/^(https?:\/\/t\.me\/|@)/i, '').toLowerCase();

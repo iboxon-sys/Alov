@@ -548,7 +548,15 @@ async function startServer() {
       const formattedTgUrl = cleanUsername ? `https://t.me/${cleanUsername}` : undefined;
 
       // Duplicate search across usersStore to ensure single unique account
-      let existingUser: any = usersStore.get(`tg_${cleanUsername || cleanPhone || rawInput}`);
+      let existingUser: any = null;
+      if (userChatId) {
+        for (const u of usersStore.values()) {
+          if (u.telegramChatId === userChatId) {
+            existingUser = u;
+            break;
+          }
+        }
+      }
       if (!existingUser) {
         for (const u of usersStore.values()) {
           const uTgClean = (u.telegram || '').replace(/^(https?:\/\/t\.me\/|@)/i, '').toLowerCase();

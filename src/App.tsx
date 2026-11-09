@@ -1490,7 +1490,8 @@ export default function App() {
 
   const handleSaveProfile = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!firebaseUser) return;
+    const activeUid = firebaseUser?.uid || currentUser?.uid;
+    if (!activeUid) return;
     setErrorMsg('');
 
     // Mandatory GPS Region Verification
@@ -1505,20 +1506,20 @@ export default function App() {
       const computedAge = calculateAge(regBirthDate, Number(regAge));
       const newUserData = {
         ...currentUser,
-        id: currentUser?.id || `ALOV-${firebaseUser.uid.slice(0, 5).toUpperCase()}`,
-        uid: firebaseUser.uid,
-        name: regName || firebaseUser.displayName || 'Alov Foydalanuvchisi',
+        id: currentUser?.id || `ALOV-${activeUid.slice(0, 5).toUpperCase()}`,
+        uid: activeUid,
+        name: regName || firebaseUser?.displayName || currentUser?.name || 'Alov Foydalanuvchisi',
         birthDate: regBirthDate,
         age: computedAge,
         gender: regGender,
         region: regRegion,
         district: regDistrict,
         neighborhood: regNeighborhood,
-        phone: regPhone || firebaseUser.phoneNumber || '+998901112233',
-        telegram: regTelegram || '@user_tg',
-        instagram: regInstagram || '@user_insta',
+        phone: regPhone || firebaseUser?.phoneNumber || currentUser?.phone || '+998901112233',
+        telegram: regTelegram || currentUser?.telegram || '@user_tg',
+        instagram: regInstagram || currentUser?.instagram || '@user_insta',
         bio: regBio,
-        avatar: regAvatar || firebaseUser.photoURL || 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&q=80&w=600',
+        avatar: regAvatar || firebaseUser?.photoURL || currentUser?.avatar || 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&q=80&w=600',
         videoUrl: currentUser?.videoUrl || 'https://assets.mixkit.co/videos/preview/mixkit-young-woman-looking-at-camera-in-a-park-41686-large.mp4',
         followersCount: currentUser?.followersCount || 1,
         followingCount: currentUser?.followingCount || 1,
@@ -1526,7 +1527,8 @@ export default function App() {
         isOnline: true,
         isLocationEnabled: isLocationEnabled,
         locationVisibility: regLocationVisibility,
-        location: userCoords
+        location: userCoords,
+        isProfileCompleted: true
       };
 
       const data = await safeFetchJson(getApiUrl('/api/users/sync'), {
@@ -1537,14 +1539,14 @@ export default function App() {
       const savedUser = (data && data.success && data.user) ? data.user : newUserData;
 
       try {
-        localStorage.setItem('alov_user_' + firebaseUser.uid, JSON.stringify(savedUser));
+        localStorage.setItem('alov_user_' + activeUid, JSON.stringify(savedUser));
       } catch (e) {}
 
       setCurrentUser(savedUser);
       setUsersList(prev => {
         const userMap = new Map<string, any>();
         prev.forEach(u => userMap.set(u.uid || u.id, u));
-        userMap.set(firebaseUser.uid, savedUser);
+        userMap.set(activeUid, savedUser);
         return Array.from(userMap.values());
       });
       setShowProfileModal(false);

@@ -978,8 +978,19 @@ Suhbatlashish qoidalaringiz:
       const incomingTgHandle = user.telegram ? user.telegram.replace(/^(https?:\/\/t\.me\/|@)/i, '').toLowerCase() : null;
 
       if (!canonicalUser) {
+        // Look for match by Email
+        const incomingEmail = user.email ? user.email.toLowerCase().trim() : null;
+        if (incomingEmail) {
+          for (const u of usersStore.values()) {
+            if (u.email && u.email.toLowerCase().trim() === incomingEmail) {
+              canonicalUser = u;
+              break;
+            }
+          }
+        }
+
         // Look for match by Telegram Chat ID
-        if (incomingTgChatId) {
+        if (!canonicalUser && incomingTgChatId) {
           for (const u of usersStore.values()) {
             if (u.telegramChatId === incomingTgChatId) {
               canonicalUser = u;

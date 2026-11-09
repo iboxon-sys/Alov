@@ -25,12 +25,6 @@ export const GenderStatsBar: React.FC = () => {
     fetchStats();
 
     const socket = io(getBaseUrl());
-    socket.on('active_users_count', (payload: { count: number }) => {
-      if (payload && payload.count !== undefined) {
-        setTotalCount(prev => Math.max(prev, payload.count));
-      }
-    });
-
     socket.on('user_updated', () => {
       fetchStats();
     });

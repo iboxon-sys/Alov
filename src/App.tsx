@@ -9,14 +9,13 @@ import {
   MapPin, Send, Mic, Play, Plus, Users, Eye, ThumbsUp, Smartphone, 
   ChevronRight, X, ArrowUpRight, ShieldCheck, Globe, LogIn, LogOut, CheckCircle2, Edit3, ArrowLeft, VideoOff,
   ZoomIn, ZoomOut, Move, Crop, AlertTriangle, RefreshCw, Navigation, Shield, Lock, EyeOff, Car, Upload,
-  Clock, Check, CheckCheck
+  Clock, Check, CheckCheck, Gift, Coins, Wallet, CreditCard
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { clsx, type ClassValue } from 'clsx';
 import { twMerge } from 'tailwind-merge';
 import { LandingPage } from './LandingPage';
 import { LiveStreamModal } from './components/LiveStreamModal';
-import { AudioRoomModal } from './components/AudioRoomModal';
 import { OneOnOneCallModal } from './components/OneOnOneCallModal';
 import { IncomingCallModal } from './components/IncomingCallModal';
 import { callNotification } from './services/callNotification';
@@ -260,18 +259,18 @@ export default function App() {
   const [liveModalMode, setLiveModalMode] = useState<'broadcaster' | 'viewer'>('broadcaster');
   const [activeLiveStreamId, setActiveLiveStreamId] = useState<string | undefined>(undefined);
   const [activeLiveHostUser, setActiveLiveHostUser] = useState<any | undefined>(undefined);
-
-  // Audio Room (Ovozli xona) states
-  const [showAudioRoomModal, setShowAudioRoomModal] = useState(false);
-  const [audioRoomCode, setAudioRoomCode] = useState<string>('alov_general_room');
-  const [audioRoomTitle, setAudioRoomTitle] = useState<string>('Alov.uz Jonli Ovozli Xona 🎙️');
-
   // 1-on-1 WebRTC Video Call & Screen Sharing states
   const [activeCallUser, setActiveCallUser] = useState<any | null>(null);
-  const [incomingCallData, setIncomingCallData] = useState<{ caller: any; offer: any; callerSocketId?: string } | null>(null);
-
-  const [activeRoom, setActiveRoom] = useState<any | null>(null);
-  const [roomList, setRoomList] = useState<any[]>([]);
+  const [incomingCallData, setIncomingCallData] = useState<any | null>(null);
+  // Tokenomics (Moneta & Almaz) States
+  const [showTopUpModal, setShowTopUpModal] = useState(false);
+  const [showWithdrawModal, setShowWithdrawModal] = useState(false);
+  const [showGiftModal, setShowGiftModal] = useState(false);
+  const [topUpPackage, setTopUpPackage] = useState<{ coins: number; uzs: number }>({ coins: 300, uzs: 28000 });
+  const [paymentProvider, setPaymentProvider] = useState<'click' | 'payme' | 'uzum' | 'telegram_stars'>('click');
+  const [withdrawCardNumber, setWithdrawCardNumber] = useState('');
+  const [withdrawAmount, setWithdrawAmount] = useState<number>(100);
+  const [walletNoticeMsg, setWalletNoticeMsg] = useState('');
 
   const [selectedChatUser, setSelectedChatUser] = useState<any>(null);
   const [chatMessages, setChatMessages] = useState<Record<string, any[]>>({});
@@ -539,14 +538,14 @@ export default function App() {
 
     callNotification.setActionCallback((action, _data) => {
       if (action === 'accept') {
-        setIncomingCallData(prev => {
+        setIncomingCallData((prev: any) => {
           if (prev?.caller) {
             setActiveCallUser(prev.caller);
           }
           return prev;
         });
       } else {
-        setIncomingCallData(prev => {
+        setIncomingCallData((prev: any) => {
           if (prev?.caller) {
             const targetUid = prev.caller.uid || prev.caller.id;
             socketRef.current?.emit('reject-call', { targetUid, targetSocketId: prev.callerSocketId });
@@ -646,6 +645,21 @@ export default function App() {
     };
   }, []);
 
+  // LocalStorage Session Restore on App Mount
+  useEffect(() => {
+    try {
+      const cached = localStorage.getItem('alov_current_user');
+      if (cached) {
+        const parsed = JSON.parse(cached);
+        if (parsed && parsed.uid && parsed.isProfileCompleted) {
+          setCurrentUser(parsed);
+          setActiveTab('discover');
+          setIsAuthChecking(false);
+        }
+      }
+    } catch (e) {}
+  }, []);
+
   // Telegram WebApp Auto-login & Integration
   useEffect(() => {
     try {
@@ -660,6 +674,7 @@ export default function App() {
             id: `TG-${tgUser.id}`,
             name: `${tgUser.first_name || ''} ${tgUser.last_name || ''}`.trim() || 'Telegram Foydalanuvchi',
             username: tgUser.username ? `@${tgUser.username}` : '@telegram_user',
+            telegramChatId: tgUser.id,
             avatar: tgUser.photo_url || 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&q=80&w=600',
             bio: 'Telegram Mini App orqali ulandim! ✨',
             isOnline: true,
@@ -667,13 +682,27 @@ export default function App() {
             district: 'Yunusobod tumani',
             gender: 'female'
           };
-          setCurrentUser(telegramUserObj);
-          setIsAuthChecking(false);
           fetch(getBaseUrl() + '/api/users/sync', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ user: telegramUserObj })
-          }).catch(() => {});
+          })
+          .then(res => res.json())
+          .then(data => {
+            if (data && data.success && data.user) {
+              const u = data.user;
+              setCurrentUser(u);
+              try {
+                localStorage.setItem('alov_current_user', JSON.stringify(u));
+                localStorage.setItem('alov_user_' + u.uid, JSON.stringify(u));
+              } catch (e) {}
+              if (u.isProfileCompleted) {
+                setActiveTab('discover');
+              }
+            }
+          })
+          .catch(() => {});
+          setIsAuthChecking(false);
         }
       }
     } catch (e) {
@@ -748,6 +777,7 @@ export default function App() {
       // Har doim lokal keshni yangilab qo'yish
       try {
         localStorage.setItem('alov_user_' + user.uid, JSON.stringify(userData));
+        localStorage.setItem('alov_current_user', JSON.stringify(userData));
       } catch (e) {}
 
       setCurrentUser(userData);
@@ -878,48 +908,6 @@ export default function App() {
     };
   }, []);
 
-  // Load real active audio party rooms from Render server (Zero mock rooms)
-  useEffect(() => {
-    const fetchRooms = async () => {
-      try {
-        const data = await safeFetchJson(getApiUrl('/api/audio-rooms'));
-        if (data && data.success && Array.isArray(data.rooms)) {
-          setRoomList(data.rooms);
-        }
-      } catch (err) {
-        console.warn("Could not fetch audio rooms:", err);
-      }
-    };
-    fetchRooms();
-
-    const socket = io(getBaseUrl());
-    socket.on('audio_room_created', (newRoom: any) => {
-      setRoomList(prev => [...prev.filter(r => r.code !== newRoom.code), newRoom]);
-    });
-    socket.on('audio_room_state', (roomData: any) => {
-      if (roomData?.code) {
-        setRoomList(prev => {
-          const idx = prev.findIndex(r => r.code === roomData.code);
-          if (idx > -1) {
-            const updated = [...prev];
-            updated[idx] = roomData;
-            return updated;
-          }
-          return [...prev, roomData];
-        });
-      }
-    });
-    socket.on('audio_room_deleted', ({ roomCode }: { roomCode: string }) => {
-      setRoomList(prev => prev.filter(r => r.code !== roomCode));
-    });
-    socket.on('audio_room_closed', ({ roomCode }: { roomCode: string }) => {
-      setRoomList(prev => prev.filter(r => r.code !== roomCode));
-    });
-
-    return () => {
-      socket.disconnect();
-    };
-  }, []);
 
   // Load active 1-on-1 chats from Render API & localStorage (No Firestore)
   useEffect(() => {
@@ -1494,14 +1482,6 @@ export default function App() {
     if (!activeUid) return;
     setErrorMsg('');
 
-    // Mandatory GPS Region Verification
-    if (userCoords?.lat && userCoords?.lng) {
-      const detectedRegion = getGpsRegionName(userCoords.lat, userCoords.lng);
-      if (detectedRegion.includes("Toshkent") && !regRegion.includes("Toshkent")) {
-        setErrorMsg(`Iltimos, aniq va haqiqiy joylashuvingizni kiriting! GPS orqali ${detectedRegion} aniqlandi, lekin siz ${regRegion} tanladingiz.`);
-        return;
-      }
-    }
     try {
       const computedAge = calculateAge(regBirthDate, Number(regAge));
       const newUserData = {
@@ -1854,14 +1834,16 @@ export default function App() {
         if (data.isNewUser || !data.user.isProfileCompleted) {
           setPendingTgUser(data.user);
           setTelegramStep('profile_setup');
-          // Pre-fill fields from Telegram if available
+          // Pre-fill fields from Telegram First Name / Last Name if available
           const tgUser = (window as any).Telegram?.WebApp?.initDataUnsafe?.user;
+          let calculatedName = '';
           if (tgUser) {
-            const fullName = [tgUser.first_name, tgUser.last_name].filter(Boolean).join(' ');
-            setRegName(fullName || data.user.name || '');
-          } else {
-            setRegName(data.user.name && !data.user.name.startsWith('@') ? data.user.name : '');
+            calculatedName = [tgUser.first_name, tgUser.last_name].filter(Boolean).join(' ').trim();
           }
+          if (!calculatedName && data.user && data.user.name && !data.user.name.includes('Telegram Foydalanuvch') && !data.user.name.includes('Alov Foydalanuvch') && !data.user.name.startsWith('@')) {
+            calculatedName = data.user.name;
+          }
+          setRegName(calculatedName || '');
           setRegAvatar(data.user.avatar || 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&q=80&w=600');
           setRegPhone(data.user.phone || telegramInput.trim());
           const cleanUserTg = telegramInput.replace(/^(https?:\/\/t\.me\/|@)/i, '').toLowerCase();
@@ -1895,7 +1877,7 @@ export default function App() {
     e.preventDefault();
     if (!pendingTgUser) return;
     if (!regName.trim()) {
-      setErrorMsg("Iltimos, ism va familiyangizni kiriting!");
+      setErrorMsg("Iltimos, ismingizni kiriting!");
       return;
     }
     try {
@@ -1960,6 +1942,9 @@ export default function App() {
         });
       } catch (e) {}
     }
+    try {
+      localStorage.removeItem('alov_current_user');
+    } catch (e) {}
     await signOut(auth);
     setFirebaseUser(null);
     setCurrentUser(null);
@@ -2079,47 +2064,6 @@ export default function App() {
     }
   };
 
-  // 1 Room per user: Open existing or create single room
-  const handleOpenMyRoom = async () => {
-    if (!firebaseUser && !currentUser) {
-      setShowAuthModal(true);
-      return;
-    }
-    const myUid = currentUser?.uid || firebaseUser?.uid;
-    const myName = currentUser?.name || firebaseUser?.displayName || 'Alov Foydalanuvchisi';
-    const myAvatar = currentUser?.avatar || firebaseUser?.photoURL || '';
-
-    // Check if user already created an active room in roomList
-    const existing = roomList.find(r => r.ownerUid === myUid);
-    if (existing) {
-      setAudioRoomCode(existing.code);
-      setAudioRoomTitle(existing.title);
-      setShowAudioRoomModal(true);
-      return;
-    }
-
-    try {
-      const data = await safeFetchJson(getApiUrl('/api/audio-rooms/create'), {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          ownerUid: myUid,
-          ownerName: myName,
-          ownerAvatar: myAvatar,
-          title: `${myName} Ovozli Xonasi 🎙️`
-        })
-      });
-      if (data && data.success && data.room) {
-        setAudioRoomCode(data.room.code);
-        setAudioRoomTitle(data.room.title);
-        setShowAudioRoomModal(true);
-      }
-    } catch (e) {
-      setAudioRoomCode(`room_${myUid}`);
-      setAudioRoomTitle(`${myName} Ovozli Xonasi 🎙️`);
-      setShowAudioRoomModal(true);
-    }
-  };
 
   const handleTyping = () => {
     if (!firebaseUser || !selectedChatUser) return;
@@ -2259,6 +2203,104 @@ export default function App() {
     }
   };
 
+  const handleSendGift = async (gift: { id: string; name: string; coinPrice: number; icon: string }) => {
+    if (!selectedChatUser) return;
+    const myUid = currentUser?.uid || firebaseUser?.uid;
+    const otherUid = selectedChatUser.uid || selectedChatUser.id;
+    if (!myUid || !otherUid) return;
+
+    if ((currentUser?.coins ?? 100) < gift.coinPrice) {
+      setShowGiftModal(false);
+      setShowTopUpModal(true);
+      setWalletNoticeMsg(`"${gift.name}" sovg'asi uchun ${gift.coinPrice} moneta kerak. Moneta sotib olasizmi?`);
+      return;
+    }
+
+    try {
+      const data = await safeFetchJson(getApiUrl('/api/gifts/send'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          senderUid: myUid,
+          recipientUid: otherUid,
+          giftId: gift.id,
+          giftName: gift.name,
+          coinPrice: gift.coinPrice,
+          giftIcon: gift.icon
+        })
+      });
+      if (data && data.success && data.sender) {
+        setCurrentUser(data.sender);
+        setShowGiftModal(false);
+      } else {
+        alert(data?.error || "Sovg'a yuborishda xatolik");
+      }
+    } catch (e: any) {
+      alert(e.message || "Xatolik yuz berdi");
+    }
+  };
+
+  const handleExecuteTopUp = async () => {
+    const myUid = currentUser?.uid || firebaseUser?.uid;
+    if (!myUid) return;
+    try {
+      const data = await safeFetchJson(getApiUrl('/api/wallet/topup'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          uid: myUid,
+          coinAmount: topUpPackage.coins,
+          paymentMethod: paymentProvider
+        })
+      });
+      if (data && data.success && data.user) {
+        setCurrentUser(data.user);
+        setShowTopUpModal(false);
+        setWalletNoticeMsg('');
+        alert(`🎉 ${topUpPackage.coins} moneta hisobingizga muvaffaqiyatli qo'shildi!`);
+      } else {
+        alert(data?.error || "To'lovni amalga oshirishda xatolik.");
+      }
+    } catch (e: any) {
+      alert(e.message || "Xatolik yuz berdi");
+    }
+  };
+
+  const handleExecuteWithdrawal = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const myUid = currentUser?.uid || firebaseUser?.uid;
+    if (!myUid) return;
+    if (!withdrawCardNumber || withdrawCardNumber.replace(/\D/g, '').length < 16) {
+      alert("Iltimos, 16 xonali Humo yoki Uzcard karta raqamini kiriting!");
+      return;
+    }
+    if (withdrawAmount < 100) {
+      alert("Minimal yechib olish miqdori 100 almaz (100,000 so'm)!");
+      return;
+    }
+
+    try {
+      const data = await safeFetchJson(getApiUrl('/api/wallet/withdraw'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          uid: myUid,
+          diamondAmount: withdrawAmount,
+          bankCard: withdrawCardNumber
+        })
+      });
+      if (data && data.success && data.user) {
+        setCurrentUser(data.user);
+        setShowWithdrawModal(false);
+        alert(`✅ Pul yechib olish arizangiz qabul qilindi! ${(withdrawAmount * 1000).toLocaleString()} so'm 1-24 soat ichida kartangizga o'tkaziladi.`);
+      } else {
+        alert(data?.error || "Arizani yuborishda xatolik.");
+      }
+    } catch (e: any) {
+      alert(e.message || "Xatolik yuz berdi");
+    }
+  };
+
   const handleMediaUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file || !firebaseUser || !selectedChatUser) return;
@@ -2347,13 +2389,31 @@ export default function App() {
           </span>
         </div>
 
-        <div className="flex items-center space-x-2">
+        <div className="flex items-center space-x-1.5">
+          {currentUser?.gender === 'female' ? (
+            <button 
+              onClick={() => setShowWithdrawModal(true)}
+              className="flex items-center space-x-1 bg-cyan-50 border border-cyan-200 text-cyan-900 py-1 px-2.5 rounded-full text-[10px] font-bold shadow-xs hover:bg-cyan-100 transition active:scale-95"
+            >
+              <span>💎</span>
+              <span>{currentUser?.diamonds ?? 0} Almaz</span>
+            </button>
+          ) : (
+            <button 
+              onClick={() => setShowTopUpModal(true)}
+              className="flex items-center space-x-1 bg-amber-50 border border-amber-200 text-amber-900 py-1 px-2.5 rounded-full text-[10px] font-bold shadow-xs hover:bg-amber-100 transition active:scale-95"
+            >
+              <Coins className="w-3 h-3 text-amber-500 fill-amber-400" />
+              <span>{currentUser?.coins ?? 100} Moneta</span>
+            </button>
+          )}
+
           <button 
             onClick={() => setActiveTab('profile')}
-            className="flex items-center space-x-1.5 bg-white border border-[rgba(28,28,28,0.08)] py-1 px-2 rounded-full shadow-subtle"
+            className="flex items-center space-x-1 bg-white border border-[rgba(28,28,28,0.08)] py-1 px-2 rounded-full shadow-subtle"
           >
             <img src={currentUser?.avatar || firebaseUser?.photoURL || ''} alt="Avatar" className="w-5 h-5 rounded-full object-cover shrink-0" />
-            <span className="text-[10px] font-bold truncate max-w-[70px]">{currentUser?.name || 'Profil'}</span>
+            <span className="text-[10px] font-bold truncate max-w-[65px]">{currentUser?.name || 'Profil'}</span>
           </button>
           <button onClick={handleLogout} className="p-1.5 rounded-full bg-rose-50 text-[#E8474A]">
             <LogOut className="w-3.5 h-3.5" />
@@ -2501,81 +2561,6 @@ export default function App() {
           </div>
         )}
 
-        {/* --- ROOMS TAB --- */}
-        {activeTab === 'rooms' && (
-          <div className="space-y-3">
-            <div className="bg-gradient-to-r from-rose-600 via-pink-600 to-purple-600 text-white p-5 rounded-[24px] space-y-3 shadow-xl">
-              <div className="flex items-center space-x-2">
-                <Radio className="w-6 h-6 animate-pulse text-rose-200" />
-                <h1 className="text-xl font-extrabold tracking-wide">Jonli Ovozli Xonalar (Party Room)</h1>
-              </div>
-              <p className="text-xs text-rose-100">
-                8 ta mikrofon o'rindiqlari, jonli audio suhbat va real-time xona chati! 🎙️✨
-              </p>
-              <button 
-                onClick={handleOpenMyRoom}
-                className="w-full bg-white text-rose-600 hover:bg-rose-50 py-3 rounded-full font-bold text-xs shadow-lg active:scale-95 transition flex items-center justify-center space-x-2"
-              >
-                <Plus className="w-4 h-4" />
-                <span>O'z Ovozli Xonangizni Ochish (+ Join)</span>
-              </button>
-            </div>
-
-            {/* Active Real Voice Rooms */}
-            <div className="space-y-2.5">
-              <h2 className="text-sm font-bold text-slate-800 px-1">Faol Ovozli Xonalar:</h2>
-              {roomList.filter(r => (r.membersCount || 0) > 0).length === 0 ? (
-                <div className="bg-white p-6 rounded-[20px] card-shadow text-center space-y-2 border border-slate-100">
-                  <div className="w-12 h-12 rounded-full bg-rose-50 text-rose-500 mx-auto flex items-center justify-center">
-                    <Radio className="w-6 h-6 animate-pulse" />
-                  </div>
-                  <h3 className="font-bold text-sm text-slate-800">Hozircha ochiq ovozli xonalar yo'q</h3>
-                  <p className="text-xs text-slate-400 max-w-xs mx-auto">
-                    Birinchi bo'lib o'z xonangizni oching va barchani jonli suhbatga chorlang! 🎙️✨
-                  </p>
-                  <button 
-                    onClick={handleOpenMyRoom}
-                    className="mt-2 px-5 py-2 rounded-full bg-slate-900 hover:bg-slate-800 text-white font-bold text-xs shadow-md transition"
-                  >
-                    Xona ochish ✨
-                  </button>
-                </div>
-              ) : (
-                roomList.filter(r => (r.membersCount || 0) > 0).map((room, idx) => (
-                  <div key={room.code ? `${room.code}_${idx}` : `room_${idx}`} className="bg-white p-4 rounded-[20px] card-shadow space-y-3 border border-slate-100">
-                    <div className="flex items-center justify-between">
-                      <div className="min-w-0 pr-2">
-                        <h3 className="font-bold text-sm text-slate-900 truncate">{room.title}</h3>
-                        <p className="text-[11px] text-slate-500 mt-0.5 truncate">
-                          Boshlovchi: {room.ownerName || 'Alov Foydalanuvchisi'} • {room.membersCount || 1} ta ishtirokchi
-                        </p>
-                      </div>
-                      <span className="px-2.5 py-1 rounded-full bg-emerald-100 text-emerald-700 text-[10px] font-extrabold flex items-center space-x-1 shrink-0">
-                        <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-ping" />
-                        <span>FAOL</span>
-                      </span>
-                    </div>
-                    <button 
-                      onClick={() => {
-                        if (!firebaseUser && !currentUser) {
-                          setShowAuthModal(true);
-                          return;
-                        }
-                        setAudioRoomCode(room.code);
-                        setAudioRoomTitle(room.title);
-                        setShowAudioRoomModal(true);
-                      }} 
-                      className="w-full py-2.5 rounded-full bg-slate-900 hover:bg-slate-800 text-white font-bold text-xs shadow-md transition flex items-center justify-center space-x-2 active:scale-95"
-                    >
-                      <Mic className="w-3.5 h-3.5 text-rose-400" />
-                      <span>Xonaga kirish 🎙️</span>
-                    </button>
-                  </div>
-                ))
-              )}
-            </div>
-          </div>
-        )}
 
         {/* --- REELS / EFIRLAR TAB (Only active live streamers) --- */}
         {activeTab === 'reels' && (
@@ -2871,6 +2856,13 @@ export default function App() {
                   </div>
                   <div className="flex items-center space-x-1">
                     <button 
+                      onClick={() => setShowGiftModal(true)} 
+                      title="Sovg'a yuborish 🎁"
+                      className="p-2 rounded-full hover:bg-amber-50 text-amber-500 transition active:scale-90"
+                    >
+                      <Gift className="w-5 h-5" />
+                    </button>
+                    <button 
                       onClick={() => {
                         if (selectedChatUser) {
                           setActiveCallUser(selectedChatUser);
@@ -2883,6 +2875,13 @@ export default function App() {
                     </button>
                   </div>
                 </div>
+
+                {currentUser?.gender === 'female' && (
+                  <div className="bg-gradient-to-r from-emerald-600 to-teal-600 text-white px-3.5 py-1.5 text-[10px] font-bold flex items-center justify-between shrink-0 shadow-xs">
+                    <span>💎 Har bir javobingiz uchun +6 Almaz ishlab topasiz!</span>
+                    <span className="bg-white/20 px-2 py-0.5 rounded-full text-[9px] uppercase tracking-wider">Hisobingiz: {currentUser?.diamonds ?? 0}</span>
+                  </div>
+                )}
 
                 <div className="flex-1 p-4 overflow-y-auto overscroll-contain space-y-3 bg-[#F8F9FA] scrollbar-none scroll-smooth">
                   <AnimatePresence>
@@ -2918,7 +2917,17 @@ export default function App() {
                                 ? 'bg-[#E8474A] text-white rounded-tr-none' 
                                 : 'bg-white text-slate-900 border border-slate-200/50 rounded-tl-none'
                             )}>
-                              {msg.type === 'meet' ? (
+                              {msg.type === 'gift' ? (
+                                <div className="flex items-center space-x-2.5 py-1">
+                                  <span className="text-3xl shrink-0">{msg.giftIcon || '🎁'}</span>
+                                  <div>
+                                    <p className="font-extrabold text-xs">{msg.giftName || 'Sovg\'a'} yuborildi!</p>
+                                    <p className="text-[10px] opacity-90 flex items-center space-x-1 mt-0.5">
+                                      <span>🪙 {msg.coinPrice || 10} moneta</span>
+                                    </p>
+                                  </div>
+                                </div>
+                              ) : msg.type === 'meet' ? (
                                 <a href={msg.meetUrl} target="_blank" rel="noreferrer" className="underline font-bold flex items-center space-x-2 py-1">
                                   <Video className="w-4 h-4" />
                                   <span>Google Meet Qo'shilish</span>
@@ -3272,10 +3281,6 @@ export default function App() {
           <button onClick={() => setActiveTab('discover')} className={`flex flex-col items-center p-1 ${activeTab === 'discover' ? 'text-[#E8474A] font-bold' : 'text-[#6b635c]'}`}>
             <Users className="w-4 h-4" />
             <span className="text-[9px]">Nomzodlar</span>
-          </button>
-          <button onClick={() => setActiveTab('rooms')} className={`flex flex-col items-center p-1 ${activeTab === 'rooms' ? 'text-[#E8474A] font-bold' : 'text-[#6b635c]'}`}>
-            <Radio className="w-4 h-4" />
-            <span className="text-[9px]">Xonalar</span>
           </button>
           <button onClick={() => setActiveTab('map')} className={`flex flex-col items-center p-1 ${activeTab === 'map' ? 'text-[#E8474A] font-bold' : 'text-[#6b635c]'}`}>
             <MapPin className="w-4 h-4" />
@@ -3640,12 +3645,29 @@ export default function App() {
                   </div>
                   <div className="min-w-0 flex-1">
                     <p className="text-[10px] text-emerald-600 font-bold uppercase tracking-wider">Tasdiqlangan Profil</p>
-                    <p className="text-sm font-black text-slate-900 truncate">{regName || 'Telegram Foydalanuvchisi'}</p>
+                    <p className="text-sm font-black text-slate-900 truncate">{regName || 'Foydalanuvchi'}</p>
                     <p className="text-[10px] text-slate-400">Yoshingiz: 22 (Profil sozlamalarida o'zgartirish mumkin)</p>
                   </div>
                 </div>
 
                 <form onSubmit={handleCompleteTelegramRegistration} className="space-y-4">
+                  <div>
+                    <label className="block text-[11px] font-bold text-slate-700 mb-1 flex items-center justify-between">
+                      <span>Ismingiz</span>
+                      <span className="text-[10px] text-slate-400 font-medium">* Familiya ixtiyoriy</span>
+                    </label>
+                    <input 
+                      type="text" 
+                      value={regName}
+                      onChange={(e) => setRegName(e.target.value)}
+                      required
+                      className="w-full px-3.5 py-2.5 rounded-xl bg-slate-50 border border-slate-200 text-xs font-semibold text-slate-900 focus:border-[#E8474A] focus:bg-white outline-none transition-all shadow-xs"
+                      placeholder="Ismingiz (masalan: Malika)..."
+                    />
+                    <p className="text-[10px] text-slate-400 mt-1">
+                      Telegram profilingizda familiya bo'lsa avtomatik qo'shiladi. Familiya shart emas.
+                    </p>
+                  </div>
                   <div className="grid grid-cols-2 gap-3">
                     <div>
                       <label className="block text-[11px] font-bold text-slate-700 mb-1">Viloyat</label>
@@ -4404,21 +4426,6 @@ export default function App() {
         />
       )}
 
-      {/* --- AUDIO ROOM (OVOZLI XONA) MODAL --- */}
-      {showAudioRoomModal && (
-        <AudioRoomModal
-          socket={socketRef.current}
-          roomCode={audioRoomCode}
-          roomTitle={audioRoomTitle}
-          currentUser={{
-            uid: currentUser?.uid || firebaseUser?.uid || 'user_' + Date.now(),
-            id: currentUser?.id,
-            name: currentUser?.name || firebaseUser?.displayName || 'Alov Foydalanuvchisi',
-            avatar: currentUser?.avatar || firebaseUser?.photoURL || ''
-          }}
-          onClose={() => setShowAudioRoomModal(false)}
-        />
-      )}
 
       {/* --- WHATSAPP / TELEGRAM STYLE INCOMING CALL MODAL WITH RINGTONE --- */}
       {incomingCallData && !activeCallUser && (
@@ -4459,6 +4466,234 @@ export default function App() {
             setIncomingCallData(null);
           }}
         />
+      )}
+
+      {/* --- GIFT SELECTION MODAL --- */}
+      {showGiftModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-md animate-fadeIn">
+          <div className="bg-white rounded-[32px] max-w-sm w-full p-6 space-y-4 relative card-shadow border border-slate-100 shadow-2xl text-slate-900">
+            <button 
+              onClick={() => setShowGiftModal(false)}
+              className="absolute top-5 right-5 p-2 rounded-full bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold transition active:scale-90"
+            >
+              <X className="w-4 h-4" />
+            </button>
+
+            <div className="space-y-1">
+              <h3 className="text-xl font-black text-slate-900 flex items-center space-x-2">
+                <span>Sovg'a Yuborish 🎁</span>
+              </h3>
+              <p className="text-xs text-slate-500 font-medium">
+                {selectedChatUser?.name || 'Foydalanuvchi'}ga virtual sovg'a taqdim eting:
+              </p>
+            </div>
+
+            <div className="bg-amber-50 border border-amber-200 rounded-2xl p-2.5 flex items-center justify-between text-xs font-bold text-amber-900">
+              <span className="flex items-center space-x-1">
+                <Coins className="w-4 h-4 text-amber-500 fill-amber-400" />
+                <span>Balansingiz: {currentUser?.coins ?? 100} moneta</span>
+              </span>
+              <button 
+                onClick={() => { setShowGiftModal(false); setShowTopUpModal(true); }}
+                className="bg-amber-500 hover:bg-amber-600 text-white px-2.5 py-1 rounded-full text-[10px] font-bold shadow-xs"
+              >
+                + To'ldirish
+              </button>
+            </div>
+
+            <div className="grid grid-cols-2 gap-2.5 max-h-[300px] overflow-y-auto pr-1">
+              {[
+                { id: 'rose', name: 'Atirgul 🌹', coinPrice: 10, icon: '🌹' },
+                { id: 'heart', name: 'Yurak 💖', coinPrice: 30, icon: '💖' },
+                { id: 'teddy', name: 'Ayiqcha 🧸', coinPrice: 50, icon: '🧸' },
+                { id: 'crown', name: 'Toj 👑', coinPrice: 100, icon: '👑' },
+                { id: 'car', name: 'Qimmat Mashina 🚗', coinPrice: 300, icon: '🚗' },
+                { id: 'castle', name: 'Olmos Qasr 💎', coinPrice: 500, icon: '💎' },
+              ].map((g) => (
+                <button
+                  key={g.id}
+                  onClick={() => handleSendGift(g)}
+                  className="p-3 rounded-2xl border border-slate-200 hover:border-amber-400 bg-slate-50 hover:bg-amber-50/50 flex flex-col items-center justify-center space-y-1.5 transition active:scale-95 text-center group"
+                >
+                  <span className="text-3xl group-hover:scale-110 transition-transform">{g.icon}</span>
+                  <span className="text-xs font-bold text-slate-800 leading-tight">{g.name}</span>
+                  <span className="text-[10px] font-black text-amber-600 bg-amber-100/80 px-2 py-0.5 rounded-full flex items-center space-x-0.5">
+                    <Coins className="w-2.5 h-2.5 fill-amber-500 text-amber-600" />
+                    <span>{g.coinPrice} moneta</span>
+                  </span>
+                </button>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* --- TOP-UP COINS MODAL (Click, Payme, Uzum, Telegram Stars) --- */}
+      {showTopUpModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-md animate-fadeIn">
+          <div className="bg-white rounded-[32px] max-w-sm w-full p-6 space-y-4 relative card-shadow border border-slate-100 shadow-2xl text-slate-900">
+            <button 
+              onClick={() => { setShowTopUpModal(false); setWalletNoticeMsg(''); }}
+              className="absolute top-5 right-5 p-2 rounded-full bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold transition active:scale-90"
+            >
+              <X className="w-4 h-4" />
+            </button>
+
+            <div className="space-y-1">
+              <h3 className="text-xl font-black text-slate-900 flex items-center space-x-2">
+                <Coins className="w-5 h-5 text-amber-500 fill-amber-400" />
+                <span>Moneta Sotib Olish 🪙</span>
+              </h3>
+              <p className="text-xs text-slate-500 font-medium">
+                Xabar yozish va sovg'alar yuborish uchun moneta balansini to'ldiring:
+              </p>
+            </div>
+
+            {walletNoticeMsg && (
+              <div className="p-3 bg-amber-50 border border-amber-200 rounded-2xl text-amber-900 text-xs font-semibold">
+                {walletNoticeMsg}
+              </div>
+            )}
+
+            <div className="space-y-2">
+              <label className="block text-[11px] font-bold text-slate-700">Moneta Paketini Tanlang:</label>
+              <div className="grid grid-cols-2 gap-2">
+                {[
+                  { coins: 100, uzs: 10000, label: 'Standard' },
+                  { coins: 300, uzs: 28000, label: '🔥 Mashhur' },
+                  { coins: 500, uzs: 45000, label: 'Tejamkor' },
+                  { coins: 1000, uzs: 80000, label: '⚡️ Super' },
+                ].map((pkg) => (
+                  <button
+                    key={pkg.coins}
+                    type="button"
+                    onClick={() => setTopUpPackage(pkg)}
+                    className={cn(
+                      "p-3 rounded-2xl border text-left transition relative active:scale-95",
+                      topUpPackage.coins === pkg.coins 
+                        ? "border-amber-500 bg-amber-50/70 shadow-xs ring-2 ring-amber-400/30" 
+                        : "border-slate-200 bg-slate-50 hover:bg-slate-100"
+                    )}
+                  >
+                    <span className="text-xs font-black text-slate-900 block">{pkg.coins} Moneta 🪙</span>
+                    <span className="text-[11px] font-bold text-amber-600 block mt-0.5">{pkg.uzs.toLocaleString()} so'm</span>
+                    <span className="text-[9px] font-bold text-slate-400 block mt-0.5">{pkg.label}</span>
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            <div className="space-y-2">
+              <label className="block text-[11px] font-bold text-slate-700">To'lov Tizimi:</label>
+              <div className="grid grid-cols-2 gap-2">
+                {[
+                  { id: 'click', name: 'Click' },
+                  { id: 'payme', name: 'Payme' },
+                  { id: 'uzum', name: 'Uzum Bank' },
+                  { id: 'telegram_stars', name: 'Telegram Stars ⭐️' },
+                ].map((p) => (
+                  <button
+                    key={p.id}
+                    type="button"
+                    onClick={() => setPaymentProvider(p.id as any)}
+                    className={cn(
+                      "py-2.5 px-3 rounded-xl border text-xs font-bold transition active:scale-95 text-center",
+                      paymentProvider === p.id 
+                        ? "border-blue-500 bg-blue-50 text-blue-900 ring-2 ring-blue-400/30" 
+                        : "border-slate-200 bg-slate-50 text-slate-700 hover:bg-slate-100"
+                    )}
+                  >
+                    {p.name}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            <button
+              onClick={handleExecuteTopUp}
+              className="w-full py-3.5 rounded-2xl bg-gradient-to-r from-amber-500 to-orange-500 hover:from-amber-600 hover:to-orange-600 text-white font-bold text-xs shadow-lg shadow-amber-500/25 transition active:scale-95 flex items-center justify-center space-x-2"
+            >
+              <CreditCard className="w-4 h-4" />
+              <span>{topUpPackage.uzs.toLocaleString()} So'm To'lash va Olish 🚀</span>
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* --- WITHDRAW DIAMONDS MODAL (FOR FEMALE USERS) --- */}
+      {showWithdrawModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-md animate-fadeIn">
+          <div className="bg-white rounded-[32px] max-w-sm w-full p-6 space-y-4 relative card-shadow border border-slate-100 shadow-2xl text-slate-900">
+            <button 
+              onClick={() => setShowWithdrawModal(false)}
+              className="absolute top-5 right-5 p-2 rounded-full bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold transition active:scale-90"
+            >
+              <X className="w-4 h-4" />
+            </button>
+
+            <div className="space-y-1">
+              <h3 className="text-xl font-black text-slate-900 flex items-center space-x-2">
+                <span>Pul Yechib Olish 💎</span>
+              </h3>
+              <p className="text-xs text-slate-500 font-medium">
+                Ishlab topilgan almazlarni Humo yoki Uzcard kartangizga pul qilib chiqaring:
+              </p>
+            </div>
+
+            <div className="bg-cyan-50 border border-cyan-200 rounded-2xl p-3.5 space-y-1">
+              <div className="flex items-center justify-between text-xs font-bold text-cyan-950">
+                <span>Mavjud Balans:</span>
+                <span className="text-sm font-black text-cyan-700">💎 {currentUser?.diamonds ?? 0} Almaz</span>
+              </div>
+              <p className="text-[10px] text-cyan-800 font-medium">
+                Kurs: 1 Almaz = 1,000 So'm • minimal yechish: 100 Almaz (100,000 So'm)
+              </p>
+            </div>
+
+            <form onSubmit={handleExecuteWithdrawal} className="space-y-3">
+              <div>
+                <label className="block text-[11px] font-bold text-slate-700 mb-1">Yechib olinadigan almaz miqdori:</label>
+                <input 
+                  type="number"
+                  min={100}
+                  max={currentUser?.diamonds ?? 0}
+                  value={withdrawAmount}
+                  onChange={(e) => setWithdrawAmount(Number(e.target.value))}
+                  required
+                  className="w-full px-3.5 py-2.5 rounded-xl bg-slate-50 border border-slate-200 text-xs font-bold text-slate-900 focus:border-cyan-500 outline-none"
+                />
+                <p className="text-[10px] text-slate-500 mt-1">
+                  Kartangizga o'tkaziladi: <span className="font-bold text-emerald-600">{(withdrawAmount * 1000).toLocaleString()} So'm</span>
+                </p>
+              </div>
+
+              <div>
+                <label className="block text-[11px] font-bold text-slate-700 mb-1">Humo / Uzcard Karta Raqami (16 xonali):</label>
+                <input 
+                  type="text"
+                  maxLength={19}
+                  placeholder="8600 0000 0000 0000"
+                  value={withdrawCardNumber}
+                  onChange={(e) => {
+                    const raw = e.target.value.replace(/\D/g, '');
+                    const formatted = raw.match(/.{1,4}/g)?.join(' ') || raw;
+                    setWithdrawCardNumber(formatted);
+                  }}
+                  required
+                  className="w-full px-3.5 py-2.5 rounded-xl bg-slate-50 border border-slate-200 text-xs font-mono font-bold text-slate-900 focus:border-cyan-500 outline-none"
+                />
+              </div>
+
+              <button
+                type="submit"
+                className="w-full py-3.5 rounded-2xl bg-gradient-to-r from-teal-500 to-emerald-600 hover:from-teal-600 hover:to-emerald-700 text-white font-bold text-xs shadow-lg shadow-teal-500/25 transition active:scale-95 flex items-center justify-center space-x-2"
+              >
+                <Wallet className="w-4 h-4" />
+                <span>Ariza Yuborish (Kartaga O'tkazish) 💸</span>
+              </button>
+            </form>
+          </div>
+        </div>
       )}
 
     </div>

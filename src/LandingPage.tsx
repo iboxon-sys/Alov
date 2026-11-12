@@ -85,13 +85,13 @@ export const LandingPage: React.FC<LandingPageProps> = ({ onLogin }) => {
             <h1 className="text-3xl sm:text-5xl lg:text-6xl font-black text-slate-900 tracking-tight leading-[1.15]" style={{ textWrap: 'balance' }}>
               Yangi Tanishuvlar, <br />
               <span className="text-transparent bg-clip-text bg-gradient-to-r from-[#E8474A] via-pink-600 to-rose-500">
-                Jonli Ovozli Xonalar
+                Jonli Efirlar
               </span> <br />
               va Samimiy Suhbatlar
             </h1>
 
             <p className="text-base sm:text-lg text-slate-600 max-w-xl leading-relaxed">
-              Yangi hayot va iliq munosabatlar sari qadam qo'ying. O'zbekistonning barcha 14 hududidan 100% tekshirilgan insonlar bilan xavfsiz tanishing, jonli ovozli xonalarda suhbatlashing va o'z juftingizni toping.
+              Yangi hayot va iliq munosabatlar sari qadam qo'ying. O'zbekistonning barcha 14 hududidan 100% tekshirilgan insonlar bilan xavfsiz tanishing, jonli efirlarda muloqot qiling va o'z juftingizni toping.
             </p>
 
             {/* CTA Buttons */}
@@ -150,7 +150,7 @@ export const LandingPage: React.FC<LandingPageProps> = ({ onLogin }) => {
                 {/* Overlay live tag */}
                 <div className="absolute top-4 left-4 bg-white/90 backdrop-blur-md px-3.5 py-1.5 rounded-2xl shadow-md border border-white/60 flex items-center space-x-2">
                   <span className="w-2.5 h-2.5 bg-rose-500 rounded-full animate-ping" />
-                  <span className="text-xs font-black text-slate-800 tracking-tight">Ovozli xonalar faol</span>
+                  <span className="text-xs font-black text-slate-800 tracking-tight">Jonli efirlar faol</span>
                 </div>
 
                 <div className="absolute bottom-0 inset-x-0 bg-gradient-to-t from-slate-950/85 via-slate-900/40 to-transparent p-5 text-white text-left">
@@ -191,13 +191,13 @@ export const LandingPage: React.FC<LandingPageProps> = ({ onLogin }) => {
             <div className="md:col-span-2 bg-gradient-to-br from-rose-50 via-white to-pink-50/60 p-6 sm:p-8 rounded-3xl border border-rose-100 shadow-sm relative overflow-hidden flex flex-col justify-between">
               <div className="space-y-4 max-w-lg relative z-10">
                 <div className="w-12 h-12 rounded-2xl bg-[#E8474A] text-white flex items-center justify-center shadow-md shadow-rose-500/20">
-                  <Mic className="w-6 h-6" />
+                  <Video className="w-6 h-6" />
                 </div>
                 <h3 className="text-xl sm:text-2xl font-black text-slate-900">
-                  Jonli Ovozli Xonalar (Clubhouse / Spaces)
+                  Jonli Efirlar va HD Qo'ng'iroqlar
                 </h3>
                 <p className="text-sm sm:text-base text-slate-600 leading-relaxed">
-                  Faqat matnli yozishmalar bilan cheklanmang! Qiziqishlar, kitoblar, psixologiya yoki erkin suhbat xonalariga qo'shiling, ovozingiz bilan samimiy taassurot qoldiring.
+                  Faqat matnli yozishmalar bilan cheklanmang! Jonli efirlarga qo'shiling, video va audio qo'ng'iroqlar orqali samimiy taassurot qoldiring.
                 </p>
                 <div className="flex flex-wrap items-center gap-2 pt-2">
                   <span className="text-xs font-bold px-3 py-1 bg-white border border-rose-200 rounded-xl text-rose-700">🎙️ Jonli efir</span>
@@ -211,7 +211,7 @@ export const LandingPage: React.FC<LandingPageProps> = ({ onLogin }) => {
                   onClick={onLogin}
                   className="inline-flex items-center space-x-2 text-sm font-bold text-[#E8474A] hover:text-[#cb2e31] transition"
                 >
-                  <span>Xonalarni ko'rish</span>
+                  <span>Efirlarni ko'rish</span>
                   <ArrowRight className="w-4 h-4" />
                 </button>
               </div>
@@ -302,7 +302,7 @@ export const LandingPage: React.FC<LandingPageProps> = ({ onLogin }) => {
               {
                 step: "03",
                 title: "Jonli Muloqotni Boshlash",
-                desc: "Ovozli xonalarga kiring, reels videolarni tomosha qiling va yoqqan insonlarga xabar yuboring.",
+                desc: "Jonli efirlarga kiring, reels videolarni tomosha qiling va yoqqan insonlarga xabar yuboring.",
                 icon: MessageCircle
               }
             ].map((item, idx) => (

@@ -154,21 +154,17 @@ async function startServer() {
     const username = user?.username ? user.username.toLowerCase().replace(/^@/, '') : '';
     const phone = (contactPhone || user?.phone_number || '').replace(/\D/g, '');
     
-    // Try to get photo if not already in record
-    let avatarUrl = undefined;
     const existingEntry = Array.from(telegramBotUsers.values()).find(e => e.chatId === chatId);
-    if (existingEntry?.avatar) {
-      avatarUrl = existingEntry.avatar;
-    } else {
-      avatarUrl = await getTelegramPhoto(chatId);
-    }
+    const firstName = user?.first_name || user?.name || existingEntry?.firstName || '';
+    const lastName = user?.last_name !== undefined ? user.last_name : (existingEntry?.lastName || '');
+    const avatarUrl = user?.avatar || existingEntry?.avatar || (await getTelegramPhoto(chatId));
 
     const record = { 
       chatId, 
-      username: username || undefined, 
-      phone: phone || undefined, 
-      firstName: user?.first_name || user?.name || '', 
-      lastName: user?.last_name || '',
+      username: username || existingEntry?.username || undefined, 
+      phone: phone || existingEntry?.phone || undefined, 
+      firstName, 
+      lastName,
       avatar: avatarUrl,
       updatedAt: Date.now() 
     };
@@ -626,7 +622,10 @@ async function startServer() {
       let user = existingUser;
       
       if (!user) {
-        const tgName = matchedBotUser?.firstName ? (matchedBotUser.firstName + (matchedBotUser.lastName ? ` ${matchedBotUser.lastName}` : '')) : (cleanUsername ? `@${cleanUsername}` : `Telegram Foydalanuvchi ${cleanPhone.slice(-4)}`);
+        const tgName = (matchedBotUser?.firstName || matchedBotUser?.lastName) 
+          ? [matchedBotUser.firstName, matchedBotUser.lastName].filter(Boolean).join(' ') 
+          : '';
+
         user = {
           uid,
           id: `ALOV-TG-${uid.slice(0, 5).toUpperCase()}`,
@@ -640,7 +639,7 @@ async function startServer() {
           gender: 'female',
           region: 'Toshkent shahri',
           district: 'Yunusobod tumani',
-          bio: 'Telegram botimiz orqali ulandim! ✨',
+          bio: 'Telegram orqali ulandim! ✨',
           status: 'online',
           isLocationEnabled: true,
           locationVisibility: 'everyone',
@@ -651,6 +650,9 @@ async function startServer() {
         saveUsersToDisk();
         io.emit('user_updated', user);
       } else {
+        if ((!user.name || user.name.includes('Telegram Foydalanuvch') || user.name.includes('Alov Foydalanuvch') || user.name.startsWith('@')) && (matchedBotUser?.firstName || matchedBotUser?.lastName)) {
+          user.name = [matchedBotUser.firstName, matchedBotUser.lastName].filter(Boolean).join(' ');
+        }
         if (formattedTgUrl && (!user.telegram || user.telegram.startsWith('@'))) {
           user.telegram = formattedTgUrl;
         }
@@ -854,7 +856,6 @@ Suhbatlashish qoidalaringiz:
   const userChatsStore: Record<string, any> = {};
   const liveStreamChatStore: Record<string, any[]> = {};
   const liveStreamsStore: Record<string, any> = {};
-  const audioRoomsStore = new Map<string, any>();
 
   // Pre-seeded verified profiles across Uzbekistan regions (both genders, active & recent)
   const initialUsers: any[] = [];
@@ -883,6 +884,14 @@ Suhbatlashish qoidalaringiz:
         if (Array.isArray(list)) {
           for (const u of list) {
             if (u && u.uid) {
+              if (u.name && (u.name.includes('Telegram Foydalanuvch') || u.name.includes('Alov Foydalanuvch'))) {
+                const tgClean = (u.telegram || '').replace(/^(https?:\/\/t\.me\/|@)/i, '').trim();
+                if (tgClean) {
+                  u.name = `@${tgClean}`;
+                } else if (u.phone) {
+                  u.name = u.phone;
+                }
+              }
               usersStore.set(u.uid, u);
               if (u.telegramChatId) {
                 registerBotUser(u.telegramChatId, { username: u.telegram, first_name: u.name }, u.phone);
@@ -936,9 +945,59 @@ Suhbatlashish qoidalaringiz:
     } catch (e) {}
   }
 
+  const transactionsStore: any[] = [];
+  const withdrawalsStore: any[] = [];
+
+  const TRANSACTIONS_DB_FILE = path.join(__dirname, 'transactions_db.json');
+  const WITHDRAWALS_DB_FILE = path.join(__dirname, 'withdrawals_db.json');
+
+  function saveTransactionsToDisk() {
+    try {
+      fs.writeFileSync(TRANSACTIONS_DB_FILE, JSON.stringify(transactionsStore, null, 2), 'utf-8');
+    } catch (e) {
+      console.warn("Could not save transactions_db.json:", e);
+    }
+  }
+
+  function loadTransactionsFromDisk() {
+    try {
+      if (fs.existsSync(TRANSACTIONS_DB_FILE)) {
+        const raw = fs.readFileSync(TRANSACTIONS_DB_FILE, 'utf-8');
+        const list = JSON.parse(raw);
+        if (Array.isArray(list)) {
+          transactionsStore.length = 0;
+          transactionsStore.push(...list);
+        }
+      }
+    } catch (e) {}
+  }
+
+  function saveWithdrawalsToDisk() {
+    try {
+      fs.writeFileSync(WITHDRAWALS_DB_FILE, JSON.stringify(withdrawalsStore, null, 2), 'utf-8');
+    } catch (e) {
+      console.warn("Could not save withdrawals_db.json:", e);
+    }
+  }
+
+  function loadWithdrawalsFromDisk() {
+    try {
+      if (fs.existsSync(WITHDRAWALS_DB_FILE)) {
+        const raw = fs.readFileSync(WITHDRAWALS_DB_FILE, 'utf-8');
+        const list = JSON.parse(raw);
+        if (Array.isArray(list)) {
+          withdrawalsStore.length = 0;
+          withdrawalsStore.push(...list);
+        }
+      }
+    } catch (e) {}
+  }
+
   loadUsersFromDisk();
   loadChatsFromDisk();
   loadMessagesFromDisk();
+  loadTransactionsFromDisk();
+  loadWithdrawalsFromDisk();
   saveUsersToDisk();
 
   // Create HTTP Server & Socket.io Server first so endpoints can emit events
@@ -1039,8 +1098,12 @@ Suhbatlashish qoidalaringiz:
       }
 
       const mergedUser = {
+        isVerified: false,
+        bankCard: '',
         ...existing,
         ...user,
+        coins: (existing && existing.coins !== undefined) ? existing.coins : (user.coins !== undefined ? user.coins : 100),
+        diamonds: (existing && existing.diamonds !== undefined) ? existing.diamonds : (user.diamonds !== undefined ? user.diamonds : 0),
         uid: targetUid,
         telegramChatId: knownChatId || existing.telegramChatId,
         isOnline: true,
@@ -1078,6 +1141,182 @@ Suhbatlashish qoidalaringiz:
         return res.json({ success: true, user: updated });
       }
       res.json({ success: true });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // --- Tokenomics Wallet & Gifts Endpoints ---
+  app.post('/api/wallet/topup', (req, res) => {
+    try {
+      const { uid, coinAmount, paymentMethod = 'click' } = req.body;
+      if (!uid || !coinAmount || coinAmount <= 0) {
+        return res.status(400).json({ error: 'Valid uid and coinAmount required' });
+      }
+      const user = usersStore.get(uid);
+      if (!user) {
+        return res.status(404).json({ error: 'Foydalanuvchi topilmadi' });
+      }
+      user.coins = (user.coins || 0) + Number(coinAmount);
+      user.updatedAt = new Date().toISOString();
+      usersStore.set(uid, user);
+      saveUsersToDisk();
+
+      const tx = {
+        id: 'tx_' + Date.now() + Math.random().toString(36).substring(2, 6),
+        sender: uid,
+        type: 'topup',
+        coinAmount: Number(coinAmount),
+        paymentMethod,
+        status: 'completed',
+        note: `${coinAmount} moneta xarid qilindi (${paymentMethod.toUpperCase()})`,
+        createdAt: new Date().toISOString()
+      };
+      transactionsStore.unshift(tx);
+      saveTransactionsToDisk();
+
+      io.emit('user_updated', user);
+      res.json({ success: true, user, transaction: tx });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.post('/api/wallet/withdraw', (req, res) => {
+    try {
+      const { uid, diamondAmount, bankCard } = req.body;
+      const user = usersStore.get(uid);
+      if (!user) return res.status(404).json({ error: 'Foydalanuvchi topilmadi' });
+
+      const count = Number(diamondAmount);
+      if (isNaN(count) || count < 100) {
+        return res.status(400).json({ error: 'Minimal yechib olish miqdori 100 almaz (100 000 so\'m)' });
+      }
+      if ((user.diamonds || 0) < count) {
+        return res.status(400).json({ error: 'Balansingizda yetarli almaz mavjud emas' });
+      }
+      if (!bankCard || bankCard.trim().replace(/\D/g, '').length < 16) {
+        return res.status(400).json({ error: '16 xonali Humo/Uzcard karta raqamini kiriting' });
+      }
+
+      user.diamonds = (user.diamonds || 0) - count;
+      user.bankCard = bankCard.trim();
+      user.updatedAt = new Date().toISOString();
+      usersStore.set(uid, user);
+      saveUsersToDisk();
+
+      const uzsAmount = count * 1000;
+      const wReq = {
+        id: 'wd_' + Date.now() + Math.random().toString(36).substring(2, 6),
+        userUid: uid,
+        userName: user.name,
+        userCard: bankCard.trim(),
+        diamondAmount: count,
+        uzsAmount,
+        status: 'pending',
+        createdAt: new Date().toISOString()
+      };
+      withdrawalsStore.unshift(wReq);
+      saveWithdrawalsToDisk();
+
+      const tx = {
+        id: 'tx_' + Date.now() + Math.random().toString(36).substring(2, 6),
+        sender: uid,
+        type: 'withdraw',
+        diamondAmount: count,
+        uzsAmount,
+        status: 'pending',
+        note: `${count} almaz (${uzsAmount.toLocaleString()} so'm) yechib olish uchun ariza`,
+        createdAt: new Date().toISOString()
+      };
+      transactionsStore.unshift(tx);
+      saveTransactionsToDisk();
+
+      io.emit('user_updated', user);
+      res.json({ success: true, user, withdrawal: wReq });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.get('/api/wallet/history/:uid', (req, res) => {
+    const { uid } = req.params;
+    const userTxs = transactionsStore.filter(t => t.sender === uid || t.receiver === uid);
+    const userWds = withdrawalsStore.filter(w => w.userUid === uid);
+    res.json({ success: true, transactions: userTxs, withdrawals: userWds });
+  });
+
+  app.post('/api/gifts/send', (req, res) => {
+    try {
+      const { senderUid, recipientUid, giftId, giftName, coinPrice, giftIcon } = req.body;
+      const sender = usersStore.get(senderUid);
+      const recipient = usersStore.get(recipientUid);
+
+      if (!sender) return res.status(404).json({ error: 'Yuboruvchi topilmadi' });
+      if (!recipient) return res.status(404).json({ error: 'Qabul qiluvchi topilmadi' });
+
+      const cost = Number(coinPrice) || 10;
+      if ((sender.coins || 0) < cost) {
+        return res.status(400).json({ error: 'Monetalaringiz yetarli emas! Iltimos, balansingizni to\'ldiring.' });
+      }
+
+      sender.coins = (sender.coins || 0) - cost;
+      usersStore.set(senderUid, sender);
+
+      const diamondEarned = Math.floor(cost * 0.6);
+      recipient.diamonds = (recipient.diamonds || 0) + diamondEarned;
+      usersStore.set(recipientUid, recipient);
+
+      saveUsersToDisk();
+
+      const tx = {
+        id: 'tx_' + Date.now() + Math.random().toString(36).substring(2, 6),
+        sender: senderUid,
+        receiver: recipientUid,
+        type: 'gift',
+        coinAmount: cost,
+        diamondAmount: diamondEarned,
+        status: 'completed',
+        note: `Sovg'a: ${giftName} (${cost} moneta)`,
+        createdAt: new Date().toISOString()
+      };
+      transactionsStore.unshift(tx);
+      saveTransactionsToDisk();
+
+      const chatId = [senderUid, recipientUid].sort().join('_');
+      const giftMsg = {
+        id: 'msg_' + Date.now() + Math.random().toString(36).substring(2, 5),
+        senderId: senderUid,
+        senderName: sender.name,
+        text: `🎁 Sovg'a yuborildi: ${giftName} ${giftIcon || '✨'} (+${diamondEarned} Almaz)`,
+        type: 'gift',
+        giftInfo: { giftId, giftName, giftIcon, coinPrice: cost, diamondEarned },
+        status: 'read',
+        read: true,
+        createdAt: new Date().toISOString(),
+        time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+      };
+
+      if (!chatMessagesStore[chatId]) chatMessagesStore[chatId] = [];
+      chatMessagesStore[chatId].push(giftMsg);
+      userChatsStore[chatId] = {
+        id: chatId,
+        participants: [senderUid, recipientUid],
+        lastMessage: giftMsg.text,
+        lastSenderId: senderUid,
+        updatedAt: new Date().toISOString()
+      };
+      saveMessagesToDisk();
+      saveChatsToDisk();
+
+      const payload = { chatId, message: giftMsg, senderId: senderUid, recipientId: recipientUid };
+      io.to(chatId).emit('receive_message', payload);
+      io.to(chatId).emit('chat:message', payload);
+      io.to(`user_${recipientUid}`).emit('receive_message', payload);
+      io.to(`user_${senderUid}`).emit('user_updated', sender);
+      io.to(`user_${recipientUid}`).emit('user_updated', recipient);
+
+      res.json({ success: true, sender, recipient, giftMessage: giftMsg });
     } catch (err: any) {
       res.status(500).json({ error: err.message });
     }
@@ -1166,76 +1405,6 @@ Suhbatlashish qoidalaringiz:
     }
   });
 
-  // --- Audio Rooms REST Endpoints (1 room per user, Zero Mock Rooms) ---
-  app.get('/api/audio-rooms', (_req, res) => {
-    const rooms = Array.from(audioRoomsStore.values());
-    res.json({ success: true, rooms });
-  });
-
-  app.post('/api/audio-rooms/create', (req, res) => {
-    try {
-      const { ownerUid, ownerName, ownerAvatar, title, backgroundUrl } = req.body;
-      if (!ownerUid) {
-        return res.status(400).json({ error: 'ownerUid is required' });
-      }
-
-      // 1 Room per user check
-      for (const r of audioRoomsStore.values()) {
-        if (r.ownerUid === ownerUid) {
-          return res.json({ success: true, room: r, existing: true });
-        }
-      }
-
-      const roomCode = `room_${ownerUid}`;
-      const newRoom = {
-        code: roomCode,
-        title: title || `${ownerName || 'Alov'} Ovozli Xonasi 🎙️`,
-        ownerUid,
-        ownerName: ownerName || 'Alov Moderator',
-        ownerAvatar: ownerAvatar || '',
-        backgroundUrl: backgroundUrl || '',
-        seats: Array.from({ length: 8 }, (_, i) => ({
-          seatIndex: i,
-          user: i === 0 ? { uid: ownerUid, name: ownerName, avatar: ownerAvatar } : null,
-          isMuted: false,
-          isSpeaking: false
-        })),
-        messages: [
-          {
-            id: 'sys_' + Date.now(),
-            senderUid: 'system',
-            senderName: 'Alov Tizimi',
-            text: `Xush kelibsiz! "${title || 'Ovozli xona'}" ochildi ✨🎙️`,
-            isSystem: true,
-            time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
-          }
-        ],
-        membersCount: 1,
-        createdAt: new Date().toISOString()
-      };
-
-      audioRoomsStore.set(roomCode, newRoom);
-      io.emit('audio_room_created', newRoom);
-      res.json({ success: true, room: newRoom, existing: false });
-    } catch (err: any) {
-      res.status(500).json({ error: err.message });
-    }
-  });
-
-  app.post('/api/audio-rooms/close', (req, res) => {
-    try {
-      const { roomCode, ownerUid } = req.body;
-      const room = audioRoomsStore.get(roomCode);
-      if (room && (room.ownerUid === ownerUid || !ownerUid)) {
-        audioRoomsStore.delete(roomCode);
-        io.to(roomCode).emit('audio_room_closed', { roomCode });
-        io.emit('audio_room_deleted', { roomCode });
-      }
-      res.json({ success: true });
-    } catch (err: any) {
-      res.status(500).json({ error: err.message });
-    }
-  });
 
   app.post('/api/moderation/check-image', (req, res) => {
     try {
@@ -1310,6 +1479,63 @@ Suhbatlashish qoidalaringiz:
     const handleIncomingMessage = async (data: any, callback?: Function) => {
       const { chatId, message, senderId, recipientId } = data;
       const senderUser = usersStore.get(senderId);
+      const recipientUser = usersStore.get(recipientId);
+      const isAIBot = chatId.includes('user_kamola_006') || recipientId === 'user_kamola_006' || chatId.includes('ALOV-006') || recipientId === 'ALOV-006' || chatId.includes('alov_ai_bot') || recipientId === 'alov_ai_bot';
+
+      // --- PAID MESSAGE & TOKENOMICS LOGIC ---
+      if (senderUser && senderUser.gender === 'male' && !isAIBot) {
+        const currentCoins = senderUser.coins !== undefined ? senderUser.coins : 100;
+        if (currentCoins < 10) {
+          if (typeof callback === 'function') {
+            callback({ success: false, error: 'insufficient_coins', message: 'Monetangiz yetarli emas! Xabar yuborish uchun 10 moneta kerak.' });
+          }
+          io.to(`user_${senderId}`).emit('insufficient_coins', {
+            message: 'Monetalaringiz yetarli emas! Iltimos, balansingizni to\'ldiring.'
+          });
+          return;
+        }
+
+        // Deduct 10 coins
+        senderUser.coins = currentCoins - 10;
+        usersStore.set(senderId, senderUser);
+        saveUsersToDisk();
+
+        // Create Pending Transaction
+        const pendingTx = {
+          id: 'tx_msg_' + message.id,
+          sender: senderId,
+          receiver: recipientId,
+          type: 'message_paid',
+          coinAmount: 10,
+          diamondAmount: 6,
+          status: 'pending',
+          note: 'Xabar uchun to\'lov (javob kutilmoqda)',
+          createdAt: new Date().toISOString()
+        };
+        transactionsStore.unshift(pendingTx);
+        saveTransactionsToDisk();
+
+        io.to(`user_${senderId}`).emit('user_updated', senderUser);
+      }
+
+      // If female user replies to a male user, convert pending transactions to completed and reward female diamonds
+      if (senderUser && senderUser.gender === 'female' && recipientUser && recipientUser.gender === 'male') {
+        let totalNewDiamonds = 0;
+        for (const tx of transactionsStore) {
+          if (tx.sender === recipientId && tx.receiver === senderId && tx.type === 'message_paid' && tx.status === 'pending') {
+            tx.status = 'completed';
+            tx.note = 'Xabarga javob berildi (yakunlandi)';
+            totalNewDiamonds += (tx.diamondAmount || 6);
+          }
+        }
+        if (totalNewDiamonds > 0) {
+          senderUser.diamonds = (senderUser.diamonds || 0) + totalNewDiamonds;
+          usersStore.set(senderId, senderUser);
+          saveUsersToDisk();
+          saveTransactionsToDisk();
+          io.to(`user_${senderId}`).emit('user_updated', senderUser);
+        }
+      }
 
       const deliveredMessage = {
         ...message,
@@ -1615,173 +1841,6 @@ Suhbatlashish qoidalaringiz:
       });
     });
 
-    // --- Clubhouse / Bigo Audio Party Room Real-time Handlers ---
-    socket.on('join_audio_room', ({ roomCode, user }) => {
-      if (!roomCode) return;
-      socket.join(roomCode);
-      let room = audioRoomsStore.get(roomCode);
-      if (!room) {
-        room = {
-          code: roomCode,
-          title: `${user?.name || 'Alov'} Ovozli Xonasi 🎙️`,
-          ownerUid: user?.uid || 'guest',
-          ownerName: user?.name || 'Boshlovchi',
-          ownerAvatar: user?.avatar || '',
-          backgroundUrl: '',
-          seats: Array.from({ length: 8 }, (_, i) => ({
-            seatIndex: i,
-            user: i === 0 && user?.uid ? { uid: user.uid, id: user.id || user.uid, name: user.name, avatar: user.avatar, socketId: socket.id } : null,
-            isMuted: false,
-            isSpeaking: false
-          })),
-          messages: [
-            {
-              id: 'sys_' + Date.now(),
-              senderUid: 'system',
-              senderName: 'Alov Tizimi',
-              text: `Xush kelibsiz! "${user?.name || 'Alov'}" ovozli xonasi ochildi ✨🎙️`,
-              isSystem: true,
-              time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
-            }
-          ],
-          membersCount: 1,
-          createdAt: new Date().toISOString()
-        };
-        audioRoomsStore.set(roomCode, room);
-        io.emit('audio_room_created', room);
-      } else {
-        room.membersCount = (room.membersCount || 0) + 1;
-      }
-
-      const joinMsg = {
-        id: 'sys_' + Date.now() + Math.random().toString(36).slice(2, 5),
-        senderUid: 'system',
-        senderName: 'Tizim',
-        text: `${user?.name || 'Foydalanuvchi'} xonaga kirdi 👋✨`,
-        isSystem: true,
-        time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
-      };
-      room.messages.push(joinMsg);
-      if (room.messages.length > 80) room.messages.shift();
-
-      // Broadcast full room state to EVERYONE in the room so all users see each other in real-time
-      io.to(roomCode).emit('audio_room_state', room);
-      io.to(roomCode).emit('seats_updated', { seats: room.seats });
-      io.to(roomCode).emit('receive_room_chat_message', joinMsg);
-      io.to(roomCode).emit('room_members_count', { count: room.membersCount });
-
-      socket.to(roomCode).emit('user_joined_audio', {
-        socketId: socket.id,
-        user
-      });
-    });
-
-    const handleTakeSeat = ({ roomCode, seatIndex, user }: any) => {
-      const room = audioRoomsStore.get(roomCode);
-      if (room && typeof seatIndex === 'number' && seatIndex >= 0 && seatIndex < 8 && user?.uid) {
-        // Clear user from other seats
-        room.seats.forEach((s: any) => {
-          if (s.user && (s.user.uid === user.uid || s.user.id === user.uid)) {
-            s.user = null;
-            s.isMuted = false;
-            s.isSpeaking = false;
-          }
-        });
-        // Occupy target seat
-        room.seats[seatIndex] = {
-          seatIndex,
-          user: {
-            uid: user.uid,
-            id: user.id || user.uid,
-            name: user.name,
-            avatar: user.avatar,
-            socketId: socket.id
-          },
-          isMuted: false,
-          isSpeaking: false
-        };
-        io.to(roomCode).emit('seats_updated', { seats: room.seats });
-        io.to(roomCode).emit('audio_room_state', room);
-        io.to(roomCode).emit('room:seat_joined', { seatIndex, user, socketId: socket.id });
-        socket.to(roomCode).emit('speaker_ready', { socketId: socket.id, user });
-        socket.to(roomCode).emit('user_joined_audio', { socketId: socket.id, user });
-      }
-    };
-
-    socket.on('take_seat', handleTakeSeat);
-    socket.on('room:join_seat', handleTakeSeat);
-
-    const handleLeaveSeat = ({ roomCode, seatIndex, user }: any) => {
-      const room = audioRoomsStore.get(roomCode);
-      if (room) {
-        room.seats.forEach((s: any, idx: number) => {
-          if ((seatIndex === undefined || idx === seatIndex) && s.user && (s.user.uid === user?.uid || s.user.id === user?.uid)) {
-            s.user = null;
-            s.isMuted = false;
-            s.isSpeaking = false;
-          }
-        });
-        io.to(roomCode).emit('seats_updated', { seats: room.seats });
-        io.to(roomCode).emit('audio_room_state', room);
-        io.to(roomCode).emit('room:seat_left', { seatIndex, user });
-      }
-    };
-
-    socket.on('leave_seat', handleLeaveSeat);
-    socket.on('room:leave_seat', handleLeaveSeat);
-
-    const handleUpdateSeatStatus = ({ roomCode, seatIndex, isMuted, isSpeaking, uid }: any) => {
-      const room = audioRoomsStore.get(roomCode);
-      if (room) {
-        room.seats.forEach((s: any, idx: number) => {
-          if (s.user && (s.user.uid === uid || s.user.id === uid || idx === seatIndex)) {
-            if (isMuted !== undefined) s.isMuted = isMuted;
-            if (isSpeaking !== undefined) s.isSpeaking = isSpeaking;
-          }
-        });
-        io.to(roomCode).emit('seat_status_changed', { seats: room.seats });
-        io.to(roomCode).emit('seats_updated', { seats: room.seats });
-      }
-    };
-
-    socket.on('update_seat_status', handleUpdateSeatStatus);
-    socket.on('room:update_status', handleUpdateSeatStatus);
-
-    socket.on('user_became_speaker', ({ roomCode, user }: any) => {
-      socket.to(roomCode).emit('speaker_ready', { socketId: socket.id, user });
-      socket.to(roomCode).emit('user_joined_audio', { socketId: socket.id, user });
-    });
-
-    socket.on('send_room_chat_message', ({ roomCode, message }) => {
-      if (!roomCode || !message) return;
-      let room = audioRoomsStore.get(roomCode);
-      if (!room) {
-        room = {
-          code: roomCode,
-          title: 'Ovozli Xona 🎙️',
-          ownerUid: message.senderUid || 'guest',
-          ownerName: message.senderName || 'Boshlovchi',
-          ownerAvatar: message.senderAvatar || '',
-          backgroundUrl: '',
-          seats: Array.from({ length: 8 }, (_, i) => ({ seatIndex: i, user: null, isMuted: false, isSpeaking: false })),
-          messages: [],
-          membersCount: 1,
-          createdAt: new Date().toISOString()
-        };
-        audioRoomsStore.set(roomCode, room);
-      }
-      room.messages.push(message);
-      if (room.messages.length > 100) room.messages.shift();
-      io.to(roomCode).emit('receive_room_chat_message', message);
-    });
-
-    socket.on('update_room_background', ({ roomCode, backgroundUrl }) => {
-      const room = audioRoomsStore.get(roomCode);
-      if (room) {
-        room.backgroundUrl = backgroundUrl;
-        io.to(roomCode).emit('room_background_updated', { backgroundUrl });
-      }
-    });
 
     socket.on('webrtc_offer', ({ targetSocketId, offer, sender }) => {
       io.to(targetSocketId).emit('webrtc_offer', {
@@ -1901,25 +1960,6 @@ Suhbatlashish qoidalaringiz:
       }
     });
 
-    socket.on('leave_audio_room', ({ roomCode, user }) => {
-      socket.leave(roomCode);
-      const room = audioRoomsStore.get(roomCode);
-      if (room) {
-        room.membersCount = Math.max(0, (room.membersCount || 1) - 1);
-        if (user?.uid) {
-          room.seats.forEach((s: any) => {
-            if (s.user && s.user.uid === user.uid) {
-              s.user = null;
-              s.isMuted = false;
-              s.isSpeaking = false;
-            }
-          });
-        }
-        io.to(roomCode).emit('seats_updated', { seats: room.seats });
-        io.to(roomCode).emit('room_members_count', { count: room.membersCount });
-      }
-      socket.to(roomCode).emit('user_left_audio', { socketId: socket.id });
-    });
 
     socket.on('disconnect', () => {
       console.log('Client disconnected:', socket.id);

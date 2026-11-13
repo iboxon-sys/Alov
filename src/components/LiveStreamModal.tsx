@@ -362,7 +362,7 @@ export const LiveStreamModal: React.FC<LiveStreamModalProps> = ({
                 <div className="my-auto space-y-6">
                   <div className="relative mx-auto w-24 h-24 rounded-full border-4 border-red-500/80 p-1 flex items-center justify-center shadow-lg shadow-red-500/30">
                     <img 
-                      src={currentUser.avatar || 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&q=80&w=600'} 
+                      src={currentUser.avatar || '/assets/aistudio/image_e20a1307.png'} 
                       alt={currentUser.name} 
                       className="w-full h-full rounded-full object-cover" 
                     />
@@ -492,7 +492,7 @@ export const LiveStreamModal: React.FC<LiveStreamModalProps> = ({
                       chatMessages.map((msg, idx) => (
                         <div key={msg.id ? `${msg.id}_${idx}` : `live_msg_${idx}`} className="flex items-start space-x-2 bg-black/40 backdrop-blur-sm px-3 py-1.5 rounded-2xl max-w-[85%] text-xs text-white">
                           <img 
-                            src={msg.senderAvatar || 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&q=80&w=600'} 
+                            src={msg.senderAvatar || '/assets/aistudio/image_e20a1307.png'} 
                             alt="" 
                             className="w-5 h-5 rounded-full object-cover shrink-0 mt-0.5 border border-white/20"
                           />
@@ -572,7 +572,7 @@ export const LiveStreamModal: React.FC<LiveStreamModalProps> = ({
                 <div className="relative z-30 p-4 pt-6 flex items-center justify-between text-white">
                   <div className="flex items-center space-x-2.5 bg-black/40 backdrop-blur-md px-3 py-1.5 rounded-full">
                     <img 
-                      src={hostUser?.avatar || streamData?.hostAvatar || 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&q=80&w=600'} 
+                      src={hostUser?.avatar || streamData?.hostAvatar || '/assets/aistudio/image_e20a1307.png'} 
                       alt="" 
                       className="w-8 h-8 rounded-full object-cover border border-red-500"
                     />
@@ -626,7 +626,7 @@ export const LiveStreamModal: React.FC<LiveStreamModalProps> = ({
                       chatMessages.map((msg, idx) => (
                         <div key={msg.id ? `${msg.id}_${idx}` : `live_msg_v_${idx}`} className="flex items-start space-x-2 bg-black/40 backdrop-blur-sm px-3 py-1.5 rounded-2xl max-w-[85%] text-xs text-white">
                           <img 
-                            src={msg.senderAvatar || 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&q=80&w=600'} 
+                            src={msg.senderAvatar || '/assets/aistudio/image_e20a1307.png'} 
                             alt="" 
                             className="w-5 h-5 rounded-full object-cover shrink-0 mt-0.5 border border-white/20"
                           />

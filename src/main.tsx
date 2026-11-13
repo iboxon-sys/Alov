@@ -1,6 +1,10 @@
 import {createRoot} from 'react-dom/client';
+import 'leaflet/dist/leaflet.css';
 import App from './App.tsx';
 import './index.css';
+import { initGoogleTagManager } from './utils/analytics';
+
+initGoogleTagManager(import.meta.env.VITE_GTM_ID);
 
 // Filter out expected dev environment Firebase auth token service / offline warnings
 const originalConsoleError = console.error;

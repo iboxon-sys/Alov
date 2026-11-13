@@ -9,7 +9,7 @@ import {
   MapPin, Send, Mic, Play, Plus, Users, Eye, ThumbsUp, Smartphone, 
   ChevronRight, X, ArrowUpRight, ShieldCheck, Globe, LogIn, LogOut, CheckCircle2, Edit3, ArrowLeft, VideoOff,
   ZoomIn, ZoomOut, Move, Crop, AlertTriangle, RefreshCw, Navigation, Shield, Lock, EyeOff, Car, Upload,
-  Clock, Check, CheckCheck, Gift, Coins, Wallet, CreditCard
+  Clock, Check, CheckCheck, Gift, Coins, Wallet, CreditCard, Handshake, Crown, ScanFace
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { clsx, type ClassValue } from 'clsx';
@@ -18,6 +18,8 @@ import { LandingPage } from './LandingPage';
 import { LiveStreamModal } from './components/LiveStreamModal';
 import { OneOnOneCallModal } from './components/OneOnOneCallModal';
 import { IncomingCallModal } from './components/IncomingCallModal';
+import { AdminPanelModal } from './components/AdminPanelModal';
+import { FaceIdVerificationModal, type FaceIdVerificationResult } from './components/FaceIdVerificationModal';
 import { callNotification } from './services/callNotification';
 import { VideoPlayer, VoiceMessage } from './components/ChatMedia';
 import { CandidateSkeleton, ChatSkeleton } from './components/Skeleton';
@@ -28,6 +30,53 @@ import {
 } from './firebase';
 import { getApiUrl, getBaseUrl, safeFetchJson } from './config/api';
 import { io, Socket } from 'socket.io-client';
+import {
+  buildTelegramDisplayName,
+  isPlaceholderAvatar,
+  isPlaceholderOrUsername,
+  pickPreferredAvatar
+} from './utils/telegramProfile';
+import {
+  MESSAGE_COIN_COST,
+  DIAMOND_LIMIT_TARGET,
+  ADMIN_FULL_COINS,
+  ADMIN_FULL_DIAMONDS,
+  isAdminTelegramUser,
+  getDiamondProgressPercent,
+  getPendingDiamondsTotal,
+  getNextUnlockTimestamp,
+  computeCountdownParts
+} from './utils/tokenomics';
+import {
+  requiresFaceIdForUser,
+  formatFaceIdDateUz,
+  genderToUzLabel,
+  type FaceIdProfileData,
+} from './utils/faceId';
+
+function resolveAvatarUrl(rawUrl?: string | null): string {
+  const clean = pickPreferredAvatar(rawUrl);
+  if (!clean) return '';
+  if (clean.startsWith('/api/')) {
+    return `${getBaseUrl()}${clean}`;
+  }
+  return clean;
+}
+
+function getSafeUserDisplayName(user: any, fallback: string = 'Profil'): string {
+  if (!user) return fallback;
+  const fromParts = buildTelegramDisplayName({
+    firstName: user.firstName || user.first_name || user.name,
+    lastName: user.lastName || user.last_name,
+    username: user.telegram || user.username,
+    phone: user.phone,
+  });
+  if (fromParts) return fromParts;
+  if (user.name && !isPlaceholderOrUsername(user.name, user.telegram || user.username, user.phone)) {
+    return user.name;
+  }
+  return fallback;
+}
 
 /** Utility for Tailwind class merging */
 function cn(...inputs: ClassValue[]) {
@@ -194,15 +243,16 @@ export default function App() {
   const [showAuthModal, setShowAuthModal] = useState(false);
   const [showProfileModal, setShowProfileModal] = useState(false);
   const [errorMsg, setErrorMsg] = useState('');
-  const [authMode, setAuthMode] = useState<'login' | 'register' | 'google_setup' | 'telegram'>('login');
+  const [authMode, setAuthMode] = useState<'login' | 'register' | 'register_face_id' | 'google_face_id' | 'google_setup' | 'telegram'>('login');
   const [authEmail, setAuthEmail] = useState('');
   const [authPassword, setAuthPassword] = useState('');
   const [pendingGoogleUser, setPendingGoogleUser] = useState<any | null>(null);
   const [telegramInput, setTelegramInput] = useState('');
-  const [telegramStep, setTelegramStep] = useState<'input_phone' | 'input_code' | 'profile_setup'>('input_phone');
+  const [telegramStep, setTelegramStep] = useState<'input_phone' | 'input_code' | 'face_id' | 'profile_setup'>('input_phone');
   const [generatedTgCode, setGeneratedTgCode] = useState('');
   const [enteredTgCode, setEnteredTgCode] = useState('');
   const [pendingTgUser, setPendingTgUser] = useState<any | null>(null);
+  const [pendingFaceId, setPendingFaceId] = useState<FaceIdProfileData | null>(null);
   const [hasStartedBotError, setHasStartedBotError] = useState<boolean>(false);
 
   // Profile Form Fields (including Avatar URL and Location Visibility)
@@ -217,8 +267,8 @@ export default function App() {
   const [regTelegram, setRegTelegram] = useState('');
   const [regInstagram, setRegInstagram] = useState('');
   const [regBio, setRegBio] = useState('Alov.uz da yangi tanishuvlar va suhbatlar uchun.');
-  const [regAvatar, setRegAvatar] = useState('https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&q=80&w=600');
-  const [regLocationVisibility, setRegLocationVisibility] = useState<'everyone' | 'mutual' | 'ghost'>('mutual');
+  const [regAvatar, setRegAvatar] = useState('');
+  const [regLocationVisibility, setRegLocationVisibility] = useState<'everyone' | 'mutual' | 'ghost'>('everyone');
 
   // Safety Liability Disclaimer Modal (10s Countdown)
   const [showLiabilityModal, setShowLiabilityModal] = useState(false);
@@ -234,6 +284,7 @@ export default function App() {
   const dragStartRef = useRef<{ x: number; y: number }>({ x: 0, y: 0 });
   const commentsEndRef = useRef<HTMLDivElement>(null);
   const chatBottomRef = useRef<HTMLDivElement>(null);
+  const chatMessagesContainerRef = useRef<HTMLDivElement>(null);
 
   const [usersList, setUsersList] = useState<any[]>([]);
   const [chatsList, setChatsList] = useState<any[]>([]);
@@ -242,6 +293,9 @@ export default function App() {
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedProfile, setSelectedProfile] = useState<any | null>(null);
   const [followingIds, setFollowingIds] = useState<string[]>([]);
+  const [showAdminPanel, setShowAdminPanel] = useState(false);
+  const [chatFriendships, setChatFriendships] = useState<Record<string, boolean>>({});
+  const [countdownNow, setCountdownNow] = useState<number>(() => Date.now());
 
   // OSRM Street Routing State
   const [activeRouteUser, setActiveRouteUser] = useState<any | null>(null);
@@ -250,6 +304,8 @@ export default function App() {
   const mapInstanceRef = useRef<any>(null);
   const mapContainerRef = useRef<HTMLDivElement>(null);
   const markersRef = useRef<Record<string, any>>({});
+  const hasCenteredMapRef = useRef<boolean>(false);
+  const [mapReadyTick, setMapReadyTick] = useState(0);
 
   // Chat view substate: 'list' or 'conversation'
   const [chatView, setChatView] = useState<'list' | 'conversation'>('list');
@@ -347,7 +403,7 @@ export default function App() {
         }
       }
     }
-  }, [currentUser, firebaseUser, selectedChatUser]);
+  }, [currentUser?.uid, firebaseUser?.uid, selectedChatUser?.uid, selectedChatUser?.id]);
 
   useEffect(() => {
     const socket = io(getBaseUrl());
@@ -574,6 +630,17 @@ export default function App() {
       setActiveCallUser(null);
     });
 
+    socket.on('friendship_updated', ({ chatId, friendship }: any) => {
+      if (chatId) {
+        setChatFriendships(prev => ({ ...prev, [chatId]: Boolean(friendship?.active) }));
+      }
+    });
+
+    socket.on('insufficient_coins', ({ message }: any) => {
+      setWalletNoticeMsg(message || `Monetalaringiz yetarli emas! Har bir xabar narxi ${MESSAGE_COIN_COST} moneta.`);
+      setShowTopUpModal(true);
+    });
+
     return () => {
       socket.off('connect', registerSocketUser);
       socket.off('active_users_count');
@@ -586,16 +653,79 @@ export default function App() {
       socket.off('call-made', handleIncomingCall);
       socket.off('call-rejected');
       socket.off('call-ended');
+      socket.off('friendship_updated');
+      socket.off('insufficient_coins');
       socket.disconnect();
     };
   }, []);
 
-  // Auto-scroll chat to bottom on new messages
+  // Sync followingIds & location state whenever currentUser profile updates
+  useEffect(() => {
+    if (Array.isArray(currentUser?.following)) {
+      setFollowingIds(currentUser.following);
+    }
+  }, [currentUser?.following]);
+
+  useEffect(() => {
+    if (!currentUser) return;
+    const enabled = currentUser.isLocationEnabled !== false && currentUser.locationVisibility !== 'ghost';
+    setIsLocationEnabled(enabled);
+    if (currentUser.locationVisibility && currentUser.locationVisibility !== regLocationVisibility) {
+      setRegLocationVisibility(currentUser.locationVisibility);
+    }
+    if (currentUser.location?.lat && currentUser.location?.lng) {
+      setUserCoords({
+        lat: Number(currentUser.location.lat),
+        lng: Number(currentUser.location.lng),
+        accuracy: currentUser.location.accuracy || 20
+      });
+      setGpsStatusMsg('');
+    }
+  }, [currentUser?.uid, currentUser?.isLocationEnabled, currentUser?.locationVisibility, currentUser?.location?.lat, currentUser?.location?.lng]);
+
+  // Live 1-second 24h countdown timer for locked 100-diamond batches
+  useEffect(() => {
+    const batches = currentUser?.pendingDiamondBatches;
+    if (!Array.isArray(batches) || batches.length === 0) return;
+
+    let claimedOnce = false;
+    const interval = setInterval(() => {
+      const now = Date.now();
+      setCountdownNow(now);
+      const hasMatured = batches.some((b: any) => typeof b?.unlockAt === 'number' && b.unlockAt <= now);
+      if (hasMatured && !claimedOnce && currentUser?.uid) {
+        claimedOnce = true;
+        fetch(getApiUrl('/api/wallet/claim-matured'), {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ uid: currentUser.uid })
+        })
+          .then(r => r.json())
+          .then(res => {
+            if (res?.success && res.user) {
+              setCurrentUser(res.user);
+              try {
+                localStorage.setItem('alov_current_user', JSON.stringify(res.user));
+                localStorage.setItem('alov_user_' + res.user.uid, JSON.stringify(res.user));
+              } catch (e) {}
+            }
+          })
+          .catch(() => {});
+      }
+    }, 1000);
+
+    return () => clearInterval(interval);
+  }, [currentUser?.uid, currentUser?.pendingDiamondBatches]);
+
+  // Auto-scroll chat messages container smoothly without scrolling outer page or hiding top bar
   useEffect(() => {
     if (chatView === 'conversation') {
-      setTimeout(() => {
-        chatBottomRef.current?.scrollIntoView({ behavior: 'smooth' });
-      }, 50);
+      requestAnimationFrame(() => {
+        const el = chatMessagesContainerRef.current;
+        if (el) {
+          el.scrollTop = el.scrollHeight;
+        }
+      });
     }
   }, [chatMessages, selectedChatUser?.id, selectedChatUser?.uid, chatView]);
 
@@ -645,16 +775,65 @@ export default function App() {
     };
   }, []);
 
-  // LocalStorage Session Restore on App Mount
+  // LocalStorage Session Restore on App Mount (enforce clean DB reset epoch first)
   useEffect(() => {
+    const DB_RESET_EPOCH = '2026-11-13-reset-v1';
     try {
+      const currentEpoch = localStorage.getItem('alov_db_epoch');
+      if (currentEpoch !== DB_RESET_EPOCH) {
+        const keysToRemove: string[] = [];
+        for (let i = 0; i < localStorage.length; i++) {
+          const k = localStorage.key(i);
+          if (k && k.startsWith('alov_') && k !== 'alov_db_epoch') {
+            keysToRemove.push(k);
+          }
+        }
+        keysToRemove.forEach((k) => localStorage.removeItem(k));
+        localStorage.setItem('alov_db_epoch', DB_RESET_EPOCH);
+        signOut(auth).catch(() => {});
+        setCurrentUser(null);
+        setFirebaseUser(null);
+        setActiveTab('landing');
+        setIsAuthChecking(false);
+        return;
+      }
+
       const cached = localStorage.getItem('alov_current_user');
       if (cached) {
         const parsed = JSON.parse(cached);
-        if (parsed && parsed.uid && parsed.isProfileCompleted) {
-          setCurrentUser(parsed);
-          setActiveTab('discover');
-          setIsAuthChecking(false);
+        if (parsed && parsed.uid && parsed.isProfileCompleted && !requiresFaceIdForUser(parsed)) {
+          const isTg = Boolean(parsed.uid?.startsWith('tg_') || parsed.telegramChatId || parsed.telegram);
+          if (isTg) {
+            const sanitized = {
+              ...parsed,
+              name: getSafeUserDisplayName(parsed, ''),
+              avatar: parsed.faceId?.capturedPhotoUrl || pickPreferredAvatar(parsed.avatar),
+            };
+            setCurrentUser(sanitized);
+            setActiveTab('discover');
+            setIsAuthChecking(false);
+
+            fetch(getApiUrl('/api/users/sync'), {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ user: sanitized })
+            })
+              .then(r => r.json())
+              .then(res => {
+                if (res && res.success && res.user) {
+                  setCurrentUser(res.user);
+                  try {
+                    localStorage.setItem('alov_current_user', JSON.stringify(res.user));
+                    localStorage.setItem('alov_user_' + res.user.uid, JSON.stringify(res.user));
+                  } catch (e) {}
+                }
+              })
+              .catch(() => {});
+          } else {
+            setCurrentUser(parsed);
+            setActiveTab('discover');
+            setIsAuthChecking(false);
+          }
         }
       }
     } catch (e) {}
@@ -669,14 +848,15 @@ export default function App() {
         tg.expand();
         const tgUser = tg.initDataUnsafe?.user;
         if (tgUser) {
+          const realName = [tgUser.first_name, tgUser.last_name].filter(Boolean).join(' ').trim();
           const telegramUserObj = {
             uid: `tg_${tgUser.id}`,
             id: `TG-${tgUser.id}`,
-            name: `${tgUser.first_name || ''} ${tgUser.last_name || ''}`.trim() || 'Telegram Foydalanuvchi',
-            username: tgUser.username ? `@${tgUser.username}` : '@telegram_user',
+            name: realName,
+            telegram: tgUser.username ? `https://t.me/${tgUser.username}` : undefined,
             telegramChatId: tgUser.id,
-            avatar: tgUser.photo_url || 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&q=80&w=600',
-            bio: 'Telegram Mini App orqali ulandim! ✨',
+            avatar: tgUser.photo_url || '',
+            bio: 'Telegram orqali ulandim! ✨',
             isOnline: true,
             region: 'Toshkent shahri',
             district: 'Yunusobod tumani',
@@ -691,12 +871,19 @@ export default function App() {
           .then(data => {
             if (data && data.success && data.user) {
               const u = data.user;
-              setCurrentUser(u);
-              try {
-                localStorage.setItem('alov_current_user', JSON.stringify(u));
-                localStorage.setItem('alov_user_' + u.uid, JSON.stringify(u));
-              } catch (e) {}
-              if (u.isProfileCompleted) {
+              setRegName(getSafeUserDisplayName(u, realName));
+              setRegAvatar(u.faceId?.capturedPhotoUrl || pickPreferredAvatar(u.avatar, tgUser.photo_url));
+              if (!isAdminTelegramUser(u) && (!u.isProfileCompleted || requiresFaceIdForUser(u))) {
+                setPendingTgUser(u);
+                setAuthMode('telegram');
+                setTelegramStep('face_id');
+                setShowAuthModal(true);
+              } else {
+                setCurrentUser(u);
+                try {
+                  localStorage.setItem('alov_current_user', JSON.stringify(u));
+                  localStorage.setItem('alov_user_' + u.uid, JSON.stringify(u));
+                } catch (e) {}
                 setActiveTab('discover');
               }
             }
@@ -746,7 +933,7 @@ export default function App() {
           id: `ALOV-${user.uid.slice(0, 5).toUpperCase()}`,
           name: user.displayName || 'Alov Foydalanuvchisi',
           email: user.email || '',
-          avatar: user.photoURL || 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&q=80&w=600',
+          avatar: user.photoURL || '',
           role: 'user',
           age: 22,
           gender: 'female',
@@ -754,6 +941,7 @@ export default function App() {
           district: 'Yunusobod tumani',
           bio: 'Alov.uz da yangi tanishuvlar va suhbatlar uchun.',
           status: 'online',
+          isProfileCompleted: false,
           isLocationEnabled: true,
           locationVisibility: 'everyone',
           location: { lat: 41.3111, lng: 69.2797 }
@@ -774,27 +962,33 @@ export default function App() {
         console.warn("Backend user sync offline fallback:", e);
       }
 
-      // Har doim lokal keshni yangilab qo'yish
-      try {
-        localStorage.setItem('alov_user_' + user.uid, JSON.stringify(userData));
-        localStorage.setItem('alov_current_user', JSON.stringify(userData));
-      } catch (e) {}
-
-      setCurrentUser(userData);
-      
       // Anketani to'ldirish maydonlarini yangilash
       const userBdate = userData.birthDate || '2002-05-15';
       setRegBirthDate(userBdate);
-      setRegName(userData.name || '');
+      setRegName(userData.name || user.displayName || '');
       setRegAge(String(calculateAge(userBdate, userData.age || 22)));
       setRegGender(userData.gender || 'female');
       setRegRegion(userData.region || 'Toshkent shahri');
       setRegDistrict(userData.district || 'Yunusobod tumani');
       setRegBio(userData.bio || '');
-      setRegAvatar(userData.avatar || '');
+      setRegAvatar(userData.faceId?.capturedPhotoUrl || userData.avatar || '');
       setRegLocationVisibility(userData.locationVisibility || 'everyone');
       setIsLocationEnabled(userData.isLocationEnabled !== false);
 
+      // Admin bypasses Face ID completely; non-admins without verified Face ID or completed profile go to Face ID first
+      if (!isAdminTelegramUser(userData) && (!userData.isProfileCompleted || requiresFaceIdForUser(userData))) {
+        setPendingGoogleUser(user);
+        setAuthMode(prev => (prev === 'register_face_id' ? 'register_face_id' : 'google_face_id'));
+        setShowAuthModal(true);
+        return userData;
+      }
+
+      try {
+        localStorage.setItem('alov_user_' + userData.uid, JSON.stringify(userData));
+        localStorage.setItem('alov_current_user', JSON.stringify(userData));
+      } catch (e) {}
+
+      setCurrentUser(userData);
       setShowAuthModal(false);
       setActiveTab(prev => (prev === 'landing' ? 'discover' : prev));
       return userData;
@@ -825,8 +1019,34 @@ export default function App() {
 
   // Synchronize Auth State & Real-time Presence
   useEffect(() => {
+    const DB_RESET_EPOCH = '2026-11-13-reset-v1';
     const unsubscribe = onAuthStateChanged(auth, async (user) => {
       try {
+        let epochOk = true;
+        try {
+          if (localStorage.getItem('alov_db_epoch') !== DB_RESET_EPOCH) {
+            epochOk = false;
+            const keysToRemove: string[] = [];
+            for (let i = 0; i < localStorage.length; i++) {
+              const k = localStorage.key(i);
+              if (k && k.startsWith('alov_') && k !== 'alov_db_epoch') {
+                keysToRemove.push(k);
+              }
+            }
+            keysToRemove.forEach((k) => localStorage.removeItem(k));
+            localStorage.setItem('alov_db_epoch', DB_RESET_EPOCH);
+          }
+        } catch (e) {}
+
+        if (user && !epochOk) {
+          await signOut(auth).catch(() => {});
+          setFirebaseUser(null);
+          setCurrentUser(null);
+          setActiveTab('landing');
+          setIsAuthChecking(false);
+          return;
+        }
+
         setFirebaseUser(user);
         if (user) {
           await syncUserWithBackend(user);
@@ -848,7 +1068,18 @@ export default function App() {
             handleOffline();
           };
         } else {
-          setCurrentUser(null);
+          let hasLocalSession = false;
+          try {
+            const cached = localStorage.getItem('alov_current_user');
+            if (cached) {
+              const parsed = JSON.parse(cached);
+              if (parsed && parsed.uid) hasLocalSession = true;
+            }
+          } catch (e) {}
+          const tgWebAppUser = (window as any).Telegram?.WebApp?.initDataUnsafe?.user;
+          if (!hasLocalSession && !tgWebAppUser) {
+            setCurrentUser(null);
+          }
           setIsAuthChecking(false);
         }
       } catch (err) {
@@ -877,12 +1108,44 @@ export default function App() {
 
     const socket = io(getBaseUrl());
     socket.on('user_updated', (updatedUser: any) => {
+      if (!updatedUser) return;
       setUsersList(prev => {
         const userMap = new Map<string, any>();
         prev.forEach(u => userMap.set(u.uid || u.id, u));
         userMap.set(updatedUser.uid || updatedUser.id, updatedUser);
         return Array.from(userMap.values());
       });
+
+      const myUid = currentUserRef.current?.uid;
+      if (myUid && (updatedUser.uid === myUid || updatedUser.id === myUid)) {
+        setCurrentUser((prev: any) => {
+          const merged = { ...(prev || {}), ...updatedUser };
+          try {
+            localStorage.setItem('alov_current_user', JSON.stringify(merged));
+            localStorage.setItem('alov_user_' + merged.uid, JSON.stringify(merged));
+          } catch (e) {}
+          return merged;
+        });
+      }
+
+      setSelectedProfile((prev: any) => {
+        if (prev && (prev.uid === updatedUser.uid || prev.id === updatedUser.id)) {
+          return { ...prev, ...updatedUser };
+        }
+        return prev;
+      });
+
+      setSelectedChatUser((prev: any) => {
+        if (prev && (prev.uid === updatedUser.uid || prev.id === updatedUser.id)) {
+          return { ...prev, ...updatedUser };
+        }
+        return prev;
+      });
+    });
+
+    socket.on('user_deleted', ({ uid }: { uid: string }) => {
+      if (!uid) return;
+      setUsersList(prev => prev.filter(u => u.uid !== uid && u.id !== uid));
     });
 
     socket.on('stream_started', (streamData: any) => {
@@ -941,7 +1204,7 @@ export default function App() {
     };
 
     fetchChats();
-  }, [firebaseUser, currentUser]);
+  }, [firebaseUser?.uid, currentUser?.uid]);
 
   // Load chat messages for the selected conversation from localStorage & Render API
   useEffect(() => {
@@ -971,36 +1234,57 @@ export default function App() {
     // 2. Sync from Render API
     safeFetchJson(getApiUrl(`/api/chats/${chatId}/messages`))
       .then(data => {
-        if (data && data.success && Array.isArray(data.messages)) {
-          const msgMap = new Map<string, any>();
-          [...sanitizedLocalMsgs, ...data.messages].forEach(m => {
-            const sanitized = {
-              ...m,
-              status: (m.status === 'sending' || !m.status) ? 'sent' : m.status
-            };
-            msgMap.set(m.id, sanitized);
-          });
-          const merged = Array.from(msgMap.values()).sort((a, b) => 
-            new Date(a.createdAt || 0).getTime() - new Date(b.createdAt || 0).getTime()
-          );
-          setChatMessages(prev => ({ ...prev, [selectedChatUser.id]: merged }));
-          try {
-            localStorage.setItem('alov_msgs_' + chatId, JSON.stringify(merged));
-          } catch (e) {}
+        if (data && data.success) {
+          if (data.friendship !== undefined) {
+            setChatFriendships(prev => ({ ...prev, [chatId]: Boolean(data.friendship?.active) }));
+          }
+          if (Array.isArray(data.messages)) {
+            const msgMap = new Map<string, any>();
+            [...sanitizedLocalMsgs, ...data.messages].forEach(m => {
+              const sanitized = {
+                ...m,
+                status: (m.status === 'sending' || !m.status) ? 'sent' : m.status
+              };
+              msgMap.set(m.id, sanitized);
+            });
+            const merged = Array.from(msgMap.values()).sort((a, b) => 
+              new Date(a.createdAt || 0).getTime() - new Date(b.createdAt || 0).getTime()
+            );
+            setChatMessages(prev => ({ ...prev, [selectedChatUser.id]: merged }));
+            try {
+              localStorage.setItem('alov_msgs_' + chatId, JSON.stringify(merged));
+            } catch (e) {}
+          }
         }
       })
       .catch(err => console.warn("Failed to sync chat messages from Render server:", err));
 
-  }, [firebaseUser, currentUser, selectedChatUser, chatView]);
-
-  // Auto-scroll chat to bottom
-  useEffect(() => {
-    if (chatView === 'conversation') {
-      chatBottomRef.current?.scrollIntoView({ behavior: 'smooth' });
-    }
-  }, [chatMessages, chatView]);
+  }, [firebaseUser?.uid, currentUser?.uid, selectedChatUser?.uid, selectedChatUser?.id, chatView]);
 
   useEffect(() => {
+    const activeUid = currentUser?.uid || firebaseUser?.uid;
+    const emitCoords = (coords: { lat: number; lng: number; accuracy?: number }) => {
+      if (!activeUid) return;
+      socketRef.current?.emit('update_location', {
+        uid: activeUid,
+        location: coords,
+        isLocationEnabled: true,
+        locationVisibility: currentUser?.locationVisibility || regLocationVisibility || 'everyone'
+      });
+      fetch(getApiUrl('/api/users/update'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          uid: activeUid,
+          updates: {
+            location: coords,
+            isLocationEnabled: true,
+            isOnline: true
+          }
+        })
+      }).catch(() => {});
+    };
+
     if (navigator.geolocation) {
       navigator.geolocation.getCurrentPosition(
         (pos) => {
@@ -1012,20 +1296,7 @@ export default function App() {
           setUserCoords(coords);
           setIsLocationEnabled(true);
           setGpsStatusMsg('');
-          if (firebaseUser) {
-            fetch(getApiUrl('/api/users/update'), {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({
-                uid: firebaseUser.uid,
-                updates: {
-                  location: coords,
-                  isLocationEnabled: true,
-                  isOnline: true
-                }
-              })
-            }).catch(() => {});
-          }
+          emitCoords(coords);
         },
         (err) => {
           console.warn("GPS detection error:", err);
@@ -1043,20 +1314,7 @@ export default function App() {
           };
           setUserCoords(coords);
           setIsLocationEnabled(true);
-          if (firebaseUser) {
-            fetch(getApiUrl('/api/users/update'), {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({
-                uid: firebaseUser.uid,
-                updates: {
-                  location: coords,
-                  isLocationEnabled: true,
-                  isOnline: true
-                }
-              })
-            }).catch(() => {});
-          }
+          emitCoords(coords);
         },
         (err) => {
           console.warn("GPS watch error:", err);
@@ -1067,13 +1325,13 @@ export default function App() {
     } else {
       setGpsStatusMsg("Qurilmangiz geolokatsiyani (GPS) qo'llab-quvvatlamaydi.");
     }
-  }, [firebaseUser]);
+  }, [firebaseUser?.uid, currentUser?.uid]);
 
 
   // Handle Privacy-Protected Route Calculation to a target user
   const handleDrawRouteToUser = (targetUser: any) => {
-    if (!userCoords?.lat || !userCoords?.lng || !isLocationEnabled) {
-      alert("Marshrut chizish uchun avval o'zingizning GPS lokatsiyangizni yoqing!");
+    if (!userCoords?.lat || !userCoords?.lng) {
+      alert("Marshrut chizish uchun avval GPS lokatsiyangizni yoqing!");
       return;
     }
     if (!targetUser || !targetUser.location?.lat || !targetUser.location?.lng) {
@@ -1081,16 +1339,9 @@ export default function App() {
       return;
     }
 
-    // Privacy Guard Check
-    const vis = targetUser.locationVisibility || 'mutual';
+    const vis = targetUser.locationVisibility || 'everyone';
     if (vis === 'ghost' || targetUser.isLocationEnabled === false) {
       alert("Bu foydalanuvchi o'z lokatsiyasini yashirgan (Ghost Mode). Marshrut chizib bo'lmaydi.");
-      return;
-    }
-
-    const isFollowed = followingIds.includes(targetUser.id) || followingIds.includes(targetUser.uid);
-    if (vis === 'mutual' && !isFollowed) {
-      alert("🔒 Bu foydalanuvchi o'z lokatsiyasi va marshrutini faqat o'zi obuna bo'lgan tanishlariga ko'rsatadi. Iltimos, avval unga obuna bo'ling!");
       return;
     }
 
@@ -1181,39 +1432,102 @@ export default function App() {
   }, [activeTab, activeRouteUser, userCoords]);
 
 
-  // Real-time Leaflet Map Marker Sync Effect (Flicker-free Optimization)
+  // Initialize Unified Standard Leaflet Map cleanly when Map tab opens
   useEffect(() => {
-    if (activeTab !== 'map' || !mapInstanceRef.current) return;
+    if (activeTab !== 'map') {
+      if (mapInstanceRef.current) {
+        mapInstanceRef.current.remove();
+        mapInstanceRef.current = null;
+        markersRef.current = {};
+        hasCenteredMapRef.current = false;
+      }
+      return;
+    }
 
-    import('leaflet').then(L => {
+    let cancelled = false;
+    const node = mapContainerRef.current;
+    if (!node || mapInstanceRef.current) return;
+
+    import('leaflet')
+      .then((LMod) => {
+        if (cancelled || !mapContainerRef.current || mapInstanceRef.current) return;
+        const L = (LMod as any).default || LMod;
+        (window as any).L = L;
+        const initialLat = userCoords?.lat || currentUser?.location?.lat || 41.2995;
+        const initialLng = userCoords?.lng || currentUser?.location?.lng || 69.2401;
+        const map = L.map(mapContainerRef.current, { zoomControl: true }).setView([initialLat, initialLng], 12);
+        mapInstanceRef.current = map;
+        hasCenteredMapRef.current = true;
+        L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+          maxZoom: 19,
+          attribution: '© OpenStreetMap Alov.uz GPS'
+        }).addTo(map);
+        setMapReadyTick(t => t + 1);
+        setTimeout(() => {
+          if (!cancelled && mapInstanceRef.current) {
+            mapInstanceRef.current.invalidateSize();
+          }
+        }, 120);
+      })
+      .catch((err) => {
+        console.error("Leaflet init error:", err);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [activeTab]);
+
+  // Real-time Leaflet Map Marker Sync Effect (Unified Shared Map + Smooth In-Bounds Markers)
+  useEffect(() => {
+    if (activeTab !== 'map') return;
+
+    import('leaflet').then((LMod) => {
+      const L = (LMod as any).default || LMod;
       const map = mapInstanceRef.current;
       if (!map) return;
 
+      // Center smoothly on the current user's location once
+      if (userCoords?.lat && userCoords?.lng && !hasCenteredMapRef.current) {
+        map.setView([userCoords.lat, userCoords.lng], 12, { animate: true });
+        hasCenteredMapRef.current = true;
+      }
+
       // 1. Sync User Marker ('me')
       if (userCoords?.lat && userCoords?.lng && isLocationEnabled) {
+        const myAvatar = resolveAvatarUrl(currentUser?.avatar || firebaseUser?.photoURL);
+        const myInitial = (getSafeUserDisplayName(currentUser, 'Siz') || 'S').charAt(0).toUpperCase();
         const userIcon = L.divIcon({
           className: 'custom-user-marker',
-          html: `<div class="relative w-[38px] h-[38px] flex items-center justify-center">
+          html: `<div style="position:relative;width:40px;height:40px;display:flex;align-items:center;justify-content:center;">
             <div class="pulse-ring"></div>
-            <div style="background:#E8474A;width:32px;height:32px;border-radius:50%;border:3px solid white;box-shadow:0 4px 14px rgba(232,71,74,0.6);display:flex;align-items:center;justify-center;color:white;font-weight:bold;font-size:14px;position:relative;z-index:2;">📍</div>
+            <div style="background:#E8474A;width:34px;height:34px;border-radius:50%;border:2.5px solid white;box-shadow:0 4px 14px rgba(232,71,74,0.55);overflow:hidden;display:flex;align-items:center;justify-content:center;color:white;font-weight:900;font-size:13px;position:relative;z-index:2;">
+              ${myAvatar ? `<img src="${myAvatar}" style="width:100%;height:100%;object-fit:cover;" />` : myInitial}
+            </div>
           </div>`,
-          iconSize: [38, 38]
+          iconSize: [40, 40],
+          iconAnchor: [20, 20]
         });
 
         if (!markersRef.current['me']) {
           markersRef.current['me'] = L.marker([userCoords.lat, userCoords.lng], { icon: userIcon }).addTo(map);
         } else {
           markersRef.current['me'].setLatLng([userCoords.lat, userCoords.lng]);
+          if (markersRef.current['me'].options.icon.options.html !== userIcon.options.html) {
+            markersRef.current['me'].setIcon(userIcon);
+          }
         }
       } else if (markersRef.current['me']) {
         markersRef.current['me'].remove();
         delete markersRef.current['me'];
       }
 
-      // 2. Sync Other Users
+      // 2. Sync Other Users — ALL users who enabled location visibility appear on the shared map
       const myUid = currentUser?.uid || firebaseUser?.uid;
       const activeUsers = usersList.filter(u => {
         if (myUid && (u.uid === myUid || u.id === myUid)) return false;
+        if (filterRegion !== 'Barchasi' && u.region !== filterRegion) return false;
+        if (filterDistrict !== 'Barchasi' && u.district !== filterDistrict) return false;
         const hasCoords = u.location && u.location.lat != null && u.location.lng != null;
         return hasCoords && u.locationVisibility !== 'ghost' && u.isLocationEnabled !== false;
       });
@@ -1226,41 +1540,48 @@ export default function App() {
         }
       });
 
-      // Add/Update markers
+      // Add/Update markers smoothly inside the map
       activeUsers.forEach(u => {
         const markerKey = u.uid || u.id;
         const lat = Number(u.location.lat);
         const lng = Number(u.location.lng);
         if (isNaN(lat) || isNaN(lng)) return;
 
-        const userAvatar = u.avatar || 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&q=80&w=600';
+        const userAvatar = resolveAvatarUrl(u.avatar);
+        const safeName = getSafeUserDisplayName(u, 'Foydalanuvchi');
+        const initial = safeName.charAt(0).toUpperCase();
         const isLive = u.isLive === true;
-        const isOnline = u.status === 'online';
+        const isOnline = u.status === 'online' || u.isOnline === true;
 
         const otherIcon = L.divIcon({
           className: isLive ? 'custom-live-marker' : 'custom-other-marker',
           html: `
-            <div style="position:relative;width:44px;height:44px;display:flex;align-items:center;justify-content:center;">
+            <div style="position:relative;width:42px;height:42px;display:flex;align-items:center;justify-content:center;">
               ${(isLive || isOnline) ? '<div class="pulse-ring" style="background-color:' + (isLive ? '#EF4444' : '#10B981') + '"></div>' : ''}
-              <div style="background:#1C1C1C;width:38px;height:38px;border-radius:50%;border:2px solid ${isLive ? '#EF4444' : 'white'};box-shadow:0 4px 12px rgba(0,0,0,0.3);overflow:hidden;position:relative;z-index:2;">
-                <img src="${userAvatar}" style="width:100%;height:100%;object-fit:cover;" onerror="this.src='https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&q=80&w=600'"/>
+              <div style="background:#E8474A;width:36px;height:36px;border-radius:50%;border:2px solid ${isLive ? '#EF4444' : 'white'};box-shadow:0 4px 12px rgba(0,0,0,0.3);overflow:hidden;position:relative;z-index:2;display:flex;align-items:center;justify-content:center;color:white;font-weight:900;font-size:13px;">
+                ${userAvatar ? `<img src="${userAvatar}" style="width:100%;height:100%;object-fit:cover;" onerror="this.style.display='none'"/>` : initial}
                 ${isOnline ? '<span style="position:absolute;bottom:1px;right:1px;width:9px;height:9px;background:#10B981;border:1.5px solid white;border-radius:50%;"></span>' : ''}
               </div>
               ${isLive ? '<span style="position:absolute;top:-4px;left:50%;transform:translateX(-50%);background:#EF4444;color:white;font-size:7px;font-weight:900;padding:0.5px 5px;border-radius:999px;z-index:10;white-space:nowrap;">● LIVE</span>' : ''}
             </div>
           `,
-          iconSize: [44, 44]
+          iconSize: [42, 42],
+          iconAnchor: [21, 21]
         });
+
+        const popupAvatarHtml = userAvatar
+          ? `<img src="${userAvatar}" style="width:48px;height:48px;border-radius:50%;object-fit:cover;border:2px solid ${isLive ? '#EF4444' : '#E8474A'};" />`
+          : `<div style="width:48px;height:48px;border-radius:50%;background:#FCEAEA;color:#E8474A;font-weight:900;font-size:18px;display:flex;align-items:center;justify-content:center;border:2px solid #E8474A;">${initial}</div>`;
 
         const popupContent = `
           <div style="font-family: Inter, sans-serif; text-align: center; width: 175px; padding: 4px;">
             <div style="position:relative; width:48px; margin: 0 auto 6px;">
-              <img src="${userAvatar}" style="width:48px;height:48px;border-radius:50%;object-fit:cover;border:2px solid ${isLive ? '#EF4444' : '#E8474A'};" />
+              ${popupAvatarHtml}
               ${isLive ? '<span style="position:absolute;bottom:-4px;left:50%;transform:translateX(-50%);background:#EF4444;color:white;font-size:8px;font-weight:900;padding:1px 5px;border-radius:6px;">LIVE</span>' : ''}
               ${isOnline ? '<span style="position:absolute;top:0;right:0;width:12px;height:12px;background:#10B981;border:2px solid white;border-radius:50%;"></span>' : ''}
             </div>
-            <b style="font-size: 13px; display:block; color:#1C1C1C;">${u.name || 'Foydalanuvchi'}</b>
-            <p style="font-size: 10px; color: #666; margin: 2px 0 6px;">${u.district || u.region || 'Toshkent'}</p>
+            <b style="font-size: 13px; display:block; color:#1C1C1C;">${safeName}</b>
+            <p style="font-size: 10px; color: #666; margin: 2px 0 6px;">${u.district || u.region || 'O\'zbekiston'}</p>
             ${isLive ? `<button onclick="window.dispatchEvent(new CustomEvent('alov-watch-live-stream', { detail: '${markerKey}' }))" style="background:#EF4444;color:white;border:none;padding:7px 12px;border-radius:12px;font-size:11px;font-weight:bold;cursor:pointer;margin-bottom:4px;width:100%;box-shadow:0 2px 8px rgba(239,68,68,0.4);">🎥 Efirni ko'rish (LIVE)</button>` : ''}
             <button onclick="window.dispatchEvent(new CustomEvent('alov-open-user-profile', { detail: '${markerKey}' }))" style="background:#E8474A;color:white;border:none;padding:6px 12px;border-radius:12px;font-size:11px;font-weight:bold;cursor:pointer;margin-bottom:4px;width:100%;box-shadow:0 2px 6px rgba(232,71,74,0.3);">Profilni ko'rish 👤</button>
             <button onclick="window.dispatchEvent(new CustomEvent('alov-draw-route-to-user', { detail: '${markerKey}' }))" style="background:#1C1C1C;color:white;border:none;padding:6px 12px;border-radius:12px;font-size:11px;font-weight:bold;cursor:pointer;width:100%;box-shadow:0 2px 6px rgba(0,0,0,0.2);">Yo'l (Marshrut) 🚗</button>
@@ -1274,7 +1595,6 @@ export default function App() {
         } else {
           const existingMarker = markersRef.current[markerKey];
           existingMarker.setLatLng([lat, lng]);
-          // Only update icon/popup if data actually changed (to prevent flickering)
           if (existingMarker.options.icon.options.html !== otherIcon.options.html) {
             existingMarker.setIcon(otherIcon);
           }
@@ -1284,7 +1604,7 @@ export default function App() {
         }
       });
     });
-  }, [activeTab, usersList, userCoords, isLocationEnabled, currentUser, firebaseUser]);
+  }, [activeTab, mapReadyTick, usersList, userCoords, isLocationEnabled, currentUser, firebaseUser, filterRegion, filterDistrict]);
 
 
   // Device Image File Upload Handler -> Opens Avatar Image Crop Modal
@@ -1349,6 +1669,28 @@ export default function App() {
 
   // Toggle Live Location with strict physical GPS options & clear user guidance alerts
   const handleToggleLocation = async (enabled: boolean) => {
+    const activeUid = currentUser?.uid || firebaseUser?.uid;
+    const syncLocToServer = async (updates: Record<string, any>) => {
+      if (!activeUid) return;
+      if (updates.location) {
+        socketRef.current?.emit('update_location', {
+          uid: activeUid,
+          location: updates.location,
+          isLocationEnabled: updates.isLocationEnabled,
+          locationVisibility: updates.locationVisibility || regLocationVisibility
+        });
+      }
+      try {
+        await fetch(getApiUrl('/api/users/update'), {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ uid: activeUid, updates })
+        });
+      } catch (e) {
+        console.error("Backend location update error:", e);
+      }
+    };
+
     if (enabled) {
       if (!navigator.geolocation) {
         alert("Qurilmangiz geolokatsiyani (GPS) qo'llab-quvvatlamaydi.");
@@ -1367,24 +1709,11 @@ export default function App() {
           setIsLocationEnabled(true);
           setGpsStatusMsg('');
 
-          if (firebaseUser) {
-            try {
-              await fetch(getApiUrl('/api/users/update'), {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                  uid: firebaseUser.uid,
-                  updates: {
-                    isLocationEnabled: true,
-                    locationVisibility: regLocationVisibility,
-                    location: newCoords
-                  }
-                })
-              });
-            } catch (e) {
-              console.error("Backend location update error:", e);
-            }
-          }
+          await syncLocToServer({
+            isLocationEnabled: true,
+            locationVisibility: regLocationVisibility,
+            location: newCoords
+          });
 
           if (geoWatchId !== null) {
             navigator.geolocation.clearWatch(geoWatchId);
@@ -1398,24 +1727,11 @@ export default function App() {
                 accuracy: p.coords.accuracy
               };
               setUserCoords(updatedCoords);
-              if (firebaseUser) {
-                try {
-                  await fetch(getApiUrl('/api/users/update'), {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({
-                      uid: firebaseUser.uid,
-                      updates: {
-                        isLocationEnabled: true,
-                        locationVisibility: regLocationVisibility,
-                        location: updatedCoords
-                      }
-                    })
-                  });
-                } catch (e) {
-                  console.error("Watch update error:", e);
-                }
-              }
+              await syncLocToServer({
+                isLocationEnabled: true,
+                locationVisibility: regLocationVisibility,
+                location: updatedCoords
+              });
             },
             (err) => console.warn("Watch position error:", err),
             GPS_OPTIONS
@@ -1427,16 +1743,7 @@ export default function App() {
           alert(errMsg);
           setIsLocationEnabled(false);
           setGpsStatusMsg(errMsg);
-          if (firebaseUser) {
-            fetch(getApiUrl('/api/users/update'), {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({
-                uid: firebaseUser.uid,
-                updates: { isLocationEnabled: false }
-              })
-            }).catch(() => {});
-          }
+          syncLocToServer({ isLocationEnabled: false });
         },
         GPS_OPTIONS
       );
@@ -1446,20 +1753,7 @@ export default function App() {
         setGeoWatchId(null);
       }
       setIsLocationEnabled(false);
-      if (firebaseUser) {
-        try {
-          await fetch(getApiUrl('/api/users/update'), {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              uid: firebaseUser.uid,
-              updates: { isLocationEnabled: false }
-            })
-          });
-        } catch (e) {
-          console.error("Error disabling location:", e);
-        }
-      }
+      await syncLocToServer({ isLocationEnabled: false });
     }
   };
 
@@ -1488,7 +1782,7 @@ export default function App() {
         ...currentUser,
         id: currentUser?.id || `ALOV-${activeUid.slice(0, 5).toUpperCase()}`,
         uid: activeUid,
-        name: regName || firebaseUser?.displayName || currentUser?.name || 'Alov Foydalanuvchisi',
+        name: regName || firebaseUser?.displayName || currentUser?.name || '',
         birthDate: regBirthDate,
         age: computedAge,
         gender: regGender,
@@ -1499,11 +1793,11 @@ export default function App() {
         telegram: regTelegram || currentUser?.telegram || '@user_tg',
         instagram: regInstagram || currentUser?.instagram || '@user_insta',
         bio: regBio,
-        avatar: regAvatar || firebaseUser?.photoURL || currentUser?.avatar || 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&q=80&w=600',
+        avatar: pickPreferredAvatar(regAvatar, firebaseUser?.photoURL, currentUser?.avatar),
         videoUrl: currentUser?.videoUrl || 'https://assets.mixkit.co/videos/preview/mixkit-young-woman-looking-at-camera-in-a-park-41686-large.mp4',
-        followersCount: currentUser?.followersCount || 1,
-        followingCount: currentUser?.followingCount || 1,
-        likesCount: currentUser?.likesCount || 5,
+        followersCount: currentUser?.followersCount ?? 0,
+        followingCount: currentUser?.followingCount ?? 0,
+        likesCount: currentUser?.likesCount ?? 0,
         isOnline: true,
         isLocationEnabled: isLocationEnabled,
         locationVisibility: regLocationVisibility,
@@ -1519,6 +1813,7 @@ export default function App() {
       const savedUser = (data && data.success && data.user) ? data.user : newUserData;
 
       try {
+        localStorage.setItem('alov_current_user', JSON.stringify(savedUser));
         localStorage.setItem('alov_user_' + activeUid, JSON.stringify(savedUser));
       } catch (e) {}
 
@@ -1538,12 +1833,13 @@ export default function App() {
 
   const handleLocationVisibilityChange = (value: 'everyone' | 'mutual' | 'ghost') => {
     setRegLocationVisibility(value);
-    if (firebaseUser) {
+    const activeUid = currentUser?.uid || firebaseUser?.uid;
+    if (activeUid) {
       fetch(getApiUrl('/api/users/update'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          uid: firebaseUser.uid,
+          uid: activeUid,
           updates: { locationVisibility: value }
         })
       }).catch(console.error);
@@ -1569,8 +1865,20 @@ export default function App() {
 
       if (serverLoginRes && serverLoginRes.success && serverLoginRes.user) {
         const userData = serverLoginRes.user;
+        if (!isAdminTelegramUser(userData) && (requiresFaceIdForUser(userData) || !userData.isProfileCompleted)) {
+          setPendingTgUser(userData);
+          setRegName(getSafeUserDisplayName(userData, userData.name || ''));
+          setRegPhone(userData.phone || '+99890');
+          setRegTelegram(userData.telegram || '');
+          setRegRegion(userData.region || 'Toshkent shahri');
+          setRegDistrict(userData.district || 'Yunusobod tumani');
+          setAuthMode('telegram');
+          setTelegramStep('face_id');
+          return;
+        }
         setCurrentUser(userData);
         try {
+          localStorage.setItem('alov_current_user', JSON.stringify(userData));
           localStorage.setItem('alov_user_' + userData.uid, JSON.stringify(userData));
         } catch(e) {}
         setShowAuthModal(false);
@@ -1583,8 +1891,6 @@ export default function App() {
         const userCredential = await signInWithEmailAndPassword(auth, authEmail.trim(), authPassword.trim());
         if (userCredential.user) {
           await syncUserWithBackend(userCredential.user);
-          setShowAuthModal(false);
-          setActiveTab('discover');
           return;
         }
       }
@@ -1608,34 +1914,10 @@ export default function App() {
       setErrorMsg('');
       const userCredential = await createUserWithEmailAndPassword(auth, authEmail, authPassword);
       if (userCredential.user) {
-        const newUserData = {
-          uid: userCredential.user.uid,
-          id: `ALOV-${userCredential.user.uid.slice(0, 5).toUpperCase()}`,
-          name: regName,
-          email: authEmail,
-          avatar: regAvatar,
-          role: 'user',
-          age: Number(regAge) || 22,
-          birthDate: regBirthDate,
-          gender: regGender,
-          region: regRegion,
-          district: regDistrict,
-          phone: regPhone,
-          bio: regBio,
-          status: 'online',
-          isLocationEnabled: isLocationEnabled,
-          locationVisibility: regLocationVisibility,
-          location: { lat: 41.3111, lng: 69.2797 }
-        };
-        await fetch(getApiUrl('/api/users/sync'), {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ user: newUserData })
-        });
-        setCurrentUser(newUserData);
-        setShowAuthModal(false);
-        setAuthMode('login');
-        setActiveTab('discover');
+        // Immediately enter Face ID verification BEFORE collecting remaining profile info
+        setPendingGoogleUser(userCredential.user);
+        setPendingFaceId(null);
+        setAuthMode('register_face_id');
       }
     } catch (err: any) {
       setErrorMsg(err.message || "Ro'yxatdan o'tishda xatolik.");
@@ -1652,7 +1934,6 @@ export default function App() {
       provider.setCustomParameters({ prompt: 'select_account' });
       const result = await signInWithPopup(auth, provider);
       if (result?.user) {
-        // 1. Sync with backend first to check for existing canonical user (by UID or Email)
         const partialUser = {
           uid: result.user.uid,
           email: result.user.email,
@@ -1669,11 +1950,10 @@ export default function App() {
 
         if (data && data.success && data.user) {
           const canonicalUser = data.user;
-          
-          if (canonicalUser.isProfileCompleted) {
-            // Profile exists and is complete: log in directly
+          if (canonicalUser.isProfileCompleted && !requiresFaceIdForUser(canonicalUser)) {
             setCurrentUser(canonicalUser);
             try {
+              localStorage.setItem('alov_current_user', JSON.stringify(canonicalUser));
               localStorage.setItem('alov_user_' + canonicalUser.uid, JSON.stringify(canonicalUser));
             } catch(e) {}
             setShowAuthModal(false);
@@ -1683,11 +1963,11 @@ export default function App() {
           }
         }
 
-        // 2. If no existing completed profile, show registration setup form
+        // Immediately run Face ID right after Google account selection, BEFORE profile info form
         setRegName(result.user.displayName || '');
-        setRegAvatar(result.user.photoURL || regAvatar);
+        setPendingFaceId(null);
         setPendingGoogleUser(result.user);
-        setAuthMode('google_setup');
+        setAuthMode('google_face_id');
         setIsLoggingIn(false);
       }
     } catch (popupErr: any) {
@@ -1704,7 +1984,12 @@ export default function App() {
     e.preventDefault();
     if (!pendingGoogleUser) return;
     if (!regName.trim()) {
-      setErrorMsg("Iltimos, ism va familiyangizni kiriting!");
+      setErrorMsg("Iltimos, ismingizni kiriting!");
+      return;
+    }
+    if (!pendingFaceId?.verified) {
+      setErrorMsg("Avval Face ID tasdiqlashdan o'ting!");
+      setAuthMode('google_face_id');
       return;
     }
     try {
@@ -1712,19 +1997,24 @@ export default function App() {
       setErrorMsg('');
       const cleanTg = (regTelegram || '').replace(/^(https?:\/\/t\.me\/|@)/i, '').toLowerCase();
       const formattedTg = cleanTg ? `https://t.me/${cleanTg}` : undefined;
+      const verifiedGender = pendingFaceId.detectedGender;
+      const verifiedAvatar = pendingFaceId.capturedPhotoUrl || regAvatar;
 
       const newUserData = {
         uid: pendingGoogleUser.uid,
         id: `ALOV-${pendingGoogleUser.uid.slice(0, 5).toUpperCase()}`,
         name: regName.trim(),
-        email: pendingGoogleUser.email || '',
+        email: pendingGoogleUser.email || authEmail || '',
         telegram: formattedTg,
         password: authPassword.trim() || undefined,
-        avatar: regAvatar,
-        role: 'user',
+        avatar: verifiedAvatar,
+        faceId: pendingFaceId,
+        isVerified: true,
+        role: isAdminTelegramUser({ telegram: formattedTg }) ? 'admin' : 'user',
+        isAdmin: isAdminTelegramUser({ telegram: formattedTg }),
         age: Number(regAge) || calculateAge(regBirthDate, 22),
         birthDate: regBirthDate,
-        gender: regGender,
+        gender: verifiedGender,
         region: regRegion,
         district: regDistrict,
         phone: regPhone,
@@ -1735,16 +2025,19 @@ export default function App() {
         locationVisibility: regLocationVisibility,
         location: { lat: 41.3111, lng: 69.2797 }
       };
-      await fetch(getApiUrl('/api/users/sync'), {
+      const syncData = await safeFetchJson(getApiUrl('/api/users/sync'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ user: newUserData })
       });
-      setCurrentUser(newUserData);
+      const finalUser = (syncData && syncData.success && syncData.user) ? syncData.user : newUserData;
+      setCurrentUser(finalUser);
       try {
-        localStorage.setItem('alov_user_' + newUserData.uid, JSON.stringify(newUserData));
+        localStorage.setItem('alov_current_user', JSON.stringify(finalUser));
+        localStorage.setItem('alov_user_' + finalUser.uid, JSON.stringify(finalUser));
       } catch(e) {}
       setPendingGoogleUser(null);
+      setPendingFaceId(null);
       setShowAuthModal(false);
       setAuthMode('login');
       setActiveTab('discover');
@@ -1831,31 +2124,45 @@ export default function App() {
           localStorage.setItem('alov_tg_started_' + cleanKey, 'true');
         } catch (e) {}
 
-        if (data.isNewUser || !data.user.isProfileCompleted) {
+        const needsOnboardingOrFaceId =
+          !isAdminTelegramUser(data.user) &&
+          (data.isNewUser || !data.user.isProfileCompleted || requiresFaceIdForUser(data.user));
+
+        if (needsOnboardingOrFaceId) {
           setPendingTgUser(data.user);
-          setTelegramStep('profile_setup');
-          // Pre-fill fields from Telegram First Name / Last Name if available
-          const tgUser = (window as any).Telegram?.WebApp?.initDataUnsafe?.user;
-          let calculatedName = '';
-          if (tgUser) {
-            calculatedName = [tgUser.first_name, tgUser.last_name].filter(Boolean).join(' ').trim();
-          }
-          if (!calculatedName && data.user && data.user.name && !data.user.name.includes('Telegram Foydalanuvch') && !data.user.name.includes('Alov Foydalanuvch') && !data.user.name.startsWith('@')) {
-            calculatedName = data.user.name;
-          }
-          setRegName(calculatedName || '');
-          setRegAvatar(data.user.avatar || 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&q=80&w=600');
-          setRegPhone(data.user.phone || telegramInput.trim());
+          setPendingFaceId(null);
+
+          const tgWebAppUser = (window as any).Telegram?.WebApp?.initDataUnsafe?.user;
+          const tgWebAppName = tgWebAppUser
+            ? [tgWebAppUser.first_name, tgWebAppUser.last_name].filter(Boolean).join(' ').trim()
+            : '';
+
+          const calculatedName = buildTelegramDisplayName({
+            firstName: data.user.firstName || data.user.first_name || data.user.name,
+            lastName: data.user.lastName || data.user.last_name,
+            username: data.user.telegram || telegramInput.trim(),
+            phone: data.user.phone || telegramInput.trim(),
+            existingName: tgWebAppName,
+          });
+
+          setRegName(calculatedName);
+          setRegAvatar('');
+          setRegPhone(data.user.phone || (/^\+?\d+$/.test(telegramInput.trim()) ? telegramInput.trim() : '+99890'));
           const cleanUserTg = telegramInput.replace(/^(https?:\/\/t\.me\/|@)/i, '').toLowerCase();
-          setRegTelegram(cleanUserTg ? `https://t.me/${cleanUserTg}` : (data.user.telegram || ''));
+          setRegTelegram(data.user.telegram || (cleanUserTg && !/^\d+$/.test(cleanUserTg) ? `https://t.me/${cleanUserTg}` : ''));
           setRegAge(String(data.user.age || 22));
           setRegGender(data.user.gender || 'female');
           setRegRegion(data.user.region || 'Toshkent shahri');
           setRegDistrict(data.user.district || 'Yunusobod tumani');
+
+          // Enter real Face ID verification immediately after Telegram verification
+          setTelegramStep('face_id');
         } else {
+          // Admin (@Salikh_07) or already Face-ID-verified completed user logs straight in
           const userData = data.user;
           setCurrentUser(userData);
           try {
+            localStorage.setItem('alov_current_user', JSON.stringify(userData));
             localStorage.setItem('alov_user_' + userData.uid, JSON.stringify(userData));
           } catch(e) {}
           setShowAuthModal(false);
@@ -1873,6 +2180,47 @@ export default function App() {
     }
   };
 
+  const handleFaceIdVerified = async (result: FaceIdVerificationResult, origin: 'telegram' | 'google' | 'register') => {
+    setErrorMsg('');
+    setPendingFaceId(result.faceId);
+    setRegGender(result.detectedGender);
+    setRegAvatar(result.photoUrl || result.photoDataUrl);
+
+    if (origin === 'telegram') {
+      // If returning Telegram user already completed profile fields previously, finalize & enter directly
+      if (pendingTgUser?.isProfileCompleted) {
+        const updatedUser = {
+          ...pendingTgUser,
+          avatar: result.photoUrl || result.photoDataUrl,
+          gender: result.detectedGender,
+          faceId: result.faceId,
+          isVerified: true,
+        };
+        const syncData = await safeFetchJson(getApiUrl('/api/users/sync'), {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ user: updatedUser }),
+        });
+        const finalUser = syncData?.user || updatedUser;
+        setCurrentUser(finalUser);
+        try {
+          localStorage.setItem('alov_current_user', JSON.stringify(finalUser));
+          localStorage.setItem('alov_user_' + finalUser.uid, JSON.stringify(finalUser));
+        } catch (e) {}
+        setPendingTgUser(null);
+        setPendingFaceId(null);
+        setShowAuthModal(false);
+        setAuthMode('login');
+        setTelegramStep('input_phone');
+        setActiveTab('discover');
+        return;
+      }
+      setTelegramStep('profile_setup');
+    } else {
+      setAuthMode('google_setup');
+    }
+  };
+
   const handleCompleteTelegramRegistration = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!pendingTgUser) return;
@@ -1880,24 +2228,34 @@ export default function App() {
       setErrorMsg("Iltimos, ismingizni kiriting!");
       return;
     }
+    if (!pendingFaceId?.verified) {
+      setErrorMsg("Avval Face ID tasdiqlashdan o'ting!");
+      setTelegramStep('face_id');
+      return;
+    }
     try {
       setIsLoggingIn(true);
       setErrorMsg('');
-      const cleanTg = (regTelegram || telegramInput || '').replace(/^(https?:\/\/t\.me\/|@)/i, '').toLowerCase();
-      const formattedTg = cleanTg ? `https://t.me/${cleanTg}` : undefined;
+      const cleanTg = (regTelegram || pendingTgUser.telegram || telegramInput || '').replace(/^(https?:\/\/t\.me\/|@)/i, '').toLowerCase();
+      const formattedTg = cleanTg && !/^\d+$/.test(cleanTg) ? `https://t.me/${cleanTg}` : undefined;
+      const verifiedGender = pendingFaceId.detectedGender;
+      const verifiedAvatar = pendingFaceId.capturedPhotoUrl || regAvatar;
 
       const newUserData = {
         uid: pendingTgUser.uid,
-        id: `ALOV-TG-${pendingTgUser.uid.slice(0, 5).toUpperCase()}`,
+        id: pendingTgUser.id || `ALOV-TG-${pendingTgUser.uid.slice(0, 5).toUpperCase()}`,
         name: regName.trim(),
         telegram: formattedTg,
         telegramChatId: pendingTgUser.telegramChatId,
         password: authPassword.trim() || undefined,
-        avatar: regAvatar || 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&q=80&w=600',
-        role: 'user',
+        avatar: verifiedAvatar,
+        faceId: pendingFaceId,
+        isVerified: true,
+        role: isAdminTelegramUser({ telegram: formattedTg }) ? 'admin' : 'user',
+        isAdmin: isAdminTelegramUser({ telegram: formattedTg }),
         age: Number(regAge) || calculateAge(regBirthDate, 22),
         birthDate: regBirthDate,
-        gender: regGender,
+        gender: verifiedGender,
         region: regRegion,
         district: regDistrict,
         phone: regPhone,
@@ -1908,16 +2266,19 @@ export default function App() {
         locationVisibility: regLocationVisibility,
         location: { lat: 41.3111, lng: 69.2797 }
       };
-      await fetch(getApiUrl('/api/users/sync'), {
+      const syncData = await safeFetchJson(getApiUrl('/api/users/sync'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ user: newUserData })
       });
-      setCurrentUser(newUserData);
+      const finalUser = (syncData && syncData.success && syncData.user) ? syncData.user : newUserData;
+      setCurrentUser(finalUser);
       try {
-        localStorage.setItem('alov_user_' + newUserData.uid, JSON.stringify(newUserData));
+        localStorage.setItem('alov_current_user', JSON.stringify(finalUser));
+        localStorage.setItem('alov_user_' + finalUser.uid, JSON.stringify(finalUser));
       } catch(e) {}
       setPendingTgUser(null);
+      setPendingFaceId(null);
       setShowAuthModal(false);
       setAuthMode('login');
       setTelegramStep('input_phone');
@@ -1930,14 +2291,15 @@ export default function App() {
   };
 
   const handleLogout = async () => {
-    if (firebaseUser) {
+    const activeUid = currentUser?.uid || firebaseUser?.uid;
+    if (activeUid) {
       try {
         await fetch(getApiUrl('/api/users/update'), {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
-            uid: firebaseUser.uid,
-            updates: { isOnline: false }
+            uid: activeUid,
+            updates: { isOnline: false, status: 'offline' }
           })
         });
       } catch (e) {}
@@ -1945,17 +2307,70 @@ export default function App() {
     try {
       localStorage.removeItem('alov_current_user');
     } catch (e) {}
-    await signOut(auth);
+    await signOut(auth).catch(() => {});
     setFirebaseUser(null);
     setCurrentUser(null);
+    setShowAdminPanel(false);
     setActiveTab('landing');
   };
 
-  const handleToggleFollow = (targetId: string) => {
-    if (followingIds.includes(targetId)) {
-      setFollowingIds(followingIds.filter(id => id !== targetId));
-    } else {
-      setFollowingIds([...followingIds, targetId]);
+  const handleToggleFollow = async (targetUidOrId: string) => {
+    const myUid = currentUser?.uid || firebaseUser?.uid;
+    if (!myUid || !targetUidOrId) return;
+
+    const targetObj = usersList.find(u => u.uid === targetUidOrId || u.id === targetUidOrId) || selectedProfile;
+    const resolvedTargetUid = targetObj?.uid || targetUidOrId;
+
+    const wasFollowing = followingIds.includes(resolvedTargetUid) || followingIds.includes(targetUidOrId);
+    setFollowingIds(prev =>
+      wasFollowing
+        ? prev.filter(id => id !== resolvedTargetUid && id !== targetUidOrId)
+        : Array.from(new Set([...prev, resolvedTargetUid]))
+    );
+
+    try {
+      const data = await safeFetchJson(getApiUrl('/api/users/follow'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ followerUid: myUid, targetUid: resolvedTargetUid })
+      });
+      if (data?.success) {
+        if (data.follower) {
+          setCurrentUser(data.follower);
+          setFollowingIds(Array.isArray(data.follower.following) ? data.follower.following : []);
+          try {
+            localStorage.setItem('alov_current_user', JSON.stringify(data.follower));
+            localStorage.setItem('alov_user_' + data.follower.uid, JSON.stringify(data.follower));
+          } catch (e) {}
+        }
+        if (data.target && selectedProfile && (selectedProfile.uid === data.target.uid || selectedProfile.id === data.target.id)) {
+          setSelectedProfile(data.target);
+        }
+      }
+    } catch (err) {
+      console.warn('Follow sync failed:', err);
+    }
+  };
+
+  const handleToggleFriendship = async () => {
+    const myUid = currentUser?.uid || firebaseUser?.uid;
+    const otherUid = selectedChatUser?.uid || selectedChatUser?.id;
+    if (!myUid || !otherUid) return;
+    const chatId = [myUid, otherUid].sort().join('_');
+    const nextState = !chatFriendships[chatId];
+    setChatFriendships(prev => ({ ...prev, [chatId]: nextState }));
+
+    try {
+      const data = await safeFetchJson(getApiUrl('/api/chats/friendship'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ chatId, uid: myUid, enabled: nextState })
+      });
+      if (data?.success && data.friendship) {
+        setChatFriendships(prev => ({ ...prev, [chatId]: Boolean(data.friendship.active) }));
+      }
+    } catch (e) {
+      setChatFriendships(prev => ({ ...prev, [chatId]: !nextState }));
     }
   };
 
@@ -2066,8 +2481,8 @@ export default function App() {
 
 
   const handleTyping = () => {
-    if (!firebaseUser || !selectedChatUser) return;
-    const myUid = firebaseUser.uid;
+    const myUid = currentUser?.uid || firebaseUser?.uid;
+    if (!myUid || !selectedChatUser) return;
     const otherUid = selectedChatUser.uid || selectedChatUser.id;
     const chatId = [myUid, otherUid].sort().join('_');
 
@@ -2117,6 +2532,28 @@ export default function App() {
       recipientId: otherUid,
       message: msgObj
     }, (ack: any) => {
+      if (ack && ack.success === false) {
+        // Rollback optimistic message if rejected by server (e.g. insufficient coins or banned)
+        setChatMessages(prev => {
+          const next = { ...prev };
+          Object.keys(next).forEach(k => {
+            if (next[k]) {
+              next[k] = next[k].filter(m => m.id !== msgObj.id);
+            }
+          });
+          try {
+            localStorage.setItem('alov_msgs_' + chatId, JSON.stringify(next[chatId] || []));
+          } catch (e) {}
+          return next;
+        });
+        if (ack.error === 'insufficient_coins') {
+          setWalletNoticeMsg(ack.message || `Monetalaringiz yetarli emas! Har bir xabar narxi ${MESSAGE_COIN_COST} moneta.`);
+          setShowTopUpModal(true);
+        } else if (ack.message) {
+          setErrorMsg(ack.message);
+        }
+        return;
+      }
       if (ack && (ack.status === 'sent' || ack.success)) {
         setChatMessages(prev => {
           const next = { ...prev };
@@ -2372,73 +2809,130 @@ export default function App() {
     return true;
   });
 
-  // Dashboard content inside smartphone mockup
+  // Dashboard content inside refined romantic dating shell
   const dashboardContent = (
-    <div className="h-full bg-[#FAFAFB] text-[#1C1C1C] font-sans flex flex-col w-full relative overflow-hidden">
+    <div className="h-full bg-[#FDFBF9] text-[#221719] font-sans flex flex-col w-full relative overflow-hidden">
       
-      {/* Top Header inside mockup */}
-      <header className="shrink-0 bg-white border-b border-[rgba(28,28,28,0.06)] px-3 h-13 flex items-center justify-between">
-        <div className="flex items-center space-x-2 cursor-pointer" onClick={() => setActiveTab('discover')}>
-          <img src="/assets/aistudio/image_e20a1307.png" alt="Alov.uz Logo" className="w-7 h-7 rounded-xl object-cover border border-[#E8474A]/30 shadow-xs" />
-          <span className="text-lg font-black tracking-tight text-[#1C1C1C]">
-            alov<span className="text-[#E8474A]">.uz</span>
-          </span>
-          <span className="text-[10px] font-bold text-emerald-600 bg-emerald-50 px-2 py-0.5 rounded-full flex items-center space-x-1 border border-emerald-200/60 shadow-xs">
-            <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-ping" />
-            <span>{activeUsersCount} onlayn</span>
-          </span>
-        </div>
+      {/* Top Header (always pinned cleanly at top) */}
+      <header className="shrink-0 bg-white/95 backdrop-blur-md border-b border-[rgba(166,36,51,0.1)] px-2.5 sm:px-5 h-14 flex items-center justify-between gap-1.5 z-40">
+          <div className="flex items-center gap-1.5 sm:gap-2.5 shrink-0 cursor-pointer" onClick={() => setActiveTab('discover')}>
+            <img src="/assets/aistudio/image_e20a1307.png" alt="Alov.uz Logo" className="w-7 h-7 rounded-xl object-cover border border-[#C93545]/30 shadow-xs shrink-0" />
+            <span className="text-[16px] sm:text-[18px] font-black font-editorial tracking-tight text-[#221719] whitespace-nowrap shrink-0">
+              alov<span className="text-[#C93545]">.uz</span>
+            </span>
+            <span className="text-[9.5px] sm:text-[10.5px] font-bold text-emerald-700 bg-emerald-50/90 px-2 py-0.5 rounded-full flex items-center gap-1 border border-emerald-200/80 shadow-xs whitespace-nowrap shrink-0">
+              <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse shrink-0" />
+              <span>{activeUsersCount} onlayn</span>
+            </span>
+          </div>
 
-        <div className="flex items-center space-x-1.5">
-          {currentUser?.gender === 'female' ? (
+          <div className="flex items-center gap-1 sm:gap-1.5 shrink-0">
+            {isAdminTelegramUser(currentUser) ? (
+              <>
+                <button
+                  onClick={() => setActiveTab('profile')}
+                  title="Admin Full Almaz Balansi"
+                  className="flex items-center gap-1 bg-gradient-to-r from-cyan-50 to-sky-50 border border-cyan-200/90 text-cyan-900 py-1 px-2 rounded-full text-[9.5px] sm:text-[10.5px] font-bold shadow-xs hover:bg-cyan-100 transition whitespace-nowrap shrink-0"
+                >
+                  <span>💎</span>
+                  <span>Full</span>
+                </button>
+                <button
+                  onClick={() => setActiveTab('profile')}
+                  title="Admin Full Moneta Balansi"
+                  className="flex items-center gap-1 bg-gradient-to-r from-amber-50 to-yellow-50 border border-amber-300/80 text-amber-900 py-1 px-2 rounded-full text-[9.5px] sm:text-[10.5px] font-bold shadow-xs hover:bg-amber-100 transition whitespace-nowrap shrink-0"
+                >
+                  <Coins className="w-3 h-3 text-amber-600 fill-amber-400 shrink-0" />
+                  <span>Full</span>
+                </button>
+              </>
+            ) : currentUser?.gender === 'female' ? (
+              <button 
+                onClick={() => setShowWithdrawModal(true)}
+                className="flex items-center gap-1 bg-cyan-50 border border-cyan-200 text-cyan-900 py-1 px-2 rounded-full text-[10px] font-bold shadow-xs hover:bg-cyan-100 transition active:scale-95 whitespace-nowrap shrink-0"
+              >
+                <span>💎</span>
+                <span>{currentUser?.diamonds ?? 0}</span>
+              </button>
+            ) : (
+              <button 
+                onClick={() => setShowTopUpModal(true)}
+                className="flex items-center gap-1 bg-amber-50 border border-amber-200 text-amber-900 py-1 px-2 rounded-full text-[10px] font-bold shadow-xs hover:bg-amber-100 transition active:scale-95 whitespace-nowrap shrink-0"
+              >
+                <Coins className="w-3 h-3 text-amber-500 fill-amber-400 shrink-0" />
+                <span>{currentUser?.coins ?? 100}</span>
+              </button>
+            )}
+
+            {isAdminTelegramUser(currentUser) && (
+              <button
+                onClick={() => setShowAdminPanel(true)}
+                title="Admin Panel"
+                className="flex items-center gap-1 bg-[#221719] hover:bg-[#352427] text-[#F5D28E] py-1 px-2 rounded-full text-[9.5px] sm:text-[10.5px] font-bold shadow-xs border border-[#C89B54]/40 transition active:scale-95 whitespace-nowrap shrink-0"
+              >
+                <Crown className="w-3 h-3 shrink-0" />
+                <span>Admin</span>
+              </button>
+            )}
+
             <button 
-              onClick={() => setShowWithdrawModal(true)}
-              className="flex items-center space-x-1 bg-cyan-50 border border-cyan-200 text-cyan-900 py-1 px-2.5 rounded-full text-[10px] font-bold shadow-xs hover:bg-cyan-100 transition active:scale-95"
+              onClick={() => setActiveTab('profile')}
+              className="flex items-center gap-1.5 bg-[#FAF4F2] border border-[rgba(166,36,51,0.14)] py-0.5 px-1.5 pr-2 rounded-full shadow-subtle whitespace-nowrap shrink-0 hover:bg-[#F5EBE7] transition"
             >
-              <span>💎</span>
-              <span>{currentUser?.diamonds ?? 0} Almaz</span>
+              {(() => {
+                const headerAvatar = resolveAvatarUrl(currentUser?.avatar || firebaseUser?.photoURL);
+                const headerName = getSafeUserDisplayName(currentUser, firebaseUser?.displayName || 'Profil');
+                return (
+                  <>
+                    {headerAvatar ? (
+                      <img
+                        src={headerAvatar}
+                        alt={headerName}
+                        className="w-5.5 h-5.5 rounded-full object-cover shrink-0 border border-white"
+                        onError={(e: any) => {
+                          e.currentTarget.style.display = 'none';
+                          const fallbackEl = e.currentTarget.nextElementSibling as HTMLElement | null;
+                          if (fallbackEl) fallbackEl.style.display = 'flex';
+                        }}
+                      />
+                    ) : null}
+                    <span
+                      className={cn(
+                        "w-5.5 h-5.5 rounded-full bg-rose-100 text-[#C93545] text-[10px] font-black items-center justify-center shrink-0",
+                        headerAvatar ? "hidden" : "flex"
+                      )}
+                    >
+                      {headerName.charAt(0).toUpperCase()}
+                    </span>
+                    <span className="text-[10px] sm:text-[11px] font-bold truncate max-w-[46px] sm:max-w-[90px] text-[#221719]">{headerName}</span>
+                  </>
+                );
+              })()}
             </button>
-          ) : (
-            <button 
-              onClick={() => setShowTopUpModal(true)}
-              className="flex items-center space-x-1 bg-amber-50 border border-amber-200 text-amber-900 py-1 px-2.5 rounded-full text-[10px] font-bold shadow-xs hover:bg-amber-100 transition active:scale-95"
-            >
-              <Coins className="w-3 h-3 text-amber-500 fill-amber-400" />
-              <span>{currentUser?.coins ?? 100} Moneta</span>
+            <button onClick={handleLogout} title="Chiqish" aria-label="Chiqish" className="p-1.5 rounded-full bg-[#FAF4F2] hover:bg-rose-100 text-[#C93545] border border-[rgba(166,36,51,0.1)] shrink-0 transition">
+              <LogOut className="w-3.5 h-3.5" />
             </button>
-          )}
+          </div>
+        </header>
 
-          <button 
-            onClick={() => setActiveTab('profile')}
-            className="flex items-center space-x-1 bg-white border border-[rgba(28,28,28,0.08)] py-1 px-2 rounded-full shadow-subtle"
-          >
-            <img src={currentUser?.avatar || firebaseUser?.photoURL || ''} alt="Avatar" className="w-5 h-5 rounded-full object-cover shrink-0" />
-            <span className="text-[10px] font-bold truncate max-w-[65px]">{currentUser?.name || 'Profil'}</span>
-          </button>
-          <button onClick={handleLogout} className="p-1.5 rounded-full bg-rose-50 text-[#E8474A]">
-            <LogOut className="w-3.5 h-3.5" />
-          </button>
-        </div>
-      </header>
-
-      {/* Scrollable Inner Viewport or Fullscreen Reels */}
-      <div className={`flex-1 overflow-y-auto relative ${activeTab === 'reels' ? 'p-0 pb-0' : 'p-3 space-y-3 pb-16'}`}>
+      {/* Scrollable Inner Viewport or Fixed-Height Reels / Map / Chat Container */}
+      <div className={`flex-1 min-h-0 relative ${(activeTab === 'reels' || activeTab === 'map' || (activeTab === 'chats' && chatView === 'conversation')) ? 'overflow-hidden flex flex-col p-0' : 'overflow-y-auto overscroll-y-contain p-3 sm:p-5 space-y-4 pb-20'}`}>
         
         {/* --- LANDING TAB --- */}
         {activeTab === 'landing' && <LandingPage onLogin={() => setShowAuthModal(true)} />}
 
         {/* --- DISCOVER TAB --- */}
         {activeTab === 'discover' && (
-          <div className="space-y-3">
+          <div className="space-y-4">
             {/* Live Stream Go Live Promo Banner */}
-            <div className="bg-gradient-to-r from-red-600 to-rose-600 rounded-[20px] p-3.5 text-white shadow-xl shadow-red-500/20 flex items-center justify-between border border-white/10">
-              <div className="flex items-center space-x-2.5">
-                <div className="p-2.5 bg-white/20 backdrop-blur-md rounded-full shadow-inner">
+            <div className="bg-gradient-to-r from-[#C93545] via-[#B42A3B] to-[#982030] rounded-[22px] p-4 text-white shadow-lg shadow-rose-900/15 flex items-center justify-between border border-[#C89B54]/30">
+              <div className="flex items-center space-x-3">
+                <div className="p-2.5 bg-white/15 backdrop-blur-md rounded-full shadow-inner border border-white/20">
                   <Radio className="w-5 h-5 text-white animate-pulse" />
                 </div>
                 <div>
-                  <h3 className="font-bold text-xs tracking-wide">JONLI EFIR (LIVE)</h3>
-                  <p className="text-[10px] text-white/80">Kamerangizni yoqing va barcha bilan muloqot qiling</p>
+                  <h3 className="font-bold text-xs sm:text-sm tracking-wide">JONLI EFIR (LIVE)</h3>
+                  <p className="text-[10.5px] sm:text-xs text-white/85">Kamerangizni yoqing va barcha bilan muloqot qiling</p>
                 </div>
               </div>
               <button
@@ -2450,18 +2944,21 @@ export default function App() {
                   setLiveModalMode('broadcaster');
                   setShowLiveModal(true);
                 }}
-                className="bg-white text-red-600 px-3 py-1.5 rounded-full text-xs font-black shadow-md shrink-0 hover:bg-slate-50 transition active:scale-95"
+                className="bg-white text-[#A62433] px-3.5 py-2 rounded-full text-xs font-black shadow-md shrink-0 hover:bg-[#FDFBF9] transition active:scale-95"
               >
                 Efir boshlash 🔴
               </button>
             </div>
 
-            <div className="bg-white p-3 rounded-[16px] card-shadow space-y-2">
-              <h2 className="text-lg font-editorial">Nomzodlar</h2>
+            <div className="bg-white p-3.5 sm:p-4 rounded-[20px] border border-[rgba(166,36,51,0.1)] shadow-subtle flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2.5">
+              <div>
+                <h2 className="text-xl sm:text-2xl font-editorial font-bold text-[#221719]">Nomzodlar</h2>
+                <p className="text-[11px] text-[#6B5B5E]">Face ID bilan tasdiqlangan haqiqiy insonlar</p>
+              </div>
               <select 
                 value={filterRegion}
                 onChange={(e) => setFilterRegion(e.target.value)}
-                className="w-full px-3 py-2 rounded-[8px] bg-[#FAFAFB] border border-slate-200 text-xs font-semibold"
+                className="w-full sm:w-64 px-3.5 py-2 rounded-xl bg-[#FAF4F2] border border-[rgba(166,36,51,0.12)] text-xs font-semibold text-[#221719] outline-none focus:border-[#C93545]"
               >
                 <option value="Barchasi">Barcha viloyatlar</option>
                 {Object.keys(UZ_LOCATIONS).map((reg, idx) => (
@@ -2470,41 +2967,59 @@ export default function App() {
               </select>
             </div>
 
-            <div className="grid grid-cols-2 gap-3">
+            <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-3 sm:gap-4">
               {isLoadingCandidates ? (
                 <>
                   <CandidateSkeleton />
                   <CandidateSkeleton />
                 </>
               ) : filteredCandidates.length === 0 ? (
-                <div className="col-span-2 p-6 text-center bg-white rounded-[20px] border border-slate-100 card-shadow space-y-3">
-                  <div className="w-12 h-12 bg-rose-50 text-[#E8474A] rounded-full flex items-center justify-center mx-auto">
+                <div className="col-span-full p-8 text-center bg-white rounded-[24px] border border-[rgba(166,36,51,0.1)] shadow-subtle space-y-3">
+                  <div className="w-12 h-12 bg-[#FAF4F2] text-[#C93545] rounded-full flex items-center justify-center mx-auto border border-[rgba(166,36,51,0.12)]">
                     <Users className="w-6 h-6" />
                   </div>
-                  <h4 className="text-sm font-bold text-slate-800">Ushbu filtr bo'yicha nomzodlar topilmadi</h4>
-                  <p className="text-xs text-slate-500">Filtrni tozalab barcha viloyatdagi nomzodlarni ko'rishingiz mumkin.</p>
+                  <h4 className="text-sm font-bold text-[#221719]">Ushbu filtr bo'yicha nomzodlar topilmadi</h4>
+                  <p className="text-xs text-[#6B5B5E]">Filtrni tozalab barcha viloyatdagi nomzodlarni ko'rishingiz mumkin.</p>
                   <button 
                     onClick={() => {
                       setFilterRegion('Barchasi');
                       setFilterDistrict('Barchasi');
                       setSearchQuery('');
                     }}
-                    className="px-4 py-2 rounded-full bg-[#E8474A] text-white text-xs font-bold hover:bg-[#d4383b] transition active:scale-95 shadow-xs"
+                    className="px-5 py-2.5 rounded-full bg-[#C93545] text-white text-xs font-bold hover:bg-[#A62433] transition active:scale-95 shadow-xs"
                   >
                     Barcha nomzodlarni ko'rish
                   </button>
                 </div>
-              ) : filteredCandidates.map((user, idx) => (
-                <div key={user.uid ? `${user.uid}_${idx}` : `${user.id}_${idx}`} className="bg-white rounded-[20px] p-2.5 card-shadow flex flex-col justify-between space-y-2 border border-slate-100 hover:shadow-md transition-all">
-                  <div className="relative aspect-[3/4] w-full rounded-[14px] overflow-hidden bg-slate-100">
-                    <img 
-                      src={user.avatar || 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&q=80&w=600'} 
-                      alt={user.name} 
-                      className="w-full h-full object-cover object-center transition-transform duration-300 hover:scale-105"
-                      onError={(e: any) => {
-                        e.target.src = 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&q=80&w=600';
-                      }}
-                    />
+              ) : filteredCandidates.map((user, idx) => {
+                const candidateAvatar = resolveAvatarUrl(user.avatar);
+                const candidateName = getSafeUserDisplayName(user, user.name || 'Foydalanuvchi');
+                const faceVerified = Boolean(user.faceId?.verified);
+                const detectedGender = user.faceId?.detectedGender || user.gender;
+                const genderBadge = detectedGender === 'female' ? '👩 Qiz' : '👨 Yigit';
+                return (
+                <div key={user.uid ? `${user.uid}_${idx}` : `${user.id}_${idx}`} className="bg-white rounded-[22px] p-2.5 shadow-subtle flex flex-col justify-between space-y-2.5 border border-[rgba(166,36,51,0.1)] hover:shadow-md hover:border-[rgba(166,36,51,0.22)] transition-all">
+                  <div className="relative aspect-[3/4] w-full rounded-[16px] overflow-hidden bg-[#FAF4F2]">
+                    {candidateAvatar ? (
+                      <img 
+                        src={candidateAvatar} 
+                        alt={candidateName} 
+                        className="w-full h-full object-cover object-center transition-transform duration-300 hover:scale-105"
+                        onError={(e: any) => {
+                          e.currentTarget.style.display = 'none';
+                          const fallback = e.currentTarget.nextElementSibling as HTMLElement | null;
+                          if (fallback) fallback.style.display = 'flex';
+                        }}
+                      />
+                    ) : null}
+                    <div
+                      className={cn(
+                        "w-full h-full items-center justify-center bg-gradient-to-br from-[#FAF0EC] to-[#F3DFD9] text-[#A62433] font-editorial font-black text-3xl",
+                        candidateAvatar ? "hidden" : "flex"
+                      )}
+                    >
+                      {candidateName.charAt(0).toUpperCase()}
+                    </div>
                     
                     {user.isLive && (
                       <div className="absolute top-2 left-2 px-2 py-0.5 rounded-full bg-red-600 text-white text-[8px] font-black flex items-center space-x-1 shadow-md animate-pulse border border-white/30">
@@ -2513,23 +3028,55 @@ export default function App() {
                       </div>
                     )}
 
-                    <span className="absolute top-2 right-2 px-2 py-0.5 rounded-full bg-[#E8474A] text-white text-[8px] font-bold shadow-xs">
+                    {faceVerified && !user.isLive && (
+                      <div className="absolute top-2 left-2 px-2 py-0.5 rounded-full bg-emerald-600/95 backdrop-blur-md text-white text-[8.5px] font-bold flex items-center space-x-1 shadow-xs border border-white/25">
+                        <ScanFace className="w-2.5 h-2.5" />
+                        <span>Face ID ✓</span>
+                      </div>
+                    )}
+
+                    <span className="absolute top-2 right-2 px-2 py-0.5 rounded-full bg-[#221719]/80 backdrop-blur-sm text-white text-[8px] font-mono font-bold shadow-xs">
                       {user.id}
                     </span>
 
                     {/* Online / Offline Status Badge */}
                     <div className={cn(
-                      "absolute bottom-2 left-2 px-2 py-0.5 rounded-full backdrop-blur-md text-[8px] font-semibold flex items-center space-x-1 shadow-xs border border-white/20 text-white",
-                      (user.status === 'online' || user.isOnline) ? "bg-emerald-600/90" : "bg-slate-700/80"
+                      "absolute bottom-2 left-2 px-2 py-0.5 rounded-full backdrop-blur-md text-[8.5px] font-semibold flex items-center space-x-1 shadow-xs border border-white/20 text-white",
+                      (user.status === 'online' || user.isOnline) ? "bg-emerald-600/90" : "bg-[#221719]/75"
                     )}>
                       <span className={cn("w-1.5 h-1.5 rounded-full bg-white", (user.status === 'online' || user.isOnline) && "animate-pulse")} />
                       <span>{(user.status === 'online' || user.isOnline) ? "Onlayn" : "Oflayn"}</span>
                     </div>
                   </div>
 
-                  <div className="min-w-0">
-                    <h3 className="text-sm font-bold font-editorial text-slate-900 truncate">{user.name}, {calculateAge(user.birthDate, user.age)} yoshda</h3>
-                    <p className="text-[10px] text-[#6b635c] truncate">{user.district || user.region}</p>
+                  <div className="min-w-0 space-y-1">
+                    <h3 className="text-sm font-bold font-editorial text-[#221719] truncate">{candidateName}, {calculateAge(user.birthDate, user.age)} yoshda</h3>
+                    <p className="text-[10.5px] text-[#6B5B5E] truncate">{user.district || user.region}</p>
+
+                    {/* Face ID biometric summary inside candidate card */}
+                    {faceVerified ? (
+                      <div className="bg-emerald-50/90 border border-emerald-200/80 rounded-xl px-2 py-1 text-[9.5px] text-emerald-900 space-y-0.5">
+                        <div className="flex items-center justify-between font-bold">
+                          <span className="flex items-center gap-1">
+                            <ShieldCheck className="w-3 h-3 text-emerald-600 shrink-0" />
+                            <span>{genderBadge}</span>
+                          </span>
+                          <span className="font-mono text-emerald-700">{user.faceId?.confidence ?? 95}%</span>
+                        </div>
+                        <p className="text-[8.5px] text-emerald-700 font-medium truncate">
+                          Face ID · Ko'z & Tabassum ✓
+                        </p>
+                      </div>
+                    ) : isAdminTelegramUser(user) ? (
+                      <div className="bg-amber-50 border border-amber-200 rounded-xl px-2 py-1 text-[9.5px] font-bold text-amber-900 flex items-center gap-1">
+                        <Crown className="w-3 h-3 text-amber-600 shrink-0" />
+                        <span>Platforma Admini</span>
+                      </div>
+                    ) : (
+                      <div className="bg-[#FAF4F2] border border-[rgba(166,36,51,0.08)] rounded-xl px-2 py-1 text-[9.5px] font-semibold text-[#6B5B5E]">
+                        {genderBadge}
+                      </div>
+                    )}
                   </div>
 
                   {user.isLive && (
@@ -2548,15 +3095,16 @@ export default function App() {
                   )}
 
                   <div className="flex space-x-1.5 pt-0.5">
-                    <button onClick={() => setSelectedProfile(user)} className="flex-1 py-1.5 rounded-full bg-[#FCEAEA] hover:bg-[#f8d7d7] text-[#E8474A] font-bold text-[10px] transition active:scale-95">
+                    <button onClick={() => setSelectedProfile(user)} className="flex-1 py-1.5 rounded-full bg-[#FAF4F2] hover:bg-[#F3E4E0] text-[#A62433] font-bold text-[10.5px] border border-[rgba(166,36,51,0.12)] transition active:scale-95">
                       Profil
                     </button>
-                    <button onClick={() => openChatWithUser(user)} className="flex-1 py-1.5 rounded-full bg-[#E8474A] hover:bg-[#CB2E31] text-white font-bold text-[10px] transition active:scale-95">
+                    <button onClick={() => openChatWithUser(user)} className="flex-1 py-1.5 rounded-full bg-[#C93545] hover:bg-[#A62433] text-white font-bold text-[10.5px] transition active:scale-95">
                       Chat
                     </button>
                   </div>
                 </div>
-              ))}
+                );
+              })}
             </div>
           </div>
         )}
@@ -2786,7 +3334,13 @@ export default function App() {
                         )}
                       >
                         <div className="relative">
-                          <img src={otherUser?.avatar || 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&q=80&w=600'} alt="" className="w-12 h-12 rounded-full object-cover shrink-0 border border-slate-100" />
+                          {resolveAvatarUrl(otherUser?.avatar) ? (
+                            <img src={resolveAvatarUrl(otherUser?.avatar)} alt={otherUser?.name || ''} className="w-12 h-12 rounded-full object-cover shrink-0 border border-slate-100" />
+                          ) : (
+                            <div className="w-12 h-12 rounded-full bg-rose-100 text-[#E8474A] font-black text-base flex items-center justify-center shrink-0 border border-rose-200">
+                              {getSafeUserDisplayName(otherUser, 'F').charAt(0).toUpperCase()}
+                            </div>
+                          )}
                           {otherUser?.status === 'online' && (
                             <span className="absolute bottom-0 right-0 w-3 h-3 bg-[#10B981] border-2 border-white rounded-full"></span>
                           )}
@@ -2827,34 +3381,60 @@ export default function App() {
                 </div>
               </div>
             ) : (
-              <div 
-                style={{ 
-                  height: mobileChatViewportHeight ? `${mobileChatViewportHeight}px` : '100dvh',
-                  maxHeight: mobileChatViewportHeight ? `${mobileChatViewportHeight}px` : '100dvh'
-                }}
-                className="fixed inset-x-0 top-0 bottom-0 md:absolute md:inset-0 z-50 bg-white flex flex-col overflow-hidden animate-in fade-in zoom-in-95 duration-200"
-              >
-                <div className="sticky top-0 z-30 shrink-0 p-3 border-b border-slate-100 flex items-center justify-between bg-white/95 backdrop-blur-md shadow-subtle">
-                  <div className="flex items-center space-x-2">
-                    <button onClick={() => setChatView('list')} className="p-2 rounded-full hover:bg-slate-100 text-slate-700 transition active:scale-90">
+              <div className="flex-1 min-h-0 w-full bg-white flex flex-col overflow-hidden">
+                <div className="shrink-0 z-20 px-3 py-2.5 border-b border-slate-100 flex items-center justify-between bg-white shadow-subtle">
+                  <div className="flex items-center space-x-2 min-w-0">
+                    <button onClick={() => setChatView('list')} className="p-2 rounded-full hover:bg-slate-100 text-slate-700 transition active:scale-90 shrink-0">
                       <ArrowLeft className="w-5 h-5" />
                     </button>
-                    <div className="flex items-center space-x-2.5">
-                      <div className="relative">
-                        <img src={selectedChatUser?.avatar} alt="" className="w-9 h-9 rounded-full object-cover border border-slate-100" />
-                        {selectedChatUser?.status === 'online' && (
+                    <div className="flex items-center space-x-2.5 min-w-0">
+                      <div className="relative shrink-0">
+                        {resolveAvatarUrl(selectedChatUser?.avatar) ? (
+                          <img src={resolveAvatarUrl(selectedChatUser?.avatar)} alt={selectedChatUser?.name || ''} className="w-9 h-9 rounded-full object-cover border border-slate-100" />
+                        ) : (
+                          <div className="w-9 h-9 rounded-full bg-rose-100 text-[#E8474A] font-black text-sm flex items-center justify-center border border-rose-200">
+                            {getSafeUserDisplayName(selectedChatUser, 'F').charAt(0).toUpperCase()}
+                          </div>
+                        )}
+                        {(selectedChatUser?.status === 'online' || selectedChatUser?.isOnline) && (
                           <span className="absolute bottom-0 right-0 w-2.5 h-2.5 bg-[#10B981] border-2 border-white rounded-full"></span>
                         )}
                       </div>
-                      <div>
-                        <h3 className="font-sans font-bold text-sm text-slate-900 leading-none">{selectedChatUser?.name}</h3>
+                      <div className="min-w-0">
+                        <h3 className="font-sans font-bold text-sm text-slate-900 leading-none truncate">{selectedChatUser?.name}</h3>
                         <p className="text-[10px] text-slate-400 mt-1">
-                          {selectedChatUser?.status === 'online' ? 'tarmoqda' : 'yaqinda online edi'}
+                          {(selectedChatUser?.status === 'online' || selectedChatUser?.isOnline) ? 'tarmoqda' : 'yaqinda online edi'}
                         </p>
                       </div>
                     </div>
                   </div>
                   <div className="flex items-center space-x-1">
+                    {(() => {
+                      const myUid = currentUser?.uid || firebaseUser?.uid;
+                      const otherUid = selectedChatUser?.uid || selectedChatUser?.id;
+                      const activeChatId = (myUid && otherUid) ? [myUid, otherUid].sort().join('_') : '';
+                      const isAIBotChat = otherUid === ALOV_AI_USER.uid || otherUid === 'user_kamola_006' || otherUid === 'ALOV-006';
+                      const isFriendActive = Boolean(activeChatId && chatFriendships[activeChatId]);
+                      if (currentUser?.gender === 'female' && !isAIBotChat) {
+                        return (
+                          <button
+                            type="button"
+                            onClick={handleToggleFriendship}
+                            title={isFriendActive ? "Do'stlashishni bekor qilish (5 moneta yechiladi)" : "Do'stlashish — yigitdan moneta yechilmaydi"}
+                            className={cn(
+                              "px-2.5 py-1.5 rounded-full text-[10px] font-bold flex items-center space-x-1 transition active:scale-95 whitespace-nowrap shrink-0",
+                              isFriendActive
+                                ? "bg-emerald-600 text-white shadow-xs"
+                                : "bg-rose-50 hover:bg-rose-100 text-[#E8474A] border border-rose-200"
+                            )}
+                          >
+                            <Handshake className="w-3.5 h-3.5" />
+                            <span>{isFriendActive ? "Do'stlashilgan ✓" : "Do'stlashish"}</span>
+                          </button>
+                        );
+                      }
+                      return null;
+                    })()}
                     <button 
                       onClick={() => setShowGiftModal(true)} 
                       title="Sovg'a yuborish 🎁"
@@ -2876,14 +3456,41 @@ export default function App() {
                   </div>
                 </div>
 
-                {currentUser?.gender === 'female' && (
-                  <div className="bg-gradient-to-r from-emerald-600 to-teal-600 text-white px-3.5 py-1.5 text-[10px] font-bold flex items-center justify-between shrink-0 shadow-xs">
-                    <span>💎 Har bir javobingiz uchun +6 Almaz ishlab topasiz!</span>
-                    <span className="bg-white/20 px-2 py-0.5 rounded-full text-[9px] uppercase tracking-wider">Hisobingiz: {currentUser?.diamonds ?? 0}</span>
-                  </div>
-                )}
+                {(() => {
+                  const myUid = currentUser?.uid || firebaseUser?.uid;
+                  const otherUid = selectedChatUser?.uid || selectedChatUser?.id;
+                  const activeChatId = (myUid && otherUid) ? [myUid, otherUid].sort().join('_') : '';
+                  const isFriendActive = Boolean(activeChatId && chatFriendships[activeChatId]);
+                  const isAIBotChat = otherUid === ALOV_AI_USER.uid || otherUid === 'user_kamola_006' || otherUid === 'ALOV-006';
 
-                <div className="flex-1 p-4 overflow-y-auto overscroll-contain space-y-3 bg-[#F8F9FA] scrollbar-none scroll-smooth">
+                  if (isFriendActive && !isAIBotChat) {
+                    return (
+                      <div className="bg-emerald-600 text-white px-3.5 py-1.5 text-[10px] font-bold flex items-center justify-between shrink-0 shadow-xs">
+                        <span>🤝 Do'stlashish faol — Yigitdan moneta yechilmaydi</span>
+                        <span className="bg-white/20 px-2 py-0.5 rounded-full text-[9px] whitespace-nowrap">Bepul chat</span>
+                      </div>
+                    );
+                  }
+                  if (currentUser?.gender === 'female') {
+                    return (
+                      <div className="bg-gradient-to-r from-emerald-600 to-teal-600 text-white px-3.5 py-1.5 text-[10px] font-bold flex items-center justify-between shrink-0 shadow-xs">
+                        <span>💎 Har bir javobingiz uchun +5 Almaz limitga qo'shiladi</span>
+                        <span className="bg-white/20 px-2 py-0.5 rounded-full text-[9px] uppercase tracking-wider whitespace-nowrap">Wallet: {currentUser?.diamonds ?? 0}</span>
+                      </div>
+                    );
+                  }
+                  if (!isAIBotChat) {
+                    return (
+                      <div className="bg-amber-50 border-b border-amber-200/70 text-amber-900 px-3.5 py-1.5 text-[10px] font-bold flex items-center justify-between shrink-0">
+                        <span>🪙 Har bir xabar narxi: {MESSAGE_COIN_COST} Moneta</span>
+                        <span className="bg-amber-100 px-2 py-0.5 rounded-full text-[9px] whitespace-nowrap">Balans: {currentUser?.coins ?? 100}</span>
+                      </div>
+                    );
+                  }
+                  return null;
+                })()}
+
+                <div ref={chatMessagesContainerRef} className="flex-1 min-h-0 px-3.5 py-3 overflow-y-auto overscroll-y-contain space-y-2.5 bg-[#F8F9FA] [-webkit-overflow-scrolling:touch]">
                   <AnimatePresence>
                     {(() => {
                       const myUid = currentUser?.uid || firebaseUser?.uid;
@@ -2983,11 +3590,50 @@ export default function App() {
                       </motion.div>
                     ) : null}
                   </AnimatePresence>
-                  <div ref={commentsEndRef} />
                 </div>
 
-                <div className="sticky bottom-0 z-30 p-3 pb-safe bg-white/95 backdrop-blur-md border-t border-slate-100 flex items-end space-x-2 shrink-0 glass">
-                  <label aria-label="Media yuklash" className="p-2.5 rounded-full text-slate-400 hover:bg-slate-50 transition active:scale-90 cursor-pointer">
+                {/* 0%-100% Diamond Limit Bar + 24h Wallet Credit Timer Above Text Bar */}
+                {(() => {
+                  const progressVal = Number(currentUser?.diamondProgress || 0);
+                  const progressPct = getDiamondProgressPercent(progressVal);
+                  const pendingBatches = Array.isArray(currentUser?.pendingDiamondBatches) ? currentUser.pendingDiamondBatches : [];
+                  const pendingTotal = getPendingDiamondsTotal(pendingBatches);
+                  const nextUnlockAt = getNextUnlockTimestamp(pendingBatches);
+                  const countdown = computeCountdownParts(nextUnlockAt, countdownNow);
+
+                  if (currentUser?.gender === 'female') {
+                    return (
+                      <div className="bg-white border-t border-slate-100 px-3.5 pt-2 pb-1.5 shrink-0 space-y-1">
+                        <div className="flex items-center justify-between text-[10px] font-bold">
+                          <span className="text-slate-700 flex items-center gap-1">
+                            <span>💎 Olmos limiti:</span>
+                            <span className="text-cyan-700 font-black">{progressVal} / {DIAMOND_LIMIT_TARGET}</span>
+                          </span>
+                          <span className="text-emerald-600 font-black">{progressPct}%</span>
+                        </div>
+                        <div className="w-full h-2 bg-slate-100 rounded-full overflow-hidden">
+                          <div
+                            className="h-full bg-gradient-to-r from-cyan-500 to-emerald-500 transition-all duration-500 rounded-full"
+                            style={{ width: `${progressPct}%` }}
+                          />
+                        </div>
+                        {pendingTotal > 0 && (
+                          <div className="flex items-center justify-between text-[10px] font-bold text-amber-700 bg-amber-50 px-2.5 py-1 rounded-lg border border-amber-200/80">
+                            <span className="flex items-center gap-1">
+                              <Clock className="w-3 h-3 shrink-0" />
+                              <span>{pendingTotal} 💎 24 soat ichida hisobga qo'shiladi</span>
+                            </span>
+                            <span className="font-mono font-black text-amber-900">{countdown.formatted}</span>
+                          </div>
+                        )}
+                      </div>
+                    );
+                  }
+                  return null;
+                })()}
+
+                <div className="shrink-0 z-20 px-3 py-2.5 pb-safe bg-white border-t border-slate-100 flex items-end space-x-2">
+                  <label aria-label="Media yuklash" className="p-2.5 rounded-full text-slate-400 hover:bg-slate-50 transition active:scale-90 cursor-pointer shrink-0">
                     <Plus className="w-5 h-5" />
                     <input type="file" className="hidden" accept="image/*,video/*,audio/*" onChange={handleMediaUpload} />
                   </label>
@@ -2998,9 +3644,8 @@ export default function App() {
                       value={inputMessage}
                       onFocus={() => {
                         setTimeout(() => {
-                          window.scrollTo(0, 0);
-                          document.body.scrollTop = 0;
-                          commentsEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+                          const el = chatMessagesContainerRef.current;
+                          if (el) el.scrollTop = el.scrollHeight;
                         }, 120);
                       }}
                       onChange={(e) => {
@@ -3045,33 +3690,147 @@ export default function App() {
 
         {/* --- PROFILE TAB --- */}
         {activeTab === 'profile' && (
-          <div className="bg-white rounded-[20px] card-shadow p-5 space-y-4">
-            <div className="flex items-center space-x-4">
-              <img src={currentUser?.avatar || firebaseUser?.photoURL || ''} alt="Avatar" className="w-16 h-16 rounded-full object-cover border-2 border-[#E8474A]" />
-              <div className="flex-1 min-w-0">
-                <h1 className="text-xl font-editorial truncate">{currentUser?.name || firebaseUser?.displayName}</h1>
-                <p className="text-[10px] font-bold text-[#E8474A]">ID: {currentUser?.id}</p>
-                <p className="text-[10px] text-[#6b635c]">{currentUser?.district}, {currentUser?.region}</p>
+          <div className="bg-white rounded-[24px] border border-[rgba(166,36,51,0.1)] shadow-subtle p-5 sm:p-6 space-y-4">
+            {(() => {
+              const profileAvatar = resolveAvatarUrl(currentUser?.avatar || firebaseUser?.photoURL);
+              const profileName = getSafeUserDisplayName(currentUser, firebaseUser?.displayName || 'Profil');
+              return (
+                <div className="flex items-center space-x-4">
+                  {profileAvatar ? (
+                    <img
+                      src={profileAvatar}
+                      alt={profileName}
+                      className="w-18 h-18 rounded-full object-cover border-2 border-[#C93545] shrink-0 shadow-sm"
+                      onError={(e: any) => {
+                        e.currentTarget.style.display = 'none';
+                        const fallbackEl = e.currentTarget.nextElementSibling as HTMLElement | null;
+                        if (fallbackEl) fallbackEl.style.display = 'flex';
+                      }}
+                    />
+                  ) : null}
+                  <div
+                    className={cn(
+                      "w-18 h-18 rounded-full bg-[#FAF4F2] text-[#C93545] font-editorial font-black text-2xl items-center justify-center border-2 border-[#C93545] shrink-0",
+                      profileAvatar ? "hidden" : "flex"
+                    )}
+                  >
+                    {profileName.charAt(0).toUpperCase()}
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <h1 className="text-xl sm:text-2xl font-editorial font-bold truncate text-[#221719]">{profileName}</h1>
+                      {isAdminTelegramUser(currentUser) && (
+                        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-[#221719] text-[#F5D28E] text-[10px] font-bold">
+                          <Crown className="w-3 h-3" />
+                          <span>Admin</span>
+                        </span>
+                      )}
+                    </div>
+                    <p className="text-[11px] font-mono font-bold text-[#C93545]">ID: {currentUser?.id}</p>
+                    <p className="text-[11px] text-[#6B5B5E]">{[currentUser?.district, currentUser?.region].filter(Boolean).join(', ') || "O'zbekiston"}</p>
+                  </div>
+                </div>
+              );
+            })()}
+
+            {/* Admin Full Coins + Full Diamonds Card */}
+            {isAdminTelegramUser(currentUser) && (
+              <div className="grid grid-cols-2 gap-2.5 bg-gradient-to-r from-[#221719] to-[#3A2226] text-white p-3.5 rounded-[18px] border border-[#C89B54]/40 shadow-sm">
+                <div className="bg-white/10 rounded-xl p-2.5 flex items-center justify-between">
+                  <div>
+                    <p className="text-[10px] text-[#F5D28E] font-bold uppercase tracking-wider">Almaz Wallet</p>
+                    <p className="text-sm sm:text-base font-black text-white">💎 Full ({(currentUser?.diamonds ?? ADMIN_FULL_DIAMONDS).toLocaleString()})</p>
+                  </div>
+                </div>
+                <div className="bg-white/10 rounded-xl p-2.5 flex items-center justify-between">
+                  <div>
+                    <p className="text-[10px] text-[#F5D28E] font-bold uppercase tracking-wider">Moneta Balansi</p>
+                    <p className="text-sm sm:text-base font-black text-white">🪙 Full ({(currentUser?.coins ?? ADMIN_FULL_COINS).toLocaleString()})</p>
+                  </div>
+                </div>
               </div>
-            </div>
+            )}
+
+            {/* Face ID Biometric Card */}
+            {currentUser?.faceId?.verified ? (
+              <div className="bg-emerald-50/90 border border-emerald-200 rounded-[18px] p-3.5 space-y-2">
+                <div className="flex items-center justify-between gap-2">
+                  <div className="flex items-center gap-2">
+                    <div className="w-8 h-8 rounded-full bg-emerald-600 text-white flex items-center justify-center shrink-0">
+                      <ScanFace className="w-4 h-4" />
+                    </div>
+                    <div>
+                      <p className="text-xs font-bold text-emerald-950">Face ID Biometrik Tasdiqlangan</p>
+                      <p className="text-[10.5px] text-emerald-800 font-medium">
+                        Aniqlangan jins: <b>{genderToUzLabel(currentUser.faceId.detectedGender || currentUser.gender)}</b> · {currentUser.faceId.confidence ?? 95}%
+                      </p>
+                    </div>
+                  </div>
+                  <span className="px-2 py-0.5 rounded-full bg-emerald-600 text-white text-[9.5px] font-bold shrink-0">
+                    TASDIQLANGAN ✓
+                  </span>
+                </div>
+                <div className="flex flex-wrap items-center justify-between gap-2 text-[10px] text-emerald-800 pt-1 border-t border-emerald-200/70">
+                  <span>Jonlilik: Ko'z harakati · Tabassum ✓</span>
+                  {currentUser.faceId.verifiedAt && (
+                    <span>Sana: {formatFaceIdDateUz(currentUser.faceId.verifiedAt)}</span>
+                  )}
+                </div>
+              </div>
+            ) : isAdminTelegramUser(currentUser) ? (
+              <div className="bg-[#FAF4F2] border border-[#C89B54]/30 rounded-[16px] p-3 flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                  <Crown className="w-4 h-4 text-[#C89B54]" />
+                  <span className="text-xs font-bold text-[#221719]">Admin hisobi (Face ID tekshiruvisiz kirish faol)</span>
+                </div>
+              </div>
+            ) : null}
 
             {/* Public Account Stats (Followers / Following / Likes) */}
-            <div className="grid grid-cols-3 gap-2 text-center bg-[#FAFAFB] p-3 rounded-[14px]">
+            <div className="grid grid-cols-3 gap-2 text-center bg-[#FAF4F2] p-3 rounded-[16px] border border-[rgba(166,36,51,0.08)]">
               <div>
-                <p className="text-sm font-black text-[#E8474A]">{currentUser?.followersCount || 1}</p>
-                <p className="text-[9px] text-slate-500 font-bold">Obunachilar</p>
+                <p className="text-sm font-black text-[#C93545]">{currentUser?.followersCount ?? 0}</p>
+                <p className="text-[9.5px] text-[#6B5B5E] font-bold">Obunachilar</p>
               </div>
               <div>
-                <p className="text-sm font-black text-purple-600">{currentUser?.followingCount || 1}</p>
-                <p className="text-[9px] text-slate-500 font-bold">Obunalar</p>
+                <p className="text-sm font-black text-[#221719]">{currentUser?.followingCount ?? 0}</p>
+                <p className="text-[9.5px] text-[#6B5B5E] font-bold">Obunalar</p>
               </div>
               <div>
-                <p className="text-sm font-black text-pink-600">{currentUser?.likesCount || 5}</p>
-                <p className="text-[9px] text-slate-500 font-bold">Laiklar</p>
+                <p className="text-sm font-black text-[#A62433]">{currentUser?.likesCount ?? 0}</p>
+                <p className="text-[9.5px] text-[#6B5B5E] font-bold">Laiklar</p>
               </div>
             </div>
 
-            <p className="text-xs text-[#57534E] bg-[#FAFAFB] p-3 rounded-[12px]">{currentUser?.bio}</p>
+            {currentUser?.gender === 'female' && !isAdminTelegramUser(currentUser) && (() => {
+              const progressVal = Number(currentUser?.diamondProgress || 0);
+              const progressPct = getDiamondProgressPercent(progressVal);
+              const pendingTotal = getPendingDiamondsTotal(currentUser?.pendingDiamondBatches);
+              const nextUnlockAt = getNextUnlockTimestamp(currentUser?.pendingDiamondBatches);
+              const countdown = computeCountdownParts(nextUnlockAt, countdownNow);
+              return (
+                <div className="bg-cyan-50/70 border border-cyan-200 rounded-[14px] p-3 space-y-1.5">
+                  <div className="flex items-center justify-between text-[11px] font-bold text-cyan-950">
+                    <span>💎 Olmos limiti (0% - 100%)</span>
+                    <span>{progressVal} / {DIAMOND_LIMIT_TARGET} ({progressPct}%)</span>
+                  </div>
+                  <div className="w-full h-2 bg-white rounded-full overflow-hidden border border-cyan-100">
+                    <div
+                      className="h-full bg-gradient-to-r from-cyan-500 to-emerald-500 transition-all duration-500"
+                      style={{ width: `${progressPct}%` }}
+                    />
+                  </div>
+                  {pendingTotal > 0 && (
+                    <p className="text-[10px] font-bold text-amber-800 flex items-center justify-between">
+                      <span>⏳ Walletga qo'shilish vaqti ({pendingTotal} 💎):</span>
+                      <span className="font-mono font-black">{countdown.formatted}</span>
+                    </p>
+                  )}
+                </div>
+              );
+            })()}
+
+            <p className="text-xs text-[#4A3B3D] bg-[#FAF4F2] p-3.5 rounded-[14px] border border-[rgba(166,36,51,0.06)]">{currentUser?.bio}</p>
 
             {/* Privacy Guard Status Badge */}
             <div className="bg-[#FAFAFB] p-3 rounded-[14px] border border-slate-200 flex items-center justify-between">
@@ -3110,6 +3869,16 @@ export default function App() {
               </button>
             </div>
 
+            {isAdminTelegramUser(currentUser) && (
+              <button
+                onClick={() => setShowAdminPanel(true)}
+                className="w-full py-3 rounded-full bg-gradient-to-r from-slate-900 to-slate-800 text-amber-300 font-bold text-xs shadow-md flex items-center justify-center space-x-2"
+              >
+                <Crown className="w-4 h-4" />
+                <span>Admin Panelni Ochish (@Salikh_07)</span>
+              </button>
+            )}
+
             <button 
               onClick={() => {
                 setRegName(currentUser?.name || '');
@@ -3123,7 +3892,7 @@ export default function App() {
                 setRegInstagram(currentUser?.instagram || '');
                 setRegBio(currentUser?.bio || '');
                 setRegAvatar(currentUser?.avatar || '');
-                setRegLocationVisibility(currentUser?.locationVisibility || 'mutual');
+                setRegLocationVisibility(currentUser?.locationVisibility || 'everyone');
                 setShowProfileModal(true);
               }}
               className="w-full py-3 rounded-full bg-slate-900 text-white font-bold text-xs shadow-md flex items-center justify-center space-x-2"
@@ -3134,87 +3903,12 @@ export default function App() {
           </div>
         )}
 
-        {/* --- MAP / XARITA TAB (Fullscreen Edge-to-Edge with OSRM Real Street Routing) --- */}
+        {/* --- MAP / XARITA TAB (Unified Standard Map + Smooth In-Bounds Markers) --- */}
         {activeTab === 'map' && (
-          <div className="absolute inset-0 pb-12 z-30 bg-white flex flex-col">
-            
-            {/* Active Route Info Floating Banner */}
-            {activeRouteUser && routeInfo && (
-              <div className="absolute top-3 left-3 right-3 z-40 bg-white/95 backdrop-blur-md rounded-[20px] p-3 shadow-xl border border-rose-100 flex items-center justify-between animate-fadeIn">
-                <div className="flex items-center space-x-2.5">
-                  <img src={activeRouteUser.avatar} alt={activeRouteUser.name} className="w-10 h-10 rounded-full object-cover border-2 border-[#E8474A]" />
-                  <div>
-                    <h4 className="font-bold text-xs text-slate-900 truncate max-w-[130px]">{activeRouteUser.name} bilan marshrut</h4>
-                    <p className="text-[10px] text-[#E8474A] font-extrabold flex items-center space-x-1">
-                      <Car className="w-3 h-3 inline mr-0.5" />
-                      <span>{routeInfo.distanceKm} km • ~{routeInfo.durationMin} daqiqa</span>
-                    </p>
-                  </div>
-                </div>
-                <button 
-                  onClick={() => {
-                    setActiveRouteUser(null);
-                    setRouteInfo(null);
-                    if (mapPolylineRef.current) {
-                      mapPolylineRef.current.remove();
-                      mapPolylineRef.current = null;
-                    }
-                  }}
-                  className="p-1.5 px-3 rounded-full bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-bold shadow-subtle"
-                >
-                  Yopish
-                </button>
-              </div>
-            )}
-            {/* Live Stream Go Live Button on Map */}
-            <button
-              onClick={() => {
-                if (!firebaseUser && !currentUser) {
-                  setShowAuthModal(true);
-                  return;
-                }
-                setLiveModalMode('broadcaster');
-                setShowLiveModal(true);
-              }}
-              className="absolute top-3 right-3 z-40 bg-gradient-to-r from-red-600 to-rose-600 hover:from-red-500 hover:to-rose-500 text-white shadow-xl px-3.5 py-2 rounded-full flex items-center space-x-1.5 font-bold text-xs transition transform active:scale-95 border border-white/20"
-            >
-              <span className="w-2 h-2 rounded-full bg-white animate-ping" />
-              <Radio className="w-4 h-4" />
-              <span>Jonli Efir</span>
-            </button>
-
-            {/* Filter Button */}
-            <button
-              onClick={() => setShowFilterModal(!showFilterModal)}
-              className="absolute top-14 right-3 z-40 bg-white shadow-lg p-3 rounded-full flex items-center space-x-2 border border-slate-200"
-            >
-              <div className="w-5 h-5 flex items-center justify-center bg-[#E8474A] rounded-full text-white font-bold text-[10px]">F</div>
-            </button>
-
-            {/* Filter Modal */}
-            {showFilterModal && (
-              <div className="absolute inset-0 z-50 bg-black/50 backdrop-blur-sm flex items-center justify-center p-4">
-                <div className="bg-white rounded-3xl p-6 w-full space-y-4 shadow-2xl">
-                    <h3 className="font-bold text-lg">Hudud bo'yicha filtr</h3>
-                    <select value={filterRegion} onChange={(e) => { setFilterRegion(e.target.value); setFilterDistrict('Barchasi'); }} className="w-full p-3 rounded-xl border">
-                        <option value="Barchasi">Barcha viloyatlar</option>
-                        {Object.keys(UZ_LOCATIONS).map((reg, idx) => <option key={`filter_modal_reg_${reg}_${idx}`} value={reg}>{reg}</option>)}
-                    </select>
-                    <select value={filterDistrict} onChange={(e) => setFilterDistrict(e.target.value)} className="w-full p-3 rounded-xl border">
-                        <option value="Barchasi">Barcha tumanlar</option>
-                        {UZ_LOCATIONS[filterRegion]?.map((dist, idx) => <option key={`filter_modal_dist_${dist}_${idx}`} value={dist}>{dist}</option>)}
-                    </select>
-                    <div className="flex space-x-2 pt-2">
-                        <button onClick={() => setShowFilterModal(false)} className="flex-1 p-3 rounded-xl bg-gray-100 font-bold">Yopish</button>
-                        <button onClick={() => { setShowFilterModal(false); /* Filter logic already handled by state */ }} className="flex-1 p-3 rounded-xl bg-[#E8474A] text-white font-bold">Qidirish</button>
-                    </div>
-                </div>
-              </div>
-            )}
-
+          <div className="absolute inset-0 z-30 bg-white flex flex-col overflow-hidden">
             {/* Ghost Mode Notification Banner */}
             {!isLocationEnabled && !activeRouteUser && (
-              <div className="bg-amber-50 border-b border-amber-200 p-2.5 px-3 flex items-center justify-between shrink-0 z-30 text-amber-900 text-xs shadow-sm">
+              <div className="bg-amber-50 border-b border-amber-200 p-2 px-3 flex items-center justify-between shrink-0 z-30 text-amber-900 text-xs shadow-sm">
                 <div className="flex items-center space-x-2 min-w-0">
                   <span className="text-sm">👻</span>
                   <p className="truncate text-[11px] font-medium">Jonli lokatsiyangiz o'chirilgan (Ghost Mode).</p>
@@ -3229,74 +3923,148 @@ export default function App() {
             )}
 
             {gpsStatusMsg && (
-              <div className="bg-rose-50 border-b border-rose-200 p-2 px-3 text-[#E8474A] text-[10px] font-semibold flex items-center justify-between z-30">
-                <div className="flex items-center space-x-1.5">
+              <div className="bg-rose-50 border-b border-rose-200 p-2 px-3 text-[#E8474A] text-[10px] font-semibold flex items-center justify-between shrink-0 z-30 gap-2">
+                <div className="flex items-center space-x-1.5 min-w-0">
                   <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
-                  <span>{gpsStatusMsg}</span>
+                  <span className="truncate">{gpsStatusMsg}</span>
                 </div>
-                <button onClick={() => handleToggleLocation(true)} className="underline text-[10px] font-bold">
+                <button onClick={() => handleToggleLocation(true)} className="underline text-[10px] font-bold shrink-0">
                   Qayta urinish
                 </button>
               </div>
             )}
-            
-            {/* Map Container */}
-            <div className="flex-1 relative z-10 w-full h-full" id="alov-leaflet-map" ref={(node) => {
-              if (node) {
-                if (!mapInstanceRef.current) {
-                  import('leaflet').then(L => {
-                    if (!node || mapInstanceRef.current) return;
-                    const initialLat = userCoords?.lat || 41.311081;
-                    const initialLng = userCoords?.lng || 69.240562;
-                    const map = L.map(node).setView([initialLat, initialLng], 15);
-                    mapInstanceRef.current = map;
-                    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-                      maxZoom: 19,
-                      attribution: '© OpenStreetMap Alov.uz GPS'
-                    }).addTo(map);
-                    setTimeout(() => {
-                      if (mapInstanceRef.current) {
-                        mapInstanceRef.current.invalidateSize();
+
+            {/* Map Viewport Wrapper with overlay controls inside map bounds */}
+            <div className="relative flex-1 min-h-0 w-full overflow-hidden">
+              {/* Active Route Info Floating Banner */}
+              {activeRouteUser && routeInfo && (
+                <div className="absolute top-3 left-3 right-3 z-40 bg-white/95 backdrop-blur-md rounded-[20px] p-3 shadow-xl border border-rose-100 flex items-center justify-between animate-fadeIn">
+                  <div className="flex items-center space-x-2.5 min-w-0">
+                    {resolveAvatarUrl(activeRouteUser.avatar) ? (
+                      <img src={resolveAvatarUrl(activeRouteUser.avatar)} alt={activeRouteUser.name} className="w-10 h-10 rounded-full object-cover border-2 border-[#E8474A] shrink-0" />
+                    ) : (
+                      <div className="w-10 h-10 rounded-full bg-rose-100 text-[#E8474A] font-black text-sm flex items-center justify-center border-2 border-[#E8474A] shrink-0">
+                        {getSafeUserDisplayName(activeRouteUser, 'F').charAt(0).toUpperCase()}
+                      </div>
+                    )}
+                    <div className="min-w-0">
+                      <h4 className="font-bold text-xs text-slate-900 truncate max-w-[130px]">{activeRouteUser.name} bilan marshrut</h4>
+                      <p className="text-[10px] text-[#E8474A] font-extrabold flex items-center space-x-1">
+                        <Car className="w-3 h-3 inline mr-0.5" />
+                        <span>{routeInfo.distanceKm} km • ~{routeInfo.durationMin} daqiqa</span>
+                      </p>
+                    </div>
+                  </div>
+                  <button 
+                    onClick={() => {
+                      setActiveRouteUser(null);
+                      setRouteInfo(null);
+                      if (mapPolylineRef.current) {
+                        mapPolylineRef.current.remove();
+                        mapPolylineRef.current = null;
                       }
-                    }, 250);
-                  });
-                }
-              } else {
-                if (mapInstanceRef.current) {
-                  mapInstanceRef.current.remove();
-                  mapInstanceRef.current = null;
-                  markersRef.current = {};
-                }
-              }
-            }}></div>
+                    }}
+                    className="p-1.5 px-3 rounded-full bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-bold shadow-subtle shrink-0"
+                  >
+                    Yopish
+                  </button>
+                </div>
+              )}
+
+              {/* Live Stream Go Live Button on Map */}
+              <button
+                onClick={() => {
+                  if (!firebaseUser && !currentUser) {
+                    setShowAuthModal(true);
+                    return;
+                  }
+                  setLiveModalMode('broadcaster');
+                  setShowLiveModal(true);
+                }}
+                className="absolute top-3 right-3 z-40 bg-gradient-to-r from-red-600 to-rose-600 hover:from-red-500 hover:to-rose-500 text-white shadow-xl px-3.5 py-2 rounded-full flex items-center space-x-1.5 font-bold text-xs transition transform active:scale-95 border border-white/20"
+              >
+                <span className="w-2 h-2 rounded-full bg-white animate-ping" />
+                <Radio className="w-4 h-4" />
+                <span>Jonli Efir</span>
+              </button>
+
+              {/* Filter Button */}
+              <button
+                onClick={() => setShowFilterModal(!showFilterModal)}
+                title="Hudud bo'yicha filtr"
+                className="absolute top-14 right-3 z-40 bg-white shadow-lg p-2.5 rounded-full flex items-center space-x-2 border border-slate-200"
+              >
+                <div className="w-5 h-5 flex items-center justify-center bg-[#E8474A] rounded-full text-white font-bold text-[10px]">F</div>
+              </button>
+
+              {/* Re-center on My Location Button */}
+              <button
+                type="button"
+                onClick={() => {
+                  if (mapInstanceRef.current && userCoords?.lat && userCoords?.lng) {
+                    mapInstanceRef.current.setView([userCoords.lat, userCoords.lng], 14, { animate: true });
+                  } else {
+                    handleToggleLocation(true);
+                  }
+                }}
+                title="Mening joylashuvim"
+                className="absolute bottom-4 right-3 z-40 bg-white hover:bg-slate-50 text-[#E8474A] shadow-lg p-3 rounded-full border border-slate-200 transition active:scale-95"
+              >
+                <Navigation className="w-4 h-4" />
+              </button>
+
+              {/* Filter Modal */}
+              {showFilterModal && (
+                <div className="absolute inset-0 z-50 bg-black/50 backdrop-blur-sm flex items-center justify-center p-4">
+                  <div className="bg-white rounded-3xl p-6 w-full space-y-4 shadow-2xl">
+                      <h3 className="font-bold text-lg">Hudud bo'yicha filtr</h3>
+                      <select value={filterRegion} onChange={(e) => { setFilterRegion(e.target.value); setFilterDistrict('Barchasi'); }} className="w-full p-3 rounded-xl border">
+                          <option value="Barchasi">Barcha viloyatlar</option>
+                          {Object.keys(UZ_LOCATIONS).map((reg, idx) => <option key={`filter_modal_reg_${reg}_${idx}`} value={reg}>{reg}</option>)}
+                      </select>
+                      <select value={filterDistrict} onChange={(e) => setFilterDistrict(e.target.value)} className="w-full p-3 rounded-xl border">
+                          <option value="Barchasi">Barcha tumanlar</option>
+                          {UZ_LOCATIONS[filterRegion]?.map((dist, idx) => <option key={`filter_modal_dist_${dist}_${idx}`} value={dist}>{dist}</option>)}
+                      </select>
+                      <div className="flex space-x-2 pt-2">
+                          <button onClick={() => setShowFilterModal(false)} className="flex-1 p-3 rounded-xl bg-gray-100 font-bold">Yopish</button>
+                          <button onClick={() => { setShowFilterModal(false); }} className="flex-1 p-3 rounded-xl bg-[#E8474A] text-white font-bold">Qidirish</button>
+                      </div>
+                  </div>
+                </div>
+              )}
+
+              {/* Map Container */}
+              <div className="relative z-10 w-full h-full overflow-hidden" id="alov-leaflet-map" ref={mapContainerRef}></div>
+            </div>
           </div>
 
         )}
 
       </div>
 
-      {/* Sticky Bottom Navigation inside Mockup - Pinned permanently to bottom */}
+      {/* Sticky Bottom Navigation - Pinned permanently to bottom */}
       {activeTab !== 'reels' && !(activeTab === 'chats' && chatView === 'conversation') && (
-        <nav className="sticky bottom-0 left-0 right-0 z-50 shrink-0 bg-white/95 backdrop-blur-xl border-t border-[rgba(28,28,28,0.06)] px-1 py-2.5 flex items-center justify-around shadow-medium">
-          <button onClick={() => setActiveTab('discover')} className={`flex flex-col items-center p-1 ${activeTab === 'discover' ? 'text-[#E8474A] font-bold' : 'text-[#6b635c]'}`}>
-            <Users className="w-4 h-4" />
-            <span className="text-[9px]">Nomzodlar</span>
+        <nav className="sticky bottom-0 left-0 right-0 z-50 shrink-0 bg-white/95 backdrop-blur-xl border-t border-[rgba(166,36,51,0.1)] px-2 py-2.5 flex items-center justify-around shadow-medium">
+          <button onClick={() => setActiveTab('discover')} className={`flex flex-col items-center p-1 transition ${activeTab === 'discover' ? 'text-[#C93545] font-bold' : 'text-[#6B5B5E] hover:text-[#221719]'}`}>
+            <Users className="w-4.5 h-4.5" />
+            <span className="text-[10px]">Nomzodlar</span>
           </button>
-          <button onClick={() => setActiveTab('map')} className={`flex flex-col items-center p-1 ${activeTab === 'map' ? 'text-[#E8474A] font-bold' : 'text-[#6b635c]'}`}>
-            <MapPin className="w-4 h-4" />
-            <span className="text-[9px]">Xarita</span>
+          <button onClick={() => setActiveTab('map')} className={`flex flex-col items-center p-1 transition ${activeTab === 'map' ? 'text-[#C93545] font-bold' : 'text-[#6B5B5E] hover:text-[#221719]'}`}>
+            <MapPin className="w-4.5 h-4.5" />
+            <span className="text-[10px]">Xarita</span>
           </button>
-          <button onClick={() => setActiveTab('reels')} className={`flex flex-col items-center p-1 ${activeTab === 'reels' ? 'text-[#E8474A] font-bold' : 'text-[#6b635c]'}`}>
-            <Video className="w-4 h-4" />
-            <span className="text-[9px]">Efirlar</span>
+          <button onClick={() => setActiveTab('reels')} className={`flex flex-col items-center p-1 transition ${activeTab === 'reels' ? 'text-[#C93545] font-bold' : 'text-[#6B5B5E] hover:text-[#221719]'}`}>
+            <Video className="w-4.5 h-4.5" />
+            <span className="text-[10px]">Efirlar</span>
           </button>
-          <button onClick={() => { setChatView('list'); setActiveTab('chats'); }} className={`flex flex-col items-center p-1 ${activeTab === 'chats' ? 'text-[#E8474A] font-bold' : 'text-[#6b635c]'}`}>
-            <MessageCircle className="w-4 h-4" />
-            <span className="text-[9px]">Chatlar</span>
+          <button onClick={() => { setChatView('list'); setActiveTab('chats'); }} className={`flex flex-col items-center p-1 transition ${activeTab === 'chats' ? 'text-[#C93545] font-bold' : 'text-[#6B5B5E] hover:text-[#221719]'}`}>
+            <MessageCircle className="w-4.5 h-4.5" />
+            <span className="text-[10px]">Chatlar</span>
           </button>
-          <button onClick={() => setActiveTab('profile')} className={`flex flex-col items-center p-1 ${activeTab === 'profile' ? 'text-[#E8474A] font-bold' : 'text-[#6b635c]'}`}>
-            <UserIcon className="w-4 h-4" />
-            <span className="text-[9px]">Profil</span>
+          <button onClick={() => setActiveTab('profile')} className={`flex flex-col items-center p-1 transition ${activeTab === 'profile' ? 'text-[#C93545] font-bold' : 'text-[#6B5B5E] hover:text-[#221719]'}`}>
+            <UserIcon className="w-4.5 h-4.5" />
+            <span className="text-[10px]">Profil</span>
           </button>
         </nav>
       )}
@@ -3306,32 +4074,32 @@ export default function App() {
 
   if (isAuthChecking) {
     return (
-      <div className="min-h-screen bg-[#FFFDF9] flex flex-col items-center justify-center space-y-4">
+      <div className="min-h-screen bg-[#FDFBF9] flex flex-col items-center justify-center space-y-4">
         <div className="relative">
-          <div className="w-12 h-12 rounded-full border-4 border-rose-200 border-t-[#E8474A] animate-spin" />
-          <Flame className="w-5 h-5 text-[#E8474A] absolute inset-0 m-auto animate-pulse" />
+          <div className="w-12 h-12 rounded-full border-4 border-rose-200 border-t-[#C93545] animate-spin" />
+          <Flame className="w-5 h-5 text-[#C93545] absolute inset-0 m-auto animate-pulse" />
         </div>
-        <div className="text-2xl font-black tracking-tight text-slate-900">
-          alov<span className="text-[#E8474A]">.uz</span>
+        <div className="text-2xl font-editorial font-black tracking-tight text-[#221719]">
+          alov<span className="text-[#C93545]">.uz</span>
         </div>
-        <p className="text-xs text-slate-500 font-medium">Sessiya tiklanmoqda...</p>
+        <p className="text-xs text-[#6B5B5E] font-medium">Sessiya tiklanmoqda...</p>
       </div>
     );
   }
 
   return (
-    <div className="min-h-screen bg-[#FAFAFB] text-[#1C1C1C] font-sans selection:bg-[#E8474A] selection:text-white">
+    <div className="min-h-screen bg-[#FDFBF9] text-[#221719] font-sans selection:bg-[#C93545] selection:text-white">
       
       {/* Landing Page */}
       {(!firebaseUser && !currentUser) || activeTab === 'landing' ? (
         <LandingPage onLogin={() => setShowAuthModal(true)} />
       ) : (
-        <div className="min-h-screen bg-gradient-to-br from-slate-950 via-rose-950 to-purple-950 flex flex-col items-center justify-center p-0 md:p-6 overflow-hidden">
+        <div className="min-h-screen bg-gradient-to-br from-[#FBF5F2] via-[#F6ECE7] to-[#EFE1D9] flex flex-col items-center justify-center p-0 md:p-4 overflow-hidden">
           {showUpdateBanner && (
             <motion.div 
               initial={{ y: -50, opacity: 0 }}
               animate={{ y: 0, opacity: 1 }}
-              className="w-full max-w-[390px] bg-amber-50 border-b border-amber-200 p-3 flex items-center justify-between z-[60] shadow-md mb-2 rounded-xl"
+              className="w-full max-w-[1040px] bg-amber-50 border-b border-amber-200 p-3 flex items-center justify-between z-[60] shadow-md mb-2 rounded-xl"
             >
               <div className="flex items-center space-x-2">
                 <RefreshCw className="w-4 h-4 text-amber-600 animate-spin" />
@@ -3345,7 +4113,7 @@ export default function App() {
               </button>
             </motion.div>
           )}
-          <div className="w-full md:w-[390px] h-[100dvh] md:h-[780px] bg-[#FAFAFB] md:rounded-[40px] md:shadow-[0_25px_60px_-15px_rgba(0,0,0,0.7)] md:border-[6px] border-slate-900 relative overflow-hidden flex flex-col">
+          <div className="w-full md:max-w-[1040px] h-[100dvh] md:h-[calc(100dvh-2rem)] bg-[#FDFBF9] md:rounded-[28px] md:shadow-[0_24px_70px_rgba(34,23,25,0.1)] md:border md:border-[rgba(166,36,51,0.12)] relative overflow-hidden flex flex-col">
             {dashboardContent}
           </div>
         </div>
@@ -3353,24 +4121,80 @@ export default function App() {
 
       {/* --- AUTHENTICATION MODAL --- */}
       {showAuthModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-md animate-fadeIn">
-          <div className="bg-white rounded-[32px] max-w-sm w-full p-6 text-left space-y-4 relative shadow-2xl border border-slate-100 max-h-[90vh] overflow-y-auto">
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-[#221719]/60 backdrop-blur-md animate-fadeIn">
+          <div className={cn(
+            "bg-[#FDFBF9] rounded-[32px] w-full p-6 text-left space-y-4 relative shadow-2xl border border-[rgba(166,36,51,0.14)] max-h-[92vh] overflow-y-auto",
+            (authMode === 'google_face_id' || authMode === 'register_face_id' || (authMode === 'telegram' && telegramStep === 'face_id')) ? "max-w-md" : "max-w-sm"
+          )}>
             <button 
               onClick={() => {
                 setShowAuthModal(false);
                 setAuthMode('login');
                 setTelegramStep('input_phone');
               }} 
-              className="absolute top-5 right-5 p-1.5 rounded-full text-slate-400 hover:text-slate-700 hover:bg-slate-100 transition"
+              aria-label="Oynani yopish"
+              className="absolute top-5 right-5 p-1.5 rounded-full text-[#6B5B5E] hover:text-[#221719] hover:bg-[#FAF4F2] transition z-10"
             >
               <X className="w-4 h-4" />
             </button>
 
-            {authMode === 'google_setup' ? (
+            {(authMode === 'google_face_id' || authMode === 'register_face_id' || (authMode === 'telegram' && telegramStep === 'face_id')) ? (
+              <FaceIdVerificationModal
+                apiBaseUrl={getBaseUrl()}
+                userUid={
+                  authMode === 'telegram'
+                    ? pendingTgUser?.uid
+                    : (pendingGoogleUser?.uid || firebaseUser?.uid || currentUser?.uid)
+                }
+                userName={
+                  regName ||
+                  pendingTgUser?.name ||
+                  pendingGoogleUser?.displayName ||
+                  firebaseUser?.displayName ||
+                  'Foydalanuvchi'
+                }
+                onVerified={(result) =>
+                  handleFaceIdVerified(
+                    result,
+                    authMode === 'telegram'
+                      ? 'telegram'
+                      : authMode === 'register_face_id'
+                        ? 'register'
+                        : 'google'
+                  )
+                }
+                onCancel={() => {
+                  setShowAuthModal(false);
+                  setAuthMode('login');
+                  setTelegramStep('input_phone');
+                }}
+              />
+            ) : authMode === 'google_setup' ? (
               <div className="space-y-4">
                 <div className="space-y-1 text-center">
-                  <h2 className="text-xl font-black text-slate-900 tracking-tight">Profilni yakunlash ✨</h2>
-                  <p className="text-xs text-slate-500 font-medium">Google akkauntingiz ulandi. Ma'lumotlarni to'ldiring:</p>
+                  <h2 className="text-xl font-editorial font-black text-[#221719] tracking-tight">Profilni yakunlash ✨</h2>
+                  <p className="text-xs text-[#6B5B5E] font-medium">Face ID tasdiqlandi. Endi qolgan ma'lumotlarni to'ldiring:</p>
+                </div>
+
+                {/* Face ID captured avatar & auto-detected gender banner */}
+                <div className="p-3.5 bg-emerald-50 border border-emerald-200 rounded-2xl flex items-center space-x-3">
+                  <div className="w-14 h-14 rounded-full bg-white shadow-sm overflow-hidden shrink-0 border-2 border-emerald-500 flex items-center justify-center">
+                    {resolveAvatarUrl(regAvatar) ? (
+                      <img src={resolveAvatarUrl(regAvatar)} alt="Face ID" className="w-full h-full object-cover" />
+                    ) : (
+                      <ScanFace className="w-6 h-6 text-emerald-600" />
+                    )}
+                  </div>
+                  <div className="min-w-0 flex-1">
+                    <p className="text-[10px] text-emerald-700 font-bold uppercase tracking-wider flex items-center gap-1">
+                      <ShieldCheck className="w-3.5 h-3.5" />
+                      <span>Face ID Tasdiqlandi</span>
+                    </p>
+                    <p className="text-xs font-black text-[#221719] mt-0.5">
+                      Jins: {genderToUzLabel(pendingFaceId?.detectedGender || regGender)} ({pendingFaceId?.confidence ?? 95}%)
+                    </p>
+                    <p className="text-[10px] text-emerald-700 font-medium">Rasm Face ID dan avtomatik olindi</p>
+                  </div>
                 </div>
 
                 {errorMsg && (
@@ -3381,20 +4205,20 @@ export default function App() {
 
                 <form onSubmit={handleCompleteGoogleRegistration} className="space-y-3">
                   <div>
-                    <label className="block text-[11px] font-bold text-slate-700 mb-1">Ism va Familiya</label>
+                    <label className="block text-[11px] font-bold text-[#221719] mb-1">Ism va Familiya</label>
                     <input 
                       type="text" 
                       value={regName}
                       onChange={(e) => setRegName(e.target.value)}
                       required
-                      className="w-full px-3.5 py-2.5 rounded-xl bg-slate-50 border border-slate-200 text-xs font-semibold text-slate-900 focus:border-red-500 focus:bg-white outline-none"
+                      className="w-full px-3.5 py-2.5 rounded-xl bg-white border border-[rgba(166,36,51,0.15)] text-xs font-semibold text-[#221719] focus:border-[#C93545] outline-none"
                       placeholder="Ismingiz..."
                     />
                   </div>
 
                   <div className="grid grid-cols-2 gap-2">
                     <div>
-                      <label className="block text-[11px] font-bold text-slate-700 mb-1">Tug'ilgan sana</label>
+                      <label className="block text-[11px] font-bold text-[#221719] mb-1">Tug'ilgan sana</label>
                       <input 
                         type="date" 
                         value={regBirthDate}
@@ -3403,24 +4227,20 @@ export default function App() {
                           setRegBirthDate(bDate);
                           setRegAge(String(calculateAge(bDate)));
                         }}
-                        className="w-full px-3 py-2.5 rounded-xl bg-slate-50 border border-slate-200 text-xs font-semibold text-slate-900 focus:border-red-500 focus:bg-white outline-none"
+                        className="w-full px-3 py-2.5 rounded-xl bg-white border border-[rgba(166,36,51,0.15)] text-xs font-semibold text-[#221719] focus:border-[#C93545] outline-none"
                       />
                     </div>
                     <div>
-                      <label className="block text-[11px] font-bold text-slate-700 mb-1">Jinsi</label>
-                      <select 
-                        value={regGender}
-                        onChange={(e) => setRegGender(e.target.value as any)}
-                        className="w-full px-3 py-2.5 rounded-xl bg-slate-50 border border-slate-200 text-xs font-semibold text-slate-900 focus:border-red-500 focus:bg-white outline-none"
-                      >
-                        <option value="female">Ayol 👩</option>
-                        <option value="male">Erkak 👨</option>
-                      </select>
+                      <label className="block text-[11px] font-bold text-[#221719] mb-1">Jins (Face ID)</label>
+                      <div className="w-full px-3 py-2.5 rounded-xl bg-emerald-50 border border-emerald-200 text-xs font-bold text-emerald-900 flex items-center justify-between">
+                        <span>{genderToUzLabel(pendingFaceId?.detectedGender || regGender)}</span>
+                        <Lock className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
+                      </div>
                     </div>
                   </div>
 
                   <div>
-                    <label className="block text-[11px] font-bold text-slate-700 mb-1">Viloyat</label>
+                    <label className="block text-[11px] font-bold text-[#221719] mb-1">Viloyat</label>
                     <select 
                       value={regRegion}
                       onChange={(e) => {
@@ -3429,7 +4249,7 @@ export default function App() {
                         const dists = UZ_LOCATIONS[reg] || [];
                         if (dists.length > 0) setRegDistrict(dists[0]);
                       }}
-                      className="w-full px-3.5 py-2.5 rounded-xl bg-slate-50 border border-slate-200 text-xs font-semibold text-slate-900 focus:border-red-500 focus:bg-white outline-none"
+                      className="w-full px-3.5 py-2.5 rounded-xl bg-white border border-[rgba(166,36,51,0.15)] text-xs font-semibold text-[#221719] focus:border-[#C93545] outline-none"
                     >
                       {Object.keys(UZ_LOCATIONS).map((reg) => (
                         <option key={reg} value={reg}>{reg}</option>
@@ -3438,35 +4258,35 @@ export default function App() {
                   </div>
 
                   <div>
-                    <label className="block text-[11px] font-bold text-slate-700 mb-1">Telegram (Havola / Username)</label>
+                    <label className="block text-[11px] font-bold text-[#221719] mb-1">Telegram (Havola / Username)</label>
                     <input 
                       type="text" 
                       value={regTelegram}
                       onChange={(e) => setRegTelegram(e.target.value)}
-                      className="w-full px-3.5 py-2.5 rounded-xl bg-slate-50 border border-slate-200 text-xs font-semibold text-slate-900 focus:border-red-500 focus:bg-white outline-none"
+                      className="w-full px-3.5 py-2.5 rounded-xl bg-white border border-[rgba(166,36,51,0.15)] text-xs font-semibold text-[#221719] focus:border-[#C93545] outline-none"
                       placeholder="https://t.me/username yoki @username"
                     />
                   </div>
 
                   <div>
-                    <label className="block text-[11px] font-bold text-slate-700 mb-1">Akkaunt uchun Parol (Kirish uchun)</label>
+                    <label className="block text-[11px] font-bold text-[#221719] mb-1">Akkaunt uchun Parol (Kirish uchun)</label>
                     <input 
                       type="password" 
                       value={authPassword}
                       onChange={(e) => setAuthPassword(e.target.value)}
                       required
-                      className="w-full px-3.5 py-2.5 rounded-xl bg-slate-50 border border-slate-200 text-xs font-semibold text-slate-900 focus:border-red-500 focus:bg-white outline-none"
+                      className="w-full px-3.5 py-2.5 rounded-xl bg-white border border-[rgba(166,36,51,0.15)] text-xs font-semibold text-[#221719] focus:border-[#C93545] outline-none"
                       placeholder="••••••••"
                     />
                   </div>
 
                   <div>
-                    <label className="block text-[11px] font-bold text-slate-700 mb-1">Bio / O'zingiz haqingizda</label>
+                    <label className="block text-[11px] font-bold text-[#221719] mb-1">Bio / O'zingiz haqingizda</label>
                     <textarea 
                       value={regBio}
                       onChange={(e) => setRegBio(e.target.value)}
                       rows={2}
-                      className="w-full px-3.5 py-2 rounded-xl bg-slate-50 border border-slate-200 text-xs font-semibold text-slate-900 focus:border-red-500 focus:bg-white outline-none resize-none"
+                      className="w-full px-3.5 py-2 rounded-xl bg-white border border-[rgba(166,36,51,0.15)] text-xs font-semibold text-[#221719] focus:border-[#C93545] outline-none resize-none"
                       placeholder="Qanday insonlarni qidiryapsiz..."
                     />
                   </div>
@@ -3474,7 +4294,7 @@ export default function App() {
                   <button 
                     type="submit"
                     disabled={isLoggingIn}
-                    className="w-full py-3 px-4 rounded-2xl bg-[#E8474A] text-white font-bold text-sm shadow-md hover:bg-[#cb2e31] transition disabled:opacity-60"
+                    className="w-full py-3 px-4 rounded-2xl bg-[#C93545] text-white font-bold text-sm shadow-md hover:bg-[#A62433] transition disabled:opacity-60"
                   >
                     {isLoggingIn ? "Saqlanmoqda..." : "Profilni yaratish va boshlash ✨"}
                   </button>
@@ -3623,8 +4443,8 @@ export default function App() {
             ) : telegramStep === 'profile_setup' ? (
               <div className="space-y-4">
                 <div className="space-y-1 text-center">
-                  <h2 className="text-xl font-black text-slate-900 tracking-tight">Profilni yakunlash ✨</h2>
-                  <p className="text-xs text-slate-500 font-medium">Ma'lumotlaringiz Telegram orqali yuklandi.</p>
+                  <h2 className="text-xl font-editorial font-black text-[#221719] tracking-tight">Profilni yakunlash ✨</h2>
+                  <p className="text-xs text-[#6B5B5E] font-medium">Face ID tasdiqlandi. Endi qolgan ma'lumotlaringizni kiriting.</p>
                 </div>
 
                 {errorMsg && (
@@ -3633,21 +4453,47 @@ export default function App() {
                   </div>
                 )}
 
-                <div className="p-3.5 bg-emerald-50 border border-emerald-100 rounded-2xl flex items-center space-x-3 mb-1">
-                  <div className="w-12 h-12 rounded-full bg-white shadow-sm overflow-hidden shrink-0 border border-emerald-200">
-                    {regAvatar ? (
-                      <img src={regAvatar} alt="" className="w-full h-full object-cover" />
-                    ) : (
-                      <div className="w-full h-full flex items-center justify-center bg-emerald-100 text-emerald-400 font-black text-lg">
-                        {regName?.charAt(0) || 'U'}
-                      </div>
-                    )}
-                  </div>
-                  <div className="min-w-0 flex-1">
-                    <p className="text-[10px] text-emerald-600 font-bold uppercase tracking-wider">Tasdiqlangan Profil</p>
-                    <p className="text-sm font-black text-slate-900 truncate">{regName || 'Foydalanuvchi'}</p>
-                    <p className="text-[10px] text-slate-400">Yoshingiz: 22 (Profil sozlamalarida o'zgartirish mumkin)</p>
-                  </div>
+                <div className="p-3.5 bg-emerald-50 border border-emerald-200 rounded-2xl flex items-center space-x-3 mb-1">
+                  {(() => {
+                    const setupAvatar = resolveAvatarUrl(regAvatar);
+                    const setupDisplayName = regName.trim() || 'Ismingizni kiriting';
+                    return (
+                      <>
+                        <div className="w-14 h-14 rounded-full bg-white shadow-sm overflow-hidden shrink-0 border-2 border-emerald-500 flex items-center justify-center">
+                          {setupAvatar ? (
+                            <img
+                              src={setupAvatar}
+                              alt={setupDisplayName}
+                              className="w-full h-full object-cover"
+                              onError={(e: any) => {
+                                e.currentTarget.style.display = 'none';
+                                const fallbackEl = e.currentTarget.nextElementSibling as HTMLElement | null;
+                                if (fallbackEl) fallbackEl.style.display = 'flex';
+                              }}
+                            />
+                          ) : null}
+                          <div
+                            className={cn(
+                              "w-full h-full items-center justify-center bg-emerald-100 text-emerald-600 font-black text-lg",
+                              setupAvatar ? "hidden" : "flex"
+                            )}
+                          >
+                            {(regName.trim().charAt(0) || 'A').toUpperCase()}
+                          </div>
+                        </div>
+                        <div className="min-w-0 flex-1">
+                          <p className="text-[10px] text-emerald-700 font-bold uppercase tracking-wider flex items-center gap-1">
+                            <ShieldCheck className="w-3.5 h-3.5" />
+                            <span>Face ID Tasdiqlangan Profil</span>
+                          </p>
+                          <p className="text-sm font-black text-[#221719] truncate">{setupDisplayName}</p>
+                          <p className="text-[10.5px] font-bold text-emerald-800">
+                            Aniqlangan jins: {genderToUzLabel(pendingFaceId?.detectedGender || regGender)} ({pendingFaceId?.confidence ?? 95}%)
+                          </p>
+                        </div>
+                      </>
+                    );
+                  })()}
                 </div>
 
                 <form onSubmit={handleCompleteTelegramRegistration} className="space-y-4">
@@ -3661,12 +4507,9 @@ export default function App() {
                       value={regName}
                       onChange={(e) => setRegName(e.target.value)}
                       required
-                      className="w-full px-3.5 py-2.5 rounded-xl bg-slate-50 border border-slate-200 text-xs font-semibold text-slate-900 focus:border-[#E8474A] focus:bg-white outline-none transition-all shadow-xs"
+                      className="w-full px-3.5 py-2.5 rounded-xl bg-white border border-[rgba(166,36,51,0.15)] text-xs font-semibold text-[#221719] focus:border-[#C93545] outline-none transition-all shadow-xs"
                       placeholder="Ismingiz (masalan: Malika)..."
                     />
-                    <p className="text-[10px] text-slate-400 mt-1">
-                      Telegram profilingizda familiya bo'lsa avtomatik qo'shiladi. Familiya shart emas.
-                    </p>
                   </div>
                   <div className="grid grid-cols-2 gap-3">
                     <div>
@@ -3914,8 +4757,21 @@ export default function App() {
               <div className="flex flex-col items-center space-y-3 py-1">
                 <div className="relative group">
                   <div className="absolute -inset-1 bg-gradient-to-tr from-rose-500 via-pink-500 to-amber-500 rounded-full blur-xs opacity-80 group-hover:opacity-100 transition duration-300"></div>
-                  <div className="relative w-24 h-24 rounded-full overflow-hidden border-2 border-white shadow-xl bg-slate-100">
-                    <img src={regAvatar} alt="Avatar Preview" className="w-full h-full object-cover" />
+                  <div className="relative w-24 h-24 rounded-full overflow-hidden border-2 border-white shadow-xl bg-slate-100 flex items-center justify-center">
+                    {resolveAvatarUrl(regAvatar) ? (
+                      <img
+                        src={resolveAvatarUrl(regAvatar)}
+                        alt="Avatar Preview"
+                        className="w-full h-full object-cover"
+                        onError={(e: any) => {
+                          e.currentTarget.style.display = 'none';
+                        }}
+                      />
+                    ) : (
+                      <span className="text-2xl font-black text-rose-500">
+                        {(regName?.trim().charAt(0) || 'A').toUpperCase()}
+                      </span>
+                    )}
                   </div>
                 </div>
                 <label className="cursor-pointer inline-flex items-center space-x-2 bg-gradient-to-r from-red-500 via-pink-500 to-rose-600 hover:from-red-600 hover:to-pink-600 text-white font-bold py-2.5 px-5 rounded-full text-xs shadow-md transition duration-200 hover:scale-105 active:scale-95">
@@ -3999,11 +4855,17 @@ export default function App() {
                 </div>
 
                 <div>
-                  <label className="block text-[11px] font-bold text-slate-700 mb-1">Jins</label>
+                  <label className="block text-[11px] font-bold text-slate-700 mb-1 flex items-center justify-between">
+                    <span>Jins</span>
+                    {currentUser?.faceId?.verified && !isAdminTelegramUser(currentUser) && (
+                      <span className="text-[10px] text-emerald-600 font-bold">Face ID tasdiqlagan 🔒</span>
+                    )}
+                  </label>
                   <select 
                     value={regGender}
                     onChange={(e) => setRegGender(e.target.value as any)}
-                    className="w-full px-3.5 py-3 rounded-xl bg-white border border-gray-300 text-xs font-semibold text-gray-900 focus:border-red-500 focus:ring-1 focus:ring-red-500 transition-all outline-none"
+                    disabled={Boolean(currentUser?.faceId?.verified && !isAdminTelegramUser(currentUser))}
+                    className="w-full px-3.5 py-3 rounded-xl bg-white border border-gray-300 text-xs font-semibold text-gray-900 focus:border-red-500 focus:ring-1 focus:ring-red-500 transition-all outline-none disabled:bg-emerald-50/70 disabled:text-emerald-950"
                   >
                     <option value="female" className="text-gray-900 bg-white font-medium">Ayol / Qiz</option>
                     <option value="male" className="text-gray-900 bg-white font-medium">Erkak / Yigit</option>
@@ -4320,54 +5182,110 @@ export default function App() {
 
       {/* --- PUBLIC USER PROFILE POPUP MODAL (Triggered from Map or Candidate Cards) --- */}
       {selectedProfile && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-md animate-fadeIn">
-          <div className="bg-white rounded-[32px] max-w-sm w-full p-6 space-y-4 relative card-shadow max-h-[90vh] overflow-y-auto border border-slate-100 shadow-2xl text-slate-900">
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-[#221719]/60 backdrop-blur-md animate-fadeIn">
+          <div className="bg-[#FDFBF9] rounded-[32px] max-w-sm w-full p-6 space-y-4 relative card-shadow max-h-[90vh] overflow-y-auto border border-[rgba(166,36,51,0.14)] shadow-2xl text-[#221719]">
             <button 
               onClick={() => setSelectedProfile(null)} 
-              className="absolute top-5 right-5 p-2 rounded-full bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold transition active:scale-90"
+              aria-label="Profilni yopish"
+              className="absolute top-5 right-5 p-2 rounded-full bg-[#FAF4F2] hover:bg-[#F1E2DD] text-[#221719] font-bold transition active:scale-90"
             >
               <X className="w-4 h-4" />
             </button>
 
             <div className="flex items-center space-x-4 pt-1">
-              <div className="relative w-18 h-18 rounded-full overflow-hidden border-2 border-[#E8474A] shrink-0 bg-slate-100 shadow-md">
-                <img 
-                  src={selectedProfile.avatar || 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&q=80&w=600'} 
-                  alt={selectedProfile.name} 
-                  className="w-full h-full object-cover object-center" 
-                  onError={(e: any) => { e.target.src = 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&q=80&w=600'; }}
-                />
-              </div>
+              {(() => {
+                const spAvatar = resolveAvatarUrl(selectedProfile.avatar);
+                const spName = getSafeUserDisplayName(selectedProfile, selectedProfile.name || 'Profil');
+                return (
+                  <div className="relative w-18 h-18 rounded-full overflow-hidden border-2 border-[#C93545] shrink-0 bg-[#FAF4F2] shadow-md flex items-center justify-center">
+                    {spAvatar ? (
+                      <img 
+                        src={spAvatar} 
+                        alt={spName} 
+                        className="w-full h-full object-cover object-center" 
+                        onError={(e: any) => {
+                          e.currentTarget.style.display = 'none';
+                          const fallback = e.currentTarget.nextElementSibling as HTMLElement | null;
+                          if (fallback) fallback.style.display = 'flex';
+                        }}
+                      />
+                    ) : null}
+                    <div
+                      className={cn(
+                        "w-full h-full items-center justify-center bg-[#FAF4F2] text-[#C93545] font-editorial font-black text-2xl",
+                        spAvatar ? "hidden" : "flex"
+                      )}
+                    >
+                      {spName.charAt(0).toUpperCase()}
+                    </div>
+                  </div>
+                );
+              })()}
               <div className="flex-1 min-w-0">
-                <h3 className="text-xl font-editorial font-bold text-slate-900 truncate">{selectedProfile.name}, {selectedProfile.age}</h3>
-                <p className="text-[10px] font-bold text-[#E8474A]">ID: {selectedProfile.id}</p>
-                <p className="text-[11px] text-slate-500 truncate">{selectedProfile.district}, {selectedProfile.region}</p>
+                <h3 className="text-xl font-editorial font-bold text-[#221719] truncate">{selectedProfile.name}, {calculateAge(selectedProfile.birthDate, selectedProfile.age)}</h3>
+                <p className="text-[10.5px] font-mono font-bold text-[#C93545]">ID: {selectedProfile.id}</p>
+                <p className="text-[11px] text-[#6B5B5E] truncate">{selectedProfile.district}, {selectedProfile.region}</p>
               </div>
             </div>
 
-            <div className="grid grid-cols-3 gap-2 text-center bg-[#FAFAFB] p-3 rounded-[16px] border border-slate-100">
+            {/* Face ID Biometric Verification Data inside Public Profile */}
+            {selectedProfile.faceId?.verified ? (
+              <div className="bg-emerald-50 border border-emerald-200 rounded-[18px] p-3.5 space-y-1.5">
+                <div className="flex items-center justify-between">
+                  <span className="inline-flex items-center gap-1.5 text-xs font-bold text-emerald-950">
+                    <ScanFace className="w-4 h-4 text-emerald-600" />
+                    <span>Face ID Biometrik Tasdiq</span>
+                  </span>
+                  <span className="px-2 py-0.5 rounded-full bg-emerald-600 text-white text-[9px] font-bold">
+                    TASDIQLANGAN ✓
+                  </span>
+                </div>
+                <div className="flex items-center justify-between text-[11px] font-semibold text-emerald-900">
+                  <span>Jins: {genderToUzLabel(selectedProfile.faceId.detectedGender || selectedProfile.gender)}</span>
+                  <span className="font-mono">{selectedProfile.faceId.confidence ?? 95}% aniqlik</span>
+                </div>
+                <div className="flex items-center justify-between text-[10px] text-emerald-700">
+                  <span>Jonlilik: Ko'z harakati · Tabassum ✓</span>
+                  {selectedProfile.faceId.verifiedAt && (
+                    <span>{formatFaceIdDateUz(selectedProfile.faceId.verifiedAt)}</span>
+                  )}
+                </div>
+              </div>
+            ) : isAdminTelegramUser(selectedProfile) ? (
+              <div className="bg-amber-50 border border-amber-200 rounded-[16px] p-3 flex items-center gap-2 text-xs font-bold text-amber-900">
+                <Crown className="w-4 h-4 text-amber-600" />
+                <span>Alov.uz Platforma Admini</span>
+              </div>
+            ) : (
+              <div className="bg-[#FAF4F2] border border-[rgba(166,36,51,0.1)] rounded-[16px] p-3 flex items-center justify-between text-xs text-[#6B5B5E]">
+                <span>Jins: <b>{genderToUzLabel(selectedProfile.gender)}</b></span>
+                <span className="text-[10px]">Face ID kutilmoqda</span>
+              </div>
+            )}
+
+            <div className="grid grid-cols-3 gap-2 text-center bg-[#FAF4F2] p-3 rounded-[16px] border border-[rgba(166,36,51,0.08)]">
               <div>
-                <p className="text-sm font-black text-[#E8474A]">{selectedProfile.followersCount || 120}</p>
-                <p className="text-[9px] text-slate-500 font-bold">Obunachilar</p>
+                <p className="text-sm font-black text-[#C93545]">{selectedProfile.followersCount ?? 0}</p>
+                <p className="text-[9.5px] text-[#6B5B5E] font-bold">Obunachilar</p>
               </div>
               <div>
-                <p className="text-sm font-black text-purple-600">{selectedProfile.followingCount || 45}</p>
-                <p className="text-[9px] text-slate-500 font-bold">Obunalar</p>
+                <p className="text-sm font-black text-[#221719]">{selectedProfile.followingCount ?? 0}</p>
+                <p className="text-[9.5px] text-[#6B5B5E] font-bold">Obunalar</p>
               </div>
               <div>
-                <p className="text-sm font-black text-pink-600">{selectedProfile.likesCount || 340}</p>
-                <p className="text-[9px] text-slate-500 font-bold">Laiklar</p>
+                <p className="text-sm font-black text-[#A62433]">{selectedProfile.likesCount ?? 0}</p>
+                <p className="text-[9.5px] text-[#6B5B5E] font-bold">Laiklar</p>
               </div>
             </div>
 
-            <p className="text-xs text-slate-700 bg-[#FAFAFB] p-3.5 rounded-[14px] leading-relaxed border border-slate-100">{selectedProfile.bio || 'Alov.uz da yangi tanishuvlar va suhbatlar uchun.'}</p>
+            <p className="text-xs text-[#4A3B3D] bg-[#FAF4F2] p-3.5 rounded-[14px] leading-relaxed border border-[rgba(166,36,51,0.08)]">{selectedProfile.bio || 'Alov.uz da yangi tanishuvlar va suhbatlar uchun.'}</p>
 
             <div className="flex space-x-2 pt-1">
               <button 
-                onClick={() => handleToggleFollow(selectedProfile.id)} 
-                className={`flex-1 py-2.5 rounded-full font-bold text-xs shadow-sm transition-all active:scale-95 ${followingIds.includes(selectedProfile.id) ? 'bg-slate-200 text-slate-800' : 'bg-[#E8474A] text-white hover:bg-[#CB2E31]'}`}
+                onClick={() => handleToggleFollow(selectedProfile.uid || selectedProfile.id)} 
+                className={`flex-1 py-2.5 rounded-full font-bold text-xs shadow-sm transition-all active:scale-95 ${(followingIds.includes(selectedProfile.uid) || followingIds.includes(selectedProfile.id)) ? 'bg-slate-200 text-slate-800' : 'bg-[#E8474A] text-white hover:bg-[#CB2E31]'}`}
               >
-                {followingIds.includes(selectedProfile.id) ? 'Obuna bo\'lingan' : '+ Obuna'}
+                {(followingIds.includes(selectedProfile.uid) || followingIds.includes(selectedProfile.id)) ? 'Obuna bo\'lingan' : '+ Obuna'}
               </button>
               <button 
                 onClick={() => {
@@ -4694,6 +5612,24 @@ export default function App() {
             </form>
           </div>
         </div>
+      )}
+
+      {/* --- ADMIN PANEL MODAL (@Salikh_07) --- */}
+      {showAdminPanel && isAdminTelegramUser(currentUser) && (
+        <AdminPanelModal
+          currentUser={currentUser}
+          apiBaseUrl={getBaseUrl()}
+          onClose={() => setShowAdminPanel(false)}
+          onUserUpdated={(updatedUser) => {
+            if (updatedUser?.uid === currentUser?.uid) {
+              setCurrentUser(updatedUser);
+              try {
+                localStorage.setItem('alov_current_user', JSON.stringify(updatedUser));
+                localStorage.setItem('alov_user_' + updatedUser.uid, JSON.stringify(updatedUser));
+              } catch (e) {}
+            }
+          }}
+        />
       )}
 
     </div>

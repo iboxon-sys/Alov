@@ -542,7 +542,7 @@ export const OneOnOneCallModal: React.FC<OneOnOneCallModalProps> = ({
               <div className="relative">
                 <div className="w-28 h-28 rounded-full overflow-hidden border-4 border-rose-500/80 shadow-[0_0_40px_rgba(244,63,94,0.6)] animate-pulse">
                   <img 
-                    src={remoteUser.avatar || 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&q=80&w=600'} 
+                    src={remoteUser.avatar || '/assets/aistudio/image_e20a1307.png'} 
                     alt={remoteUser.name} 
                     className="w-full h-full object-cover"
                   />

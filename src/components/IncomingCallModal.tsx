@@ -55,7 +55,7 @@ export const IncomingCallModal: React.FC<IncomingCallModalProps> = ({
           <div className="flex items-center space-x-3 min-w-0 pr-2">
             <div className="relative shrink-0">
               <img 
-                src={caller.avatar || 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&q=80&w=600'} 
+                src={caller.avatar || '/assets/aistudio/image_e20a1307.png'} 
                 alt={caller.name} 
                 className="w-12 h-12 rounded-full object-cover border-2 border-emerald-400"
               />
@@ -113,7 +113,7 @@ export const IncomingCallModal: React.FC<IncomingCallModalProps> = ({
             <div className="absolute -inset-6 rounded-full border border-emerald-500/20 animate-pulse" />
             <div className="relative w-28 h-28 rounded-full overflow-hidden border-4 border-emerald-400/80 shadow-[0_0_35px_rgba(16,185,129,0.5)]">
               <img 
-                src={caller.avatar || 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&q=80&w=600'} 
+                src={caller.avatar || '/assets/aistudio/image_e20a1307.png'} 
                 alt={caller.name} 
                 className="w-full h-full object-cover"
               />

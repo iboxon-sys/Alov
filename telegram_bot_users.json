@@ -1,1 +1,56 @@
-{}
+{
+  "salikh_07": {
+    "chatId": 6621230534,
+    "username": "salikh_07",
+    "phone": "07",
+    "firstName": "Salikh",
+    "lastName": "",
+    "avatar": "/api/telegram/avatar/6621230534?v=1794586557877",
+    "updatedAt": 1794587768240
+  },
+  "@salikh_07": {
+    "chatId": 6621230534,
+    "username": "salikh_07",
+    "phone": "07",
+    "firstName": "Salikh",
+    "lastName": "",
+    "avatar": "/api/telegram/avatar/6621230534?v=1794586557877",
+    "updatedAt": 1794587768240
+  },
+  "https://t.me/salikh_07": {
+    "chatId": 6621230534,
+    "username": "salikh_07",
+    "phone": "07",
+    "firstName": "Salikh",
+    "lastName": "",
+    "avatar": "/api/telegram/avatar/6621230534?v=1794586557877",
+    "updatedAt": 1794587768240
+  },
+  "6621230534": {
+    "chatId": 6621230534,
+    "username": "salikh_07",
+    "phone": "07",
+    "firstName": "Salikh",
+    "lastName": "",
+    "avatar": "/api/telegram/avatar/6621230534?v=1794586557877",
+    "updatedAt": 1794587768240
+  },
+  "07": {
+    "chatId": 6621230534,
+    "username": "salikh_07",
+    "phone": "07",
+    "firstName": "Salikh",
+    "lastName": "",
+    "avatar": "/api/telegram/avatar/6621230534?v=1794586557877",
+    "updatedAt": 1794587768240
+  },
+  "+07": {
+    "chatId": 6621230534,
+    "username": "salikh_07",
+    "phone": "07",
+    "firstName": "Salikh",
+    "lastName": "",
+    "avatar": "/api/telegram/avatar/6621230534?v=1794586557877",
+    "updatedAt": 1794587768240
+  }
+}

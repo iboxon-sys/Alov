@@ -2774,6 +2774,10 @@ Suhbatlashish qoidalaringiz:
     res.json({ success: true, chats: userChats });
   });
 
+  app.get('/robots.txt', (_req, res) => {
+    res.type('text/plain').send('User-agent: *\nAllow: /\nSitemap: https://alov.uz/sitemap.xml\n');
+  });
+
   // Setup Vite in development or static serve in production
   if (!isProduction) {
     const vite = await createViteServer({

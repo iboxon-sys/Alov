@@ -421,7 +421,13 @@ export default function App() {
   }, [currentUser?.uid, firebaseUser?.uid, selectedChatUser?.uid, selectedChatUser?.id]);
 
   useEffect(() => {
-    const socket = io(getBaseUrl());
+    const socket = io(getBaseUrl(), {
+      reconnection: true,
+      reconnectionAttempts: 20,
+      reconnectionDelay: 2000,
+      timeout: 10000,
+      transports: ['websocket', 'polling'],
+    });
     socketRef.current = socket;
 
     const registerSocketUser = () => {

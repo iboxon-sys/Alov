@@ -1083,17 +1083,17 @@ export const PostsFeed: React.FC<PostsFeedProps> = ({
                 )}
 
                 {post.type === 'video' && (
-                  <div className="px-4 sm:px-5 pb-3">
+                  <div className="w-full bg-black">
                     {resolvedEmbedUrl ? (
                       <div
-                        className={`relative w-full rounded-2xl overflow-hidden bg-black ${
-                          isVertical ? 'aspect-[9/16] max-w-[340px] mx-auto' : 'aspect-video'
+                        className={`relative w-full overflow-hidden bg-black ${
+                          isVertical ? 'aspect-[9/16] max-w-[360px] mx-auto' : 'aspect-video w-full'
                         }`}
                       >
                         <iframe
                           src={resolvedEmbedUrl}
                           title={post.caption || 'Video'}
-                          className="w-full h-full border-0"
+                          className="w-full h-full border-0 outline-none"
                           allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
                           allowFullScreen
                         />
@@ -1104,7 +1104,7 @@ export const PostsFeed: React.FC<PostsFeedProps> = ({
                         controls
                         playsInline
                         preload="metadata"
-                        className="w-full max-h-[480px] rounded-2xl bg-[#1A1113] object-contain border border-[#F2E8E6]"
+                        className="w-full max-h-[520px] bg-black object-contain mx-auto"
                       />
                     ) : null}
                   </div>

@@ -251,7 +251,13 @@ export const LiveStreamModal: React.FC<LiveStreamModalProps> = ({
   useEffect(() => {
     if (!activeStreamId) return;
 
-    const socket = io(getBaseUrl());
+    const socket = io(getBaseUrl(), {
+      reconnection: true,
+      reconnectionAttempts: 15,
+      reconnectionDelay: 2000,
+      timeout: 10000,
+      transports: ['websocket', 'polling'],
+    });
     liveSocketRef.current = socket;
 
     socket.emit('join_live_stream', { streamId: activeStreamId, user: currentUser });

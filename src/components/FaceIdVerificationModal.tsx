@@ -39,18 +39,69 @@ interface FaceIdVerificationModalProps {
   onCancel?: () => void;
 }
 
-let modelsLoadedPromise: Promise<void> | null = null;
+let coreModelsPromise: Promise<void> | null = null;
+let extraModelsPromise: Promise<void> | null = null;
+let extraModelsLoaded = false;
 
-async function ensureFaceModelsLoaded(): Promise<void> {
-  if (!modelsLoadedPromise) {
-    modelsLoadedPromise = Promise.all([
-      faceapi.nets.tinyFaceDetector.loadFromUri('/face-models'),
-      faceapi.nets.faceLandmark68TinyNet.loadFromUri('/face-models'),
-      faceapi.nets.faceExpressionNet.loadFromUri('/face-models'),
-      faceapi.nets.ageGenderNet.loadFromUri('/face-models'),
-    ]).then(() => undefined);
+async function ensureCoreFaceModelsLoaded(): Promise<void> {
+  if (!coreModelsPromise) {
+    coreModelsPromise = (async () => {
+      try {
+        await (faceapi.tf as any)?.ready?.();
+        await Promise.all([
+          faceapi.nets.tinyFaceDetector.loadFromUri('/face-models'),
+          faceapi.nets.faceLandmark68TinyNet.loadFromUri('/face-models'),
+        ]);
+      } catch (err) {
+        coreModelsPromise = null;
+        throw err;
+      }
+    })();
   }
-  return modelsLoadedPromise;
+  return coreModelsPromise;
+}
+
+function ensureExtraFaceModelsLoaded(): Promise<void> {
+  if (extraModelsLoaded) return Promise.resolve();
+  if (!extraModelsPromise) {
+    extraModelsPromise = (async () => {
+      try {
+        await Promise.all([
+          faceapi.nets.faceExpressionNet.loadFromUri('/face-models'),
+          faceapi.nets.ageGenderNet.loadFromUri('/face-models'),
+        ]);
+        extraModelsLoaded = true;
+      } catch {
+        extraModelsPromise = null;
+      }
+    })();
+  }
+  return extraModelsPromise;
+}
+
+function waitForVideoDimensions(video: HTMLVideoElement, timeoutMs = 3500): Promise<boolean> {
+  if (video.videoWidth > 0 && video.videoHeight > 0 && video.readyState >= 2) {
+    return Promise.resolve(true);
+  }
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = (ok: boolean) => {
+      if (settled) return;
+      settled = true;
+      video.removeEventListener('loadedmetadata', onMeta);
+      video.removeEventListener('playing', onMeta);
+      window.clearInterval(pollId);
+      window.clearTimeout(timerId);
+      resolve(ok);
+    };
+    const onMeta = () => {
+      if (video.videoWidth > 0 && video.videoHeight > 0) finish(true);
+    };
+    video.addEventListener('loadedmetadata', onMeta);
+    video.addEventListener('playing', onMeta);
+    const pollId = window.setInterval(onMeta, 80);
+    const timerId = window.setTimeout(() => finish(video.videoWidth > 0), timeoutMs);
+  });
 }
 
 export const FaceIdVerificationModal: React.FC<FaceIdVerificationModalProps> = ({
@@ -61,6 +112,7 @@ export const FaceIdVerificationModal: React.FC<FaceIdVerificationModalProps> = (
   onCancel,
 }) => {
   const videoRef = useRef<HTMLVideoElement>(null);
+  const frameCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const loopTimerRef = useRef<number | null>(null);
   const blinkStateRef = useRef<BlinkTrackerState>(createBlinkTrackerState());
@@ -83,6 +135,17 @@ export const FaceIdVerificationModal: React.FC<FaceIdVerificationModalProps> = (
   const [isAnalyzingServer, setIsAnalyzingServer] = useState(false);
   const [retrySeed, setRetrySeed] = useState(0);
 
+  // Refs synced cleanly so detection loop never tears down & restarts mid-blink
+  const phaseRef = useRef(phase);
+  phaseRef.current = phase;
+  const faceDetectedRef = useRef(faceDetected);
+  faceDetectedRef.current = faceDetected;
+  const blinkVerifiedRef = useRef(blinkVerified);
+  blinkVerifiedRef.current = blinkVerified;
+  const smileVerifiedRef = useRef(smileVerified);
+  smileVerifiedRef.current = smileVerified;
+  const latestHappyRef = useRef(0);
+
   // Stop camera helper
   const stopCamera = () => {
     if (loopTimerRef.current !== null) {
@@ -102,46 +165,69 @@ export const FaceIdVerificationModal: React.FC<FaceIdVerificationModalProps> = (
     const init = async () => {
       setCameraError('');
       setCameraReady(false);
-      try {
-        await ensureFaceModelsLoaded();
-        if (!active) return;
-        setModelsReady(true);
+      setModelsReady(false);
+      blinkStateRef.current = createBlinkTrackerState();
+      genderVotesRef.current = [];
+      latestHappyRef.current = 0;
 
-        if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-          setCameraError("Qurilmangiz kamerani qo'llab-quvvatlamaydi yoki xavfsiz ulanish (HTTPS) talab etiladi.");
-          return;
-        }
+      if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+        setCameraError("Qurilmangiz kamerani qo'llab-quvvatlamaydi yoki xavfsiz ulanish (HTTPS) talab etiladi.");
+        return;
+      }
 
-        const stream = await navigator.mediaDevices.getUserMedia({
-          video: {
-            facingMode: 'user',
-            width: { ideal: 720 },
-            height: { ideal: 960 },
-          },
-          audio: false,
+      // Load fast core face + tiny landmark models first (~200ms), then extra models in background
+      const modelPromise = ensureCoreFaceModelsLoaded()
+        .then(() => {
+          if (active) setModelsReady(true);
+          void ensureExtraFaceModelsLoaded();
+        })
+        .catch(() => {
+          if (active) {
+            setCameraError("Biometrik modelni yuklashda muammo yuz berdi. Internetni tekshirib qayta urining.");
+          }
         });
 
-        if (!active) {
-          stream.getTracks().forEach((t) => t.stop());
-          return;
-        }
+      const cameraPromise = (async () => {
+        try {
+          const stream = await navigator.mediaDevices.getUserMedia({
+            video: {
+              facingMode: 'user',
+              width: { ideal: 640 },
+              height: { ideal: 800 },
+            },
+            audio: false,
+          });
 
-        streamRef.current = stream;
-        if (videoRef.current) {
-          videoRef.current.srcObject = stream;
-          await videoRef.current.play().catch(() => {});
-          if (active) setCameraReady(true);
+          if (!active) {
+            stream.getTracks().forEach((t) => t.stop());
+            return;
+          }
+
+          streamRef.current = stream;
+          const videoEl = videoRef.current;
+          if (videoEl) {
+            videoEl.srcObject = stream;
+            await videoEl.play().catch(() => {});
+            const ready = await waitForVideoDimensions(videoEl);
+            if (active && ready) {
+              setCameraReady(true);
+            } else if (active && !ready) {
+              setCameraError("Kamera tasviri kelmadi. Boshqa ilova kamerani band qilmaganligini tekshiring.");
+            }
+          }
+        } catch (err: any) {
+          if (!active) return;
+          const msg =
+            err?.name === 'NotAllowedError' || err?.name === 'PermissionDeniedError'
+              ? "Kameraga ruxsat berilmadi. Face ID dan o'tish uchun brauzerda kamera ruxsatini yoqing."
+              : err?.name === 'NotFoundError' || err?.name === 'DevicesNotFoundError'
+              ? "Old kamera topilmadi. Iltimos, kamera ulanganligini tekshiring."
+              : "Kamerani ishga tushirishda xatolik yuz berdi. Qayta urinib ko'ring.";
+          setCameraError(msg);
         }
-      } catch (err: any) {
-        if (!active) return;
-        const msg =
-          err?.name === 'NotAllowedError'
-            ? "Kameraga ruxsat berilmadi. Face ID dan o'tish uchun brauzerda kamera ruxsatini yoqing."
-            : err?.name === 'NotFoundError'
-            ? "Old kamera topilmadi. Iltimos, kamera ulanganligini tekshiring."
-            : "Kamerani ishga tushirishda xatolik yuz berdi. Qayta urinib ko'ring.";
-        setCameraError(msg);
-      }
+      })();
+
+      await Promise.allSettled([modelPromise, cameraPromise]);
     };
 
     init();
@@ -153,95 +239,149 @@ export const FaceIdVerificationModal: React.FC<FaceIdVerificationModalProps> = (
     };
   }, [retrySeed]);
 
-  // Real-time biometric landmark, blink, smile & gender detection loop
+  // Continuous low-latency biometric landmark + throttled gender/expression loop
   useEffect(() => {
-    if (!modelsReady || !cameraReady || phase === 'captured_preview') return;
+    if (!modelsReady || !cameraReady) return;
 
     let cancelled = false;
-    let localFaceSeen = false;
-    let localBlink = blinkVerified;
-    let localSmile = smileVerified;
+    let frameCounter = 0;
+    let consecutiveMisses = 0;
+
+    if (!frameCanvasRef.current) {
+      frameCanvasRef.current = document.createElement('canvas');
+    }
 
     const tick = async () => {
       if (cancelled || !mountedRef.current) return;
+
+      const currentPhase = phaseRef.current;
+      if (currentPhase === 'captured_preview') {
+        loopTimerRef.current = window.setTimeout(tick, 220);
+        return;
+      }
+
       const video = videoRef.current;
+      const offscreen = frameCanvasRef.current;
 
-      if (video && video.readyState >= 2 && video.videoWidth > 0) {
+      if (video && offscreen && video.readyState >= 2 && video.videoWidth > 0 && video.videoHeight > 0) {
         try {
-          const detection = await faceapi
-            .detectSingleFace(
-              video,
-              new faceapi.TinyFaceDetectorOptions({
-                inputSize: 224,
-                scoreThreshold: 0.42,
-              })
-            )
-            .withFaceLandmarks(true)
-            .withFaceExpressions()
-            .withAgeAndGender();
+          const targetW = 320;
+          const targetH = Math.max(180, Math.round((targetW * video.videoHeight) / video.videoWidth));
+          if (offscreen.width !== targetW || offscreen.height !== targetH) {
+            offscreen.width = targetW;
+            offscreen.height = targetH;
+          }
+          const ctx = offscreen.getContext('2d', { willReadFrequently: true });
+          if (ctx) {
+            ctx.drawImage(video, 0, 0, targetW, targetH);
 
-          if (!cancelled && mountedRef.current) {
-            if (detection) {
-              if (!localFaceSeen) {
-                localFaceSeen = true;
-                setFaceDetected(true);
-              }
+            // 1. Fast face + 68 tiny landmarks every tick (~40–80ms) so blinks are never missed
+            const baseDet = await faceapi
+              .detectSingleFace(
+                offscreen,
+                new faceapi.TinyFaceDetectorOptions({
+                  inputSize: 224,
+                  scoreThreshold: 0.24,
+                })
+              )
+              .withFaceLandmarks(true);
 
-              // Accumulate gender votes continuously
-              if (detection.gender === 'male' || detection.gender === 'female') {
-                genderVotesRef.current.push({
-                  gender: detection.gender,
-                  probability: Number(detection.genderProbability) || 0.7,
-                });
-                if (genderVotesRef.current.length > 30) {
-                  genderVotesRef.current.shift();
+            if (!cancelled && mountedRef.current) {
+              if (baseDet) {
+                consecutiveMisses = 0;
+                frameCounter += 1;
+
+                if (!faceDetectedRef.current) {
+                  faceDetectedRef.current = true;
+                  setFaceDetected(true);
                 }
-                const resolved = resolveDetectedGender(genderVotesRef.current);
-                setDetectedGender(resolved.gender);
-                setGenderConfidence(resolved.confidence);
-              }
 
-              // Landmark blink & smile liveness checks (only needed until unlocked)
-              if (phase === 'scanning') {
-                const pts = detection.landmarks.positions.map((p) => ({ x: p.x, y: p.y }));
-                if (!localBlink) {
-                  const { avgEAR } = computeAverageEAR(pts);
-                  blinkStateRef.current = updateBlinkTracker(blinkStateRef.current, avgEAR);
-                  if (blinkStateRef.current.blinkDetected) {
-                    localBlink = true;
-                    setBlinkVerified(true);
+                // 2. Run heavier expression + age/gender on first detected frame and every 3rd frame once loaded
+                if (extraModelsLoaded && (frameCounter === 1 || frameCounter % 3 === 0 || genderVotesRef.current.length === 0)) {
+                  try {
+                    const fullDet = await faceapi
+                      .detectSingleFace(
+                        offscreen,
+                        new faceapi.TinyFaceDetectorOptions({
+                          inputSize: 224,
+                          scoreThreshold: 0.24,
+                        })
+                      )
+                      .withFaceLandmarks(true)
+                      .withFaceExpressions()
+                      .withAgeAndGender();
+
+                    if (fullDet && !cancelled && mountedRef.current) {
+                      if (fullDet.gender === 'male' || fullDet.gender === 'female') {
+                        genderVotesRef.current.push({
+                          gender: fullDet.gender,
+                          probability: Number(fullDet.genderProbability) || 0.72,
+                        });
+                        if (genderVotesRef.current.length > 30) {
+                          genderVotesRef.current.shift();
+                        }
+                        const resolved = resolveDetectedGender(genderVotesRef.current);
+                        setDetectedGender(resolved.gender);
+                        setGenderConfidence(resolved.confidence);
+                      }
+                      const happyVal = Number((fullDet.expressions as any)?.happy || 0);
+                      if (Number.isFinite(happyVal)) {
+                        latestHappyRef.current = happyVal;
+                      }
+                    }
+                  } catch {
+                    // Continue smoothly using fast landmarks even if secondary classifier skips a frame
                   }
                 }
 
-                if (!localSmile) {
-                  const happyProb = Number((detection.expressions as any)?.happy || 0);
-                  const smileRes = computeSmileMetrics(pts, happyProb);
-                  if (smileRes.isSmiling) {
-                    localSmile = true;
-                    setSmileVerified(true);
+                // 3. Landmark blink & smile liveness checks during scanning
+                if (phaseRef.current === 'scanning') {
+                  const pts = baseDet.landmarks.positions.map((p) => ({ x: p.x, y: p.y }));
+
+                  if (!blinkVerifiedRef.current) {
+                    const { avgEAR } = computeAverageEAR(pts);
+                    blinkStateRef.current = updateBlinkTracker(blinkStateRef.current, avgEAR);
+                    if (blinkStateRef.current.blinkDetected) {
+                      blinkVerifiedRef.current = true;
+                      setBlinkVerified(true);
+                    }
+                  }
+
+                  if (!smileVerifiedRef.current) {
+                    const smileRes = computeSmileMetrics(pts, latestHappyRef.current);
+                    if (smileRes.isSmiling) {
+                      smileVerifiedRef.current = true;
+                      setSmileVerified(true);
+                    }
+                  }
+
+                  if (faceDetectedRef.current && blinkVerifiedRef.current && smileVerifiedRef.current) {
+                    // Turn ring emerald green and let user manually choose pose & take photo
+                    phaseRef.current = 'verified_ready';
+                    setPhase('verified_ready');
                   }
                 }
-
-                if (localFaceSeen && localBlink && localSmile) {
-                  // Turn ring emerald green and wait for the user to manually take their pose photo
-                  setPhase('verified_ready');
+              } else {
+                consecutiveMisses += 1;
+                if (consecutiveMisses >= 8 && phaseRef.current === 'scanning' && faceDetectedRef.current) {
+                  faceDetectedRef.current = false;
+                  setFaceDetected(false);
                 }
               }
-            } else if (phase === 'scanning' && !localFaceSeen) {
-              setFaceDetected(false);
             }
           }
         } catch {
-          // Skip transient frame errors silently
+          // Skip transient frame hiccups without killing loop
         }
       }
 
       if (!cancelled && mountedRef.current) {
-        loopTimerRef.current = window.setTimeout(tick, 110);
+        const nextDelay = phaseRef.current === 'verified_ready' ? 220 : 65;
+        loopTimerRef.current = window.setTimeout(tick, nextDelay);
       }
     };
 
-    loopTimerRef.current = window.setTimeout(tick, 120);
+    loopTimerRef.current = window.setTimeout(tick, 60);
 
     return () => {
       cancelled = true;
@@ -250,7 +390,7 @@ export const FaceIdVerificationModal: React.FC<FaceIdVerificationModalProps> = (
         loopTimerRef.current = null;
       }
     };
-  }, [modelsReady, cameraReady, phase, blinkVerified, smileVerified]);
+  }, [modelsReady, cameraReady]);
 
   const handleManualCapture = async () => {
     const video = videoRef.current;
@@ -290,6 +430,7 @@ export const FaceIdVerificationModal: React.FC<FaceIdVerificationModalProps> = (
 
     const dataUrl = canvas.toDataURL('image/jpeg', 0.9);
     setCapturedPhotoDataUrl(dataUrl);
+    phaseRef.current = 'captured_preview';
     setPhase('captured_preview');
 
     // Optional server Gemini vision confirmation
@@ -324,6 +465,7 @@ export const FaceIdVerificationModal: React.FC<FaceIdVerificationModalProps> = (
   const handleRetakePhoto = () => {
     setCapturedPhotoDataUrl('');
     // Stay in verified_ready green mode so the user can smoothly take another pose photo
+    phaseRef.current = 'verified_ready';
     setPhase('verified_ready');
     if (videoRef.current && streamRef.current) {
       videoRef.current.srcObject = streamRef.current;
@@ -442,6 +584,7 @@ export const FaceIdVerificationModal: React.FC<FaceIdVerificationModalProps> = (
         ) : (
           <video
             ref={videoRef}
+            autoPlay
             playsInline
             muted
             className="w-full h-full object-cover -scale-x-100"
@@ -476,12 +619,17 @@ export const FaceIdVerificationModal: React.FC<FaceIdVerificationModalProps> = (
               {isGreenVerified ? (
                 <>
                   <CheckCircle2 className="w-3.5 h-3.5 shrink-0" />
-                  <span>Face ID Tasdiqlandi (Yashil)</span>
+                  <span>Face ID Tasdiqlandi</span>
                 </>
-              ) : !modelsReady || !cameraReady ? (
+              ) : !cameraReady ? (
                 <>
                   <RefreshCw className="w-3.5 h-3.5 animate-spin shrink-0" />
-                  <span>Kamera tayyorlanmoqda...</span>
+                  <span>Kamera yoqilmoqda...</span>
+                </>
+              ) : !modelsReady ? (
+                <>
+                  <RefreshCw className="w-3.5 h-3.5 animate-spin shrink-0" />
+                  <span>Skaner tayyorlanmoqda...</span>
                 </>
               ) : (
                 <>
@@ -496,7 +644,7 @@ export const FaceIdVerificationModal: React.FC<FaceIdVerificationModalProps> = (
                 data-testid="faceid-detected-gender"
                 className="px-2.5 py-1.5 rounded-full bg-white/92 backdrop-blur-md text-[#221719] text-[10.5px] font-extrabold shadow-sm"
               >
-                {detectedGender === 'female' ? '👩 Qiz' : '👨 Yigit'} · {genderConfidence}%
+                {detectedGender === 'female' ? 'Qiz' : 'Yigit'} · {genderConfidence}%
               </div>
             )}
           </div>
@@ -584,7 +732,7 @@ export const FaceIdVerificationModal: React.FC<FaceIdVerificationModalProps> = (
             className="w-full py-3.5 px-5 rounded-2xl bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-700 hover:to-teal-700 text-white font-bold text-sm shadow-lg shadow-emerald-600/20 flex items-center justify-center gap-2 transition active:scale-[0.98]"
           >
             <Camera className="w-4 h-4" />
-            <span>📸 Rasmga olish</span>
+            <span>Rasmga olish</span>
           </button>
         </div>
       )}
@@ -633,7 +781,7 @@ export const FaceIdVerificationModal: React.FC<FaceIdVerificationModalProps> = (
               ) : (
                 <>
                   <CheckCircle2 className="w-3.5 h-3.5" />
-                  <span>Tasdiqlash ✨</span>
+                  <span>Tasdiqlash</span>
                 </>
               )}
             </button>

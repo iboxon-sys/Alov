@@ -26,6 +26,15 @@ import {
   releaseMatureDiamondBatches,
   getPendingDiamondsTotal
 } from './src/utils/tokenomics';
+import { PresenceRegistry } from './src/utils/presence';
+import { telegramInputMatchesBotRecord } from './src/utils/profileLookup';
+import {
+  togglePostLike,
+  appendPostComment,
+  computeAuthorTotalLikes,
+  type PostItem,
+  type PostComment
+} from './src/utils/posts';
 
 dotenv.config();
 
@@ -106,11 +115,15 @@ async function startServer() {
   const BOT_USERS_FILE = path.join(__dirname, 'telegram_bot_users.json');
   const TG_AVATARS_DIR = path.join(__dirname, 'telegram_avatars');
   const FACE_ID_DIR = path.join(__dirname, 'face_id_photos');
+  const MEDIA_UPLOADS_DIR = path.join(__dirname, 'media_uploads');
   if (!fs.existsSync(TG_AVATARS_DIR)) {
     fs.mkdirSync(TG_AVATARS_DIR, { recursive: true });
   }
   if (!fs.existsSync(FACE_ID_DIR)) {
     fs.mkdirSync(FACE_ID_DIR, { recursive: true });
+  }
+  if (!fs.existsSync(MEDIA_UPLOADS_DIR)) {
+    fs.mkdirSync(MEDIA_UPLOADS_DIR, { recursive: true });
   }
 
   app.get('/api/face-id/photo/:filename', (req, res) => {
@@ -118,6 +131,113 @@ async function startServer() {
     if (!safeName) return res.status(400).send('Invalid file name');
     const filePath = path.join(FACE_ID_DIR, safeName);
     if (!fs.existsSync(filePath)) return res.status(404).send('Not found');
+    res.setHeader('Cache-Control', 'public, max-age=86400');
+    res.sendFile(filePath);
+  });
+
+  // Upload media (image, video, audio, banner) from raw binary or base64 DataURL
+  function inferMediaExt(mime: string = '', fileName: string = ''): string {
+    const lowerMime = mime.toLowerCase();
+    const extFromName = path.extname(fileName || '').replace(/[^a-zA-Z0-9.]/g, '').toLowerCase();
+    if (extFromName && ['.jpg', '.jpeg', '.png', '.webp', '.gif', '.svg', '.mp4', '.webm', '.mov', '.mp3', '.wav', '.ogg', '.m4a'].includes(extFromName)) {
+      return extFromName;
+    }
+    if (lowerMime.includes('svg')) return '.svg';
+    if (lowerMime.includes('png')) return '.png';
+    if (lowerMime.includes('webp')) return '.webp';
+    if (lowerMime.includes('gif')) return '.gif';
+    if (lowerMime.includes('mp4')) return '.mp4';
+    if (lowerMime.includes('quicktime')) return '.mov';
+    if (lowerMime.includes('video/webm')) return '.webm';
+    if (lowerMime.includes('mpeg') || lowerMime.includes('mp3')) return '.mp3';
+    if (lowerMime.includes('wav')) return '.wav';
+    if (lowerMime.includes('ogg')) return '.ogg';
+    if (lowerMime.includes('m4a') || lowerMime.includes('mp4a')) return '.m4a';
+    if (lowerMime.includes('audio/webm')) return '.webm';
+    return '.jpg';
+  }
+
+  app.post('/api/media/upload-raw', express.raw({ type: '*/*', limit: '35mb' }), (req, res) => {
+    try {
+      const buf = req.body as Buffer;
+      if (!buf || !Buffer.isBuffer(buf) || buf.length === 0) {
+        return res.status(400).json({ success: false, error: 'Fayl bo\'sh' });
+      }
+      const mimeType = String(req.headers['content-type'] || 'application/octet-stream');
+      const originalName = String(req.headers['x-file-name'] || 'upload');
+      const ext = inferMediaExt(mimeType, originalName);
+      const storedName = `media_${Date.now()}_${Math.random().toString(36).slice(2, 8)}${ext}`;
+      const destPath = path.join(MEDIA_UPLOADS_DIR, storedName);
+      fs.writeFileSync(destPath, buf);
+      return res.json({ success: true, url: `/api/media/${storedName}`, mimeType });
+    } catch (err: any) {
+      return res.status(500).json({ success: false, error: err.message });
+    }
+  });
+
+  app.post('/api/media/upload', (req, res) => {
+    try {
+      const { dataUrl, fileName = 'upload', mimeType = '' } = req.body || {};
+      if (!dataUrl || typeof dataUrl !== 'string') {
+        return res.status(400).json({ success: false, error: 'Media ma\'lumoti topilmadi' });
+      }
+      const match = dataUrl.match(/^data:([^;]+);base64,(.+)$/);
+      if (!match) {
+        return res.status(400).json({ success: false, error: 'Media formati noto\'g\'ri' });
+      }
+      const detectedMime = mimeType || match[1];
+      const ext = inferMediaExt(detectedMime, fileName);
+      const storedName = `media_${Date.now()}_${Math.random().toString(36).slice(2, 8)}${ext}`;
+      const destPath = path.join(MEDIA_UPLOADS_DIR, storedName);
+      fs.writeFileSync(destPath, Buffer.from(match[2], 'base64'));
+      return res.json({ success: true, url: `/api/media/${storedName}`, mimeType: detectedMime });
+    } catch (err: any) {
+      return res.status(500).json({ success: false, error: err.message });
+    }
+  });
+
+  app.get('/api/media/:filename', (req, res) => {
+    const safeName = path.basename(req.params.filename || '').replace(/[^a-zA-Z0-9._-]/g, '');
+    if (!safeName) return res.status(400).send('Invalid file name');
+    const filePath = path.join(MEDIA_UPLOADS_DIR, safeName);
+    if (!fs.existsSync(filePath)) return res.status(404).send('Not found');
+    const ext = path.extname(safeName).toLowerCase();
+    const mimeMap: Record<string, string> = {
+      '.jpg': 'image/jpeg',
+      '.jpeg': 'image/jpeg',
+      '.png': 'image/png',
+      '.webp': 'image/webp',
+      '.gif': 'image/gif',
+      '.svg': 'image/svg+xml',
+      '.mp4': 'video/mp4',
+      '.webm': 'video/webm',
+      '.mov': 'video/quicktime',
+      '.mp3': 'audio/mpeg',
+      '.wav': 'audio/wav',
+      '.ogg': 'audio/ogg',
+      '.m4a': 'audio/mp4',
+    };
+    const contentType = mimeMap[ext] || 'application/octet-stream';
+    const stat = fs.statSync(filePath);
+    const range = req.headers.range;
+    if (range) {
+      const parts = range.replace(/bytes=/, '').split('-');
+      const start = parseInt(parts[0], 10);
+      const end = parts[1] ? parseInt(parts[1], 10) : stat.size - 1;
+      const chunkSize = end - start + 1;
+      const stream = fs.createReadStream(filePath, { start, end });
+      res.writeHead(206, {
+        'Content-Range': `bytes ${start}-${end}/${stat.size}`,
+        'Accept-Ranges': 'bytes',
+        'Content-Length': chunkSize,
+        'Content-Type': contentType,
+      });
+      stream.pipe(res);
+      return;
+    }
+    res.setHeader('Accept-Ranges', 'bytes');
+    res.setHeader('Content-Type', contentType);
+    res.setHeader('Content-Length', stat.size);
     res.setHeader('Cache-Control', 'public, max-age=86400');
     res.sendFile(filePath);
   });
@@ -582,13 +702,19 @@ async function startServer() {
       const cleanUsername = normalizeTelegramHandle(rawInput);
       const cleanPhone = rawInput.replace(/\D/g, '');
 
-      // 1. Check if user provided chatId from frontend cached login
-      let matchedChatId: number | undefined =
-        frontendChatId && !isNaN(Number(frontendChatId)) ? Number(frontendChatId) : undefined;
+      // 1. Validate optional cached chatId STRICTLY against the requested username/phone
+      let matchedChatId: number | undefined;
+      let botUser: TelegramBotUser | undefined = findStoredBotUser(undefined, rawInput, cleanUsername, cleanPhone);
 
-      let botUser: TelegramBotUser | undefined = findStoredBotUser(matchedChatId, rawInput, cleanUsername, cleanPhone);
+      if (!botUser && frontendChatId && !isNaN(Number(frontendChatId))) {
+        const candidateBot = findStoredBotUser(Number(frontendChatId));
+        if (candidateBot && telegramInputMatchesBotRecord(candidateBot, rawInput)) {
+          matchedChatId = Number(frontendChatId);
+          botUser = candidateBot;
+        }
+      }
 
-      // 2. Check if user is known in usersStore with a saved telegramChatId or chatId
+      // 2. Check if user is known in usersStore with a saved telegramChatId or chatId matching THIS input
       if (!botUser && !matchedChatId && typeof usersStore !== 'undefined') {
         for (const u of usersStore.values()) {
           const uTgClean = normalizeTelegramHandle(u.telegram);
@@ -597,56 +723,28 @@ async function startServer() {
 
           if (savedChatId) {
             if (
-              (cleanUsername && uTgClean === cleanUsername) ||
-              (cleanPhone && cleanPhone.length >= 7 && (uPhoneClean === cleanPhone || (cleanPhone.length === 9 && uPhoneClean.endsWith(cleanPhone)))) ||
-              (rawInput && (u.uid === rawInput || u.uid === `tg_${cleanUsername}` || u.uid === `tg_${cleanPhone}`))
+              (cleanUsername && !/^\d+$/.test(cleanUsername) && uTgClean === cleanUsername) ||
+              (cleanPhone && cleanPhone.length >= 9 && uPhoneClean.length >= 9 && uPhoneClean.slice(-9) === cleanPhone.slice(-9)) ||
+              (rawInput && (u.uid === rawInput || (cleanUsername && u.uid === `tg_${cleanUsername}`)))
             ) {
               matchedChatId = Number(savedChatId);
-              botUser = findStoredBotUser(matchedChatId, rawInput, cleanUsername, cleanPhone);
+              botUser = findStoredBotUser(matchedChatId);
               break;
             }
           }
         }
       }
 
-      // 3. Also support lookup by firstName matching cleanUsername when handle wasn't saved
-      if (!botUser && !matchedChatId && cleanUsername) {
-        for (const entry of telegramBotUsers.values()) {
-          if (!entry || !entry.chatId) continue;
-          if (entry.firstName && entry.firstName.toLowerCase().replace(/[^a-z0-9]/g, '') === cleanUsername.replace(/[^a-z0-9]/g, '')) {
-            botUser = entry;
-            matchedChatId = entry.chatId;
-            break;
-          }
-        }
-      }
-
-      // 4. Query Telegram API directly by @username if still not found
+      // 3. Query Telegram API directly by @username if still not found
       if (!botUser && !matchedChatId && TELEGRAM_BOT_TOKEN && cleanUsername && !/^\d+$/.test(cleanUsername)) {
         const chatDetails = await fetchTelegramChatDetails(`@${cleanUsername}`);
         if (chatDetails && chatDetails.id) {
           matchedChatId = chatDetails.id;
-          botUser = await registerBotUser(chatDetails.id, chatDetails, cleanPhone, rawInput);
+          botUser = await registerBotUser(chatDetails.id, chatDetails, cleanPhone);
         }
       }
 
-      // 5. If only one user has ever started the bot, link them cleanly
-      if (!botUser && !matchedChatId && telegramBotUsers.size > 0) {
-        const uniqueChatIds = new Set<number>();
-        let singleEntry: TelegramBotUser | null = null;
-        for (const entry of telegramBotUsers.values()) {
-          if (entry && entry.chatId) {
-            uniqueChatIds.add(entry.chatId);
-            singleEntry = entry;
-          }
-        }
-        if (uniqueChatIds.size === 1 && singleEntry) {
-          matchedChatId = singleEntry.chatId;
-          botUser = singleEntry;
-        }
-      }
-
-      // 6. Always enrich/refresh real Telegram first_name, last_name & avatar if we have chatId
+      // 4. Refresh real Telegram details if we matched a chatId (never alias unverified rawInput)
       const resolvedChatId = botUser?.chatId || matchedChatId;
       if (resolvedChatId) {
         botUser = await registerBotUser(
@@ -657,12 +755,11 @@ async function startServer() {
             last_name: botUser?.lastName,
             avatar: botUser?.avatar,
           },
-          cleanPhone || botUser?.phone,
-          rawInput
+          botUser?.phone || (cleanPhone.length >= 9 ? cleanPhone : undefined)
         );
       }
 
-      // 7. If user truly hasn't started the bot yet, show prompt with customized deep-link
+      // 5. If user hasn't started the bot yet, prompt with customized deep-link
       if (!botUser) {
         const startTarget = cleanUsername || cleanPhone || '';
         const botUrl = startTarget ? `https://t.me/alovuz_bot?start=${encodeURIComponent(startTarget)}` : 'https://t.me/alovuz_bot';
@@ -678,13 +775,13 @@ async function startServer() {
       const expiresAt = Date.now() + 300 * 1000; // 5 mins TTL
       const otpPayload = { code, expiresAt, botUser, chatId: botUser.chatId };
 
-      otpStorage.set(rawInput, otpPayload);
+      otpStorage.set(rawInput.toLowerCase(), otpPayload);
       if (cleanUsername) {
         otpStorage.set(cleanUsername, otpPayload);
         otpStorage.set(`@${cleanUsername}`, otpPayload);
         otpStorage.set(`https://t.me/${cleanUsername}`, otpPayload);
       }
-      if (cleanPhone) {
+      if (cleanPhone && cleanPhone.length >= 7) {
         otpStorage.set(cleanPhone, otpPayload);
         otpStorage.set(`+${cleanPhone}`, otpPayload);
       }
@@ -716,18 +813,16 @@ async function startServer() {
       const cleanUsername = normalizeTelegramHandle(rawInput);
       const cleanPhone = rawInput.replace(/\D/g, '');
 
-      const stored = otpStorage.get(rawInput) || 
+      const stored = otpStorage.get(rawInput.toLowerCase()) ||
+                     otpStorage.get(rawInput) ||
                      otpStorage.get(cleanUsername) || 
                      otpStorage.get(`@${cleanUsername}`) || 
                      otpStorage.get(`https://t.me/${cleanUsername}`) || 
                      (cleanPhone ? (otpStorage.get(cleanPhone) || otpStorage.get(`+${cleanPhone}`)) : null);
 
-      if (!stored) {
-        return res.status(400).json({ success: false, error: 'Tasdiqlash kodi topilmadi yoki muddati o\'tgan' });
-      }
-
-      if (Date.now() > stored.expiresAt) {
+      const clearOtpKeys = () => {
         otpStorage.delete(rawInput);
+        otpStorage.delete(rawInput.toLowerCase());
         otpStorage.delete(cleanUsername);
         otpStorage.delete(`@${cleanUsername}`);
         otpStorage.delete(`https://t.me/${cleanUsername}`);
@@ -735,6 +830,14 @@ async function startServer() {
           otpStorage.delete(cleanPhone);
           otpStorage.delete(`+${cleanPhone}`);
         }
+      };
+
+      if (!stored) {
+        return res.status(400).json({ success: false, error: 'Tasdiqlash kodi topilmadi yoki muddati o\'tgan' });
+      }
+
+      if (Date.now() > stored.expiresAt) {
+        clearOtpKeys();
         return res.status(400).json({ success: false, error: 'Kod muddati tugagan (5 daqiqa)' });
       }
 
@@ -742,14 +845,7 @@ async function startServer() {
         return res.status(400).json({ success: false, error: 'Kiritilgan tasdiqlash kodi noto\'g\'ri!' });
       }
 
-      otpStorage.delete(rawInput);
-      otpStorage.delete(cleanUsername);
-      otpStorage.delete(`@${cleanUsername}`);
-      otpStorage.delete(`https://t.me/${cleanUsername}`);
-      if (cleanPhone) {
-        otpStorage.delete(cleanPhone);
-        otpStorage.delete(`+${cleanPhone}`);
-      }
+      clearOtpKeys();
 
       const userChatId = stored.chatId || stored.botUser?.chatId;
 
@@ -1436,6 +1532,29 @@ Suhbatlashish qoidalaringiz:
 
   const TRANSACTIONS_DB_FILE = path.join(__dirname, 'transactions_db.json');
   const WITHDRAWALS_DB_FILE = path.join(__dirname, 'withdrawals_db.json');
+  const POSTS_DB_FILE = path.join(__dirname, 'posts_db.json');
+  const postsStore: PostItem[] = [];
+
+  function savePostsToDisk() {
+    try {
+      fs.writeFileSync(POSTS_DB_FILE, JSON.stringify(postsStore, null, 2), 'utf-8');
+    } catch (e) {
+      console.warn("Could not save posts_db.json:", e);
+    }
+  }
+
+  function loadPostsFromDisk() {
+    try {
+      if (fs.existsSync(POSTS_DB_FILE)) {
+        const raw = fs.readFileSync(POSTS_DB_FILE, 'utf-8');
+        const list = JSON.parse(raw);
+        if (Array.isArray(list)) {
+          postsStore.length = 0;
+          postsStore.push(...list);
+        }
+      }
+    } catch (e) {}
+  }
 
   function saveTransactionsToDisk() {
     try {
@@ -1485,6 +1604,14 @@ Suhbatlashish qoidalaringiz:
   loadFriendshipsFromDisk();
   loadTransactionsFromDisk();
   loadWithdrawalsFromDisk();
+  loadPostsFromDisk();
+
+  // At server boot, 0 sockets are connected -> enforce true initial offline state for all users
+  for (const [uid, u] of usersStore.entries()) {
+    u.isOnline = false;
+    u.status = 'offline';
+    usersStore.set(uid, u);
+  }
   saveUsersToDisk();
 
   // Create HTTP Server & Socket.io Server first so endpoints can emit events
@@ -1523,14 +1650,35 @@ Suhbatlashish qoidalaringiz:
     }
   }, 30000);
 
-  // Real-time Presence & Viewer Counters
-  const activeSocketsMap = new Map<string, { uid?: string; streamId?: string }>();
+  // Real-time Presence Registry & Viewer Counters
+  const presenceRegistry = new PresenceRegistry();
   const streamViewersMap: Record<string, Set<string>> = {};
 
   const broadcastActiveUsersCount = () => {
-    const totalCount = activeSocketsMap.size;
-    io.emit('active_users_count', { count: Math.max(1, totalCount) });
+    const onlineUserIds = presenceRegistry.getOnlineUserIds();
+    const count = onlineUserIds.length;
+    io.emit('active_users_count', { count });
+    io.emit('presence_sync', { onlineUserIds, onlineCount: count });
   };
+
+  // Sweep stale/crashed sockets without heartbeat every 25s
+  setInterval(() => {
+    const wentOffline = presenceRegistry.pruneStaleSockets(75000);
+    if (wentOffline.length > 0) {
+      for (const uid of wentOffline) {
+        const user = usersStore.get(uid);
+        if (user) {
+          user.isOnline = false;
+          user.status = 'offline';
+          user.lastSeen = new Date().toISOString();
+          usersStore.set(uid, user);
+          io.emit('user_updated', user);
+        }
+      }
+      saveUsersToDisk();
+      broadcastActiveUsersCount();
+    }
+  }, 25000);
 
   // --- Users Endpoints ---
   app.get('/api/users', (_req, res) => {
@@ -1538,10 +1686,105 @@ Suhbatlashish qoidalaringiz:
     const users = Array.from(usersStore.values()).map((u) => {
       const { unlockedAmount } = normalizeAndReleaseUser(u);
       if (unlockedAmount > 0) releasedAny = true;
+      const online = presenceRegistry.isUidOnline(u.uid);
+      u.isOnline = online;
+      u.status = online ? 'online' : 'offline';
       return u;
     });
     if (releasedAny) saveUsersToDisk();
-    res.json({ success: true, users, dbEpoch: DB_EPOCH });
+    const onlineUserIds = presenceRegistry.getOnlineUserIds();
+    res.json({ success: true, users, onlineUserIds, onlineCount: onlineUserIds.length, dbEpoch: DB_EPOCH });
+  });
+
+  app.get('/api/users/:uid', (req, res) => {
+    const key = String(req.params.uid || '').trim();
+    let found = usersStore.get(key);
+    if (!found) {
+      for (const u of usersStore.values()) {
+        if (u.id === key || u.uid === key) {
+          found = u;
+          break;
+        }
+      }
+    }
+    if (!found) {
+      return res.status(404).json({ success: false, error: 'Foydalanuvchi topilmadi' });
+    }
+    const online = presenceRegistry.isUidOnline(found.uid);
+    found.isOnline = online;
+    found.status = online ? 'online' : 'offline';
+    res.json({ success: true, user: found });
+  });
+
+  app.get('/api/users/:uid/connections', (req, res) => {
+    const key = String(req.params.uid || '').trim();
+    let target = usersStore.get(key);
+    if (!target) {
+      for (const u of usersStore.values()) {
+        if (u.id === key || u.uid === key) {
+          target = u;
+          break;
+        }
+      }
+    }
+    if (!target) {
+      return res.status(404).json({ success: false, error: 'Foydalanuvchi topilmadi' });
+    }
+    const resolveList = (ids: string[] = []) => {
+      const out: any[] = [];
+      const seen = new Set<string>();
+      for (const id of ids) {
+        let match = usersStore.get(id);
+        if (!match) {
+          for (const u of usersStore.values()) {
+            if (u.id === id || u.uid === id) {
+              match = u;
+              break;
+            }
+          }
+        }
+        if (match && !seen.has(match.uid)) {
+          seen.add(match.uid);
+          const online = presenceRegistry.isUidOnline(match.uid);
+          match.isOnline = online;
+          match.status = online ? 'online' : 'offline';
+          out.push(match);
+        }
+      }
+      return out;
+    };
+    res.json({
+      success: true,
+      followers: resolveList(Array.isArray(target.followers) ? target.followers : []),
+      following: resolveList(Array.isArray(target.following) ? target.following : []),
+    });
+  });
+
+  app.post('/api/users/offline', express.text({ type: 'text/plain' }), (req, res) => {
+    try {
+      let body: any = req.body;
+      if (typeof body === 'string') {
+        try {
+          body = JSON.parse(body);
+        } catch {
+          body = {};
+        }
+      }
+      const { uid } = body || {};
+      if (uid && usersStore.has(uid)) {
+        const user = usersStore.get(uid);
+        user.isOnline = false;
+        user.status = 'offline';
+        user.lastSeen = new Date().toISOString();
+        usersStore.set(uid, user);
+        saveUsersToDisk();
+        io.emit('user_updated', user);
+        broadcastActiveUsersCount();
+      }
+      res.json({ success: true });
+    } catch (err: any) {
+      res.status(500).json({ success: false, error: err.message });
+    }
   });
 
   app.post('/api/users/sync', async (req, res) => {
@@ -1660,6 +1903,7 @@ Suhbatlashish qoidalaringiz:
 
       const fallbackAvatar = '';
 
+      const currentlyOnline = presenceRegistry.isUidOnline(targetUid);
       const mergedUser = {
         isVerified: false,
         bankCard: '',
@@ -1674,11 +1918,13 @@ Suhbatlashish qoidalaringiz:
         ...user,
         name: fetchedName || (!isPlaceholderOrUsername(user.name, incomingTgHandle, incomingPhone) ? user.name : '') || (!isPlaceholderOrUsername(existing.name, incomingTgHandle, incomingPhone) ? existing.name : '') || (isTelegramAccount ? '' : 'Foydalanuvchi'),
         avatar: user.faceId?.capturedPhotoUrl || existing.faceId?.capturedPhotoUrl || fetchedAvatar || fallbackAvatar,
+        banner: user.banner !== undefined ? user.banner : (existing.banner || ''),
         coins: (existing && existing.coins !== undefined) ? existing.coins : (user.coins !== undefined ? user.coins : 100),
         diamonds: (existing && existing.diamonds !== undefined) ? existing.diamonds : (user.diamonds !== undefined ? user.diamonds : 0),
         uid: targetUid,
         telegramChatId: knownChatId || existing.telegramChatId,
-        isOnline: true,
+        isOnline: currentlyOnline,
+        status: currentlyOnline ? 'online' : 'offline',
         updatedAt: new Date().toISOString()
       };
       normalizeAndReleaseUser(mergedUser);
@@ -1704,6 +1950,11 @@ Suhbatlashish qoidalaringiz:
       const existing = usersStore.get(uid);
       if (existing) {
         const updated = { ...existing, ...updates, updatedAt: new Date().toISOString() };
+        if (updates.isOnline === undefined && updates.status === undefined) {
+          const online = presenceRegistry.isUidOnline(uid);
+          updated.isOnline = online;
+          updated.status = online ? 'online' : 'offline';
+        }
         normalizeAndReleaseUser(updated);
         usersStore.set(uid, updated);
         saveUsersToDisk();
@@ -2036,8 +2287,176 @@ Suhbatlashish qoidalaringiz:
       femaleCount: female,
       malePercent,
       femalePercent,
-      onlineCount: Math.max(1, activeSocketsMap.size)
+      onlineCount: presenceRegistry.getOnlineCount()
     });
+  });
+
+  // --- Social Posts CRUD (Photo, Video, Music, Text + Likes & Comments) ---
+  function enrichPost(post: PostItem): PostItem {
+    const author = usersStore.get(post.authorUid);
+    const enrichedComments = (Array.isArray(post.comments) ? post.comments : []).map((c) => {
+      const commentAuthor = usersStore.get(c.authorUid);
+      return {
+        ...c,
+        authorName: commentAuthor?.name || c.authorName,
+        authorAvatar: commentAuthor?.avatar || c.authorAvatar || '',
+        authorId: commentAuthor?.id || c.authorId,
+      };
+    });
+    return {
+      ...post,
+      authorName: author?.name || post.authorName,
+      authorAvatar: author?.avatar || post.authorAvatar || '',
+      authorId: author?.id || post.authorId,
+      authorGender: author?.gender || post.authorGender,
+      authorVerified: Boolean(author?.faceId?.verified || author?.isVerified || post.authorVerified),
+      comments: enrichedComments,
+    };
+  }
+
+  app.get('/api/posts', (req, res) => {
+    const authorUid = req.query.authorUid ? String(req.query.authorUid) : '';
+    const filtered = authorUid
+      ? postsStore.filter((p) => p.authorUid === authorUid)
+      : postsStore;
+    const sorted = [...filtered]
+      .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
+      .map(enrichPost);
+    res.json({ success: true, posts: sorted });
+  });
+
+  app.post('/api/posts', (req, res) => {
+    try {
+      const { authorUid, type = 'photo', caption = '', mediaUrl = '', coverUrl = '', audioTitle = '', audioArtist = '' } = req.body || {};
+      if (!authorUid) {
+        return res.status(400).json({ success: false, error: 'Avtor aniqlanmadi' });
+      }
+      const author = usersStore.get(authorUid);
+      const safeType = ['photo', 'video', 'music', 'text'].includes(type) ? type : 'text';
+      if (safeType !== 'text' && !String(mediaUrl).trim()) {
+        return res.status(400).json({ success: false, error: 'Media fayli yoki havolasi talab qilinadi' });
+      }
+      if (safeType === 'text' && !String(caption).trim()) {
+        return res.status(400).json({ success: false, error: 'Post matnini kiriting' });
+      }
+
+      const newPost: PostItem = {
+        id: `post_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+        authorUid,
+        authorId: author?.id,
+        authorName: author?.name || 'Foydalanuvchi',
+        authorAvatar: author?.avatar || '',
+        authorGender: author?.gender,
+        authorVerified: Boolean(author?.faceId?.verified || author?.isVerified),
+        type: safeType,
+        caption: String(caption || '').trim(),
+        mediaUrl: String(mediaUrl || '').trim() || undefined,
+        coverUrl: String(coverUrl || '').trim() || undefined,
+        audioTitle: String(audioTitle || '').trim() || undefined,
+        audioArtist: String(audioArtist || '').trim() || undefined,
+        likes: [],
+        comments: [],
+        createdAt: new Date().toISOString(),
+      };
+      postsStore.unshift(newPost);
+      savePostsToDisk();
+      const enriched = enrichPost(newPost);
+      io.emit('post_created', enriched);
+      res.json({ success: true, post: enriched });
+    } catch (err: any) {
+      res.status(500).json({ success: false, error: err.message });
+    }
+  });
+
+  app.post('/api/posts/:postId/like', (req, res) => {
+    try {
+      const { postId } = req.params;
+      const { uid } = req.body || {};
+      if (!uid) return res.status(400).json({ success: false, error: 'uid talab qilinadi' });
+      const idx = postsStore.findIndex((p) => p.id === postId);
+      if (idx === -1) return res.status(404).json({ success: false, error: 'Post topilmadi' });
+
+      const { post: nextPost, liked } = togglePostLike(postsStore[idx], uid);
+      postsStore[idx] = nextPost;
+      savePostsToDisk();
+
+      const author = usersStore.get(nextPost.authorUid);
+      if (author) {
+        author.likesCount = computeAuthorTotalLikes(postsStore, author.uid);
+        usersStore.set(author.uid, author);
+        saveUsersToDisk();
+        io.emit('user_updated', author);
+      }
+
+      const enriched = enrichPost(nextPost);
+      io.emit('post_updated', enriched);
+      res.json({ success: true, liked, post: enriched });
+    } catch (err: any) {
+      res.status(500).json({ success: false, error: err.message });
+    }
+  });
+
+  app.post('/api/posts/:postId/comments', (req, res) => {
+    try {
+      const { postId } = req.params;
+      const { authorUid, text } = req.body || {};
+      if (!authorUid || !String(text || '').trim()) {
+        return res.status(400).json({ success: false, error: 'Izoh matni kiritilmagan' });
+      }
+      const idx = postsStore.findIndex((p) => p.id === postId);
+      if (idx === -1) return res.status(404).json({ success: false, error: 'Post topilmadi' });
+
+      const commentAuthor = usersStore.get(authorUid);
+      const comment: PostComment = {
+        id: `cmt_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+        postId,
+        authorUid,
+        authorId: commentAuthor?.id,
+        authorName: commentAuthor?.name || 'Foydalanuvchi',
+        authorAvatar: commentAuthor?.avatar || '',
+        text: String(text).trim(),
+        createdAt: new Date().toISOString(),
+      };
+
+      const nextPost = appendPostComment(postsStore[idx], comment);
+      postsStore[idx] = nextPost;
+      savePostsToDisk();
+
+      const enriched = enrichPost(nextPost);
+      io.emit('post_updated', enriched);
+      res.json({ success: true, comment, post: enriched });
+    } catch (err: any) {
+      res.status(500).json({ success: false, error: err.message });
+    }
+  });
+
+  app.delete('/api/posts/:postId', (req, res) => {
+    try {
+      const { postId } = req.params;
+      const requesterUid = String(req.body?.uid || req.query.uid || '');
+      const idx = postsStore.findIndex((p) => p.id === postId);
+      if (idx === -1) return res.status(404).json({ success: false, error: 'Post topilmadi' });
+
+      const target = postsStore[idx];
+      if (target.authorUid !== requesterUid && !getVerifiedAdmin(requesterUid)) {
+        return res.status(403).json({ success: false, error: 'Postni o\'chirish huquqi yo\'q' });
+      }
+      postsStore.splice(idx, 1);
+      savePostsToDisk();
+
+      const author = usersStore.get(target.authorUid);
+      if (author) {
+        author.likesCount = computeAuthorTotalLikes(postsStore, author.uid);
+        usersStore.set(author.uid, author);
+        saveUsersToDisk();
+        io.emit('user_updated', author);
+      }
+
+      io.emit('post_deleted', { postId });
+      res.json({ success: true, postId });
+    } catch (err: any) {
+      res.status(500).json({ success: false, error: err.message });
+    }
   });
 
   // --- Admin Endpoints (@Salikh_07 / role: admin) ---
@@ -2288,26 +2707,59 @@ Suhbatlashish qoidalaringiz:
 
   io.on('connection', (socket) => {
     console.log('Client connected via Socket.io:', socket.id);
-    activeSocketsMap.set(socket.id, {});
+    presenceRegistry.connectSocket(socket.id);
     broadcastActiveUsersCount();
 
-    // Register user socket for direct personal messaging bridge
+    // Register user socket for direct personal messaging bridge & true presence
     socket.on('register_user', (uid) => {
       if (uid) {
         socket.join(`user_${uid}`);
-        const currentData = activeSocketsMap.get(socket.id) || {};
-        activeSocketsMap.set(socket.id, { ...currentData, uid });
+        const res = presenceRegistry.registerUser(socket.id, uid);
 
-        // Update online status in store without altering profile
+        if (res.previousUid && res.removedPreviousUidOffline) {
+          socket.leave(`user_${res.previousUid}`);
+          const prevUser = usersStore.get(res.previousUid);
+          if (prevUser) {
+            prevUser.isOnline = false;
+            prevUser.status = 'offline';
+            prevUser.lastSeen = new Date().toISOString();
+            usersStore.set(res.previousUid, prevUser);
+            io.emit('user_updated', prevUser);
+          }
+        }
+
         const user = usersStore.get(uid);
         if (user) {
           user.isOnline = true;
+          user.status = 'online';
           user.lastSeen = new Date().toISOString();
           usersStore.set(uid, user);
           io.emit('user_updated', user);
         }
         broadcastActiveUsersCount();
       }
+    });
+
+    socket.on('unregister_user', (uid) => {
+      const targetUid = typeof uid === 'string' ? uid : undefined;
+      if (targetUid) socket.leave(`user_${targetUid}`);
+      const res = presenceRegistry.unregisterUser(socket.id, targetUid);
+      if (res.becameOffline && res.uid) {
+        const user = usersStore.get(res.uid);
+        if (user) {
+          user.isOnline = false;
+          user.status = 'offline';
+          user.lastSeen = new Date().toISOString();
+          usersStore.set(res.uid, user);
+          saveUsersToDisk();
+          io.emit('user_updated', user);
+        }
+      }
+      broadcastActiveUsersCount();
+    });
+
+    socket.on('presence_heartbeat', ({ uid }: { uid?: string } = {}) => {
+      presenceRegistry.heartbeat(socket.id, uid);
     });
 
     socket.on('join_chat', (chatId) => {
@@ -2670,8 +3122,7 @@ Suhbatlashish qoidalaringiz:
       }
       streamViewersMap[streamId].add(socket.id);
 
-      const currentData = activeSocketsMap.get(socket.id) || {};
-      activeSocketsMap.set(socket.id, { ...currentData, streamId });
+      presenceRegistry.setStream(socket.id, streamId);
 
       const viewerCount = streamViewersMap[streamId].size;
       io.to(`live_stream_${streamId}`).emit('live_stream_viewer_count', { streamId, count: viewerCount });
@@ -2763,7 +3214,7 @@ Suhbatlashish qoidalaringiz:
     socket.on('call-user', ({ targetUid, targetSocketId, offer, caller }) => {
       const payload = {
         offer,
-        caller: caller || { uid: activeSocketsMap.get(socket.id)?.uid, socketId: socket.id },
+        caller: caller || { uid: presenceRegistry.getSocketInfo(socket.id)?.uid, socketId: socket.id },
         callerSocketId: socket.id
       };
       if (targetSocketId) {
@@ -2779,7 +3230,7 @@ Suhbatlashish qoidalaringiz:
     socket.on('accept-call', ({ targetSocketId, targetUid, answer, callee }) => {
       const payload = {
         answer,
-        callee: callee || { uid: activeSocketsMap.get(socket.id)?.uid, socketId: socket.id },
+        callee: callee || { uid: presenceRegistry.getSocketInfo(socket.id)?.uid, socketId: socket.id },
         calleeSocketId: socket.id
       };
       if (targetSocketId) {
@@ -2795,7 +3246,7 @@ Suhbatlashish qoidalaringiz:
     socket.on('make-answer', ({ targetSocketId, targetUid, answer, callee }) => {
       const payload = {
         answer,
-        callee: callee || { uid: activeSocketsMap.get(socket.id)?.uid, socketId: socket.id },
+        callee: callee || { uid: presenceRegistry.getSocketInfo(socket.id)?.uid, socketId: socket.id },
         calleeSocketId: socket.id
       };
       if (targetSocketId) {
@@ -2856,12 +3307,11 @@ Suhbatlashish qoidalaringiz:
 
     socket.on('disconnect', () => {
       console.log('Client disconnected:', socket.id);
-      const socketInfo = activeSocketsMap.get(socket.id);
-      const uid = socketInfo?.uid;
+      const disconnectRes = presenceRegistry.disconnectSocket(socket.id);
+      const uid = disconnectRes.uid;
 
-      // When user disconnects, do NOT delete them from usersStore!
-      // Only set isOnline to false and record lastSeen.
-      if (uid) {
+      // Mark user offline ONLY when their last active socket disconnects (multi-tab safe)
+      if (uid && disconnectRes.becameOffline) {
         const user = usersStore.get(uid);
         if (user) {
           user.isOnline = false;
@@ -2873,16 +3323,15 @@ Suhbatlashish qoidalaringiz:
         }
       }
 
-      if (socketInfo?.streamId && streamViewersMap[socketInfo.streamId]) {
-        streamViewersMap[socketInfo.streamId].delete(socket.id);
-        const count = streamViewersMap[socketInfo.streamId].size;
-        io.to(`live_stream_${socketInfo.streamId}`).emit('live_stream_viewer_count', { 
-          streamId: socketInfo.streamId, 
+      if (disconnectRes.streamId && streamViewersMap[disconnectRes.streamId]) {
+        streamViewersMap[disconnectRes.streamId].delete(socket.id);
+        const count = streamViewersMap[disconnectRes.streamId].size;
+        io.to(`live_stream_${disconnectRes.streamId}`).emit('live_stream_viewer_count', { 
+          streamId: disconnectRes.streamId, 
           count 
         });
       }
 
-      activeSocketsMap.delete(socket.id);
       broadcastActiveUsersCount();
     });
   });

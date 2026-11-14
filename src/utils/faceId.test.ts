@@ -71,10 +71,29 @@ describe('faceId pure biometric helpers', () => {
     assert.equal(state.blinkDetected, true);
   });
 
+  it('detects blink naturally even when open-eye EAR baseline is lower (~0.21)', () => {
+    let state = createBlinkTrackerState();
+    const lowOpenPts = makeLandmarksWithEyesAndMouth(2.1, 36);
+    const naturalDipPts = makeLandmarksWithEyesAndMouth(1.65, 36);
+
+    const openEar = computeAverageEAR(lowOpenPts).avgEAR; // ~0.21
+    const dipEar = computeAverageEAR(naturalDipPts).avgEAR; // ~0.165
+
+    state = updateBlinkTracker(state, openEar);
+    state = updateBlinkTracker(state, openEar);
+    assert.equal(state.sawClosed, false);
+
+    state = updateBlinkTracker(state, dipEar);
+    assert.equal(state.sawClosed, true);
+
+    state = updateBlinkTracker(state, openEar);
+    assert.equal(state.blinkDetected, true);
+  });
+
   it('triggers smile check on gentle expression or mouth smile width', () => {
     const neutral = makeLandmarksWithEyesAndMouth(3.2, 36);
     assert.equal(computeSmileMetrics(neutral, 0.05).isSmiling, false);
-    assert.equal(computeSmileMetrics(neutral, 0.25).isSmiling, true);
+    assert.equal(computeSmileMetrics(neutral, 0.18).isSmiling, true);
 
     const gentleGeometricSmile = makeLandmarksWithEyesAndMouth(3.2, 46);
     assert.equal(computeSmileMetrics(gentleGeometricSmile, 0.1).isSmiling, true);

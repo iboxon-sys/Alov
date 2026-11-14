@@ -99,15 +99,19 @@ export function updateBlinkTracker(
     return next;
   }
 
-  const closeThreshold = Math.max(0.19, next.openBaselineEAR * 0.80);
-  const reopenThreshold = Math.max(0.22, next.openBaselineEAR * 0.88);
+  const closeThreshold = Math.max(0.145, next.openBaselineEAR * 0.86);
+  const reopenThreshold = Math.max(0.165, next.openBaselineEAR * 0.92);
 
   if (!next.sawClosed) {
     if (avgEAR <= closeThreshold) {
       next.sawClosed = true;
-    } else if (next.openSampleCount < 15) {
-      // Smoothly update baseline only when eye is comfortably open
-      next.openBaselineEAR = next.openBaselineEAR * 0.8 + avgEAR * 0.2;
+    } else {
+      // Allow baseline to rise if first frame was slightly squinted, and smoothly calibrate early open frames
+      if (avgEAR > next.openBaselineEAR) {
+        next.openBaselineEAR = next.openBaselineEAR * 0.6 + avgEAR * 0.4;
+      } else if (next.openSampleCount < 15) {
+        next.openBaselineEAR = next.openBaselineEAR * 0.82 + avgEAR * 0.18;
+      }
       next.openSampleCount += 1;
     }
   } else {
@@ -144,13 +148,13 @@ export function computeSmileMetrics(
     const cornerLift = jawWidth > 0 ? Math.max(0, (mouthCenterY - avgCornerY) / jawWidth) : 0;
     const widthRatio = jawWidth > 0 ? mouthWidth / jawWidth : 0;
 
-    // Neutral mouth/jaw width ratio is ~0.35–0.40; gentle smile >= 0.43 or slight upward corner curve
-    geometricRatio = Math.max(0, Math.min(1, (widthRatio - 0.39) * 5.5 + cornerLift * 8));
+    // Neutral mouth/jaw width ratio is ~0.35–0.40; gentle smile >= 0.42 or slight upward corner curve
+    geometricRatio = Math.max(0, Math.min(1, (widthRatio - 0.385) * 5.8 + cornerLift * 8.5));
   }
 
   const smileScore = Math.max(safeHappy, geometricRatio);
   return {
-    isSmiling: safeHappy >= 0.22 || smileScore >= 0.28,
+    isSmiling: safeHappy >= 0.16 || smileScore >= 0.24,
     smileScore,
   };
 }

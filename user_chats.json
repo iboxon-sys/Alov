@@ -1,1 +1,12 @@
-{}
+{
+  "pw_test_user_a_tg_salikh_07": {
+    "id": "pw_test_user_a_tg_salikh_07",
+    "participants": [
+      "tg_salikh_07",
+      "pw_test_user_a"
+    ],
+    "lastMessage": "bu platforma yaqinda ishga tushadi va har bir yozganiz uchun olmos hisoblanib boradi va 100olmozga chiqganingizdan sung pul qilib olishiz mumkin ya'niy 100ming sum",
+    "lastSenderId": "tg_salikh_07",
+    "updatedAt": "2026-11-14T09:19:47.686Z"
+  }
+}

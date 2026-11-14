@@ -9,7 +9,8 @@ import {
   MapPin, Send, Mic, Play, Plus, Users, Eye, ThumbsUp, Smartphone, 
   ChevronRight, X, ArrowUpRight, ShieldCheck, Globe, LogIn, LogOut, CheckCircle2, Edit3, ArrowLeft, VideoOff,
   ZoomIn, ZoomOut, Move, Crop, AlertTriangle, RefreshCw, Navigation, Shield, Lock, EyeOff, Car, Upload,
-  Clock, Check, CheckCheck, Gift, Coins, Wallet, CreditCard, Handshake, Crown, ScanFace
+  Clock, Check, CheckCheck, Gift, Coins, Wallet, CreditCard, Handshake, Crown, ScanFace,
+  Image as ImageIcon, Camera, Newspaper
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { clsx, type ClassValue } from 'clsx';
@@ -20,6 +21,9 @@ import { OneOnOneCallModal } from './components/OneOnOneCallModal';
 import { IncomingCallModal } from './components/IncomingCallModal';
 import { AdminPanelModal } from './components/AdminPanelModal';
 import { FaceIdVerificationModal, type FaceIdVerificationResult } from './components/FaceIdVerificationModal';
+import { FollowListModal } from './components/FollowListModal';
+import { PostsFeed } from './components/PostsFeed';
+import { PublicProfileModal } from './components/PublicProfileModal';
 import { callNotification } from './services/callNotification';
 import { VideoPlayer, VoiceMessage } from './components/ChatMedia';
 import { CandidateSkeleton, ChatSkeleton } from './components/Skeleton';
@@ -53,6 +57,9 @@ import {
   genderToUzLabel,
   type FaceIdProfileData,
 } from './utils/faceId';
+import { isUserOnlineStrict, formatLastSeenUz } from './utils/presence';
+import { resolveExactUserByUid, getInitialAuthDraftState } from './utils/profileLookup';
+import { computeAuthorTotalLikes, type PostItem } from './utils/posts';
 
 function resolveAvatarUrl(rawUrl?: string | null): string {
   const clean = pickPreferredAvatar(rawUrl);
@@ -253,6 +260,7 @@ export default function App() {
   const [enteredTgCode, setEnteredTgCode] = useState('');
   const [pendingTgUser, setPendingTgUser] = useState<any | null>(null);
   const [pendingFaceId, setPendingFaceId] = useState<FaceIdProfileData | null>(null);
+  const [showProfileFaceIdModal, setShowProfileFaceIdModal] = useState<boolean>(false);
   const [hasStartedBotError, setHasStartedBotError] = useState<boolean>(false);
 
   // Profile Form Fields (including Avatar URL and Location Visibility)
@@ -268,6 +276,8 @@ export default function App() {
   const [regInstagram, setRegInstagram] = useState('');
   const [regBio, setRegBio] = useState('Alov.uz da yangi tanishuvlar va suhbatlar uchun.');
   const [regAvatar, setRegAvatar] = useState('');
+  const [regBanner, setRegBanner] = useState('');
+  const [isUploadingBanner, setIsUploadingBanner] = useState(false);
   const [regLocationVisibility, setRegLocationVisibility] = useState<'everyone' | 'mutual' | 'ghost'>('everyone');
 
   // Safety Liability Disclaimer Modal (10s Countdown)
@@ -287,11 +297,14 @@ export default function App() {
   const chatMessagesContainerRef = useRef<HTMLDivElement>(null);
 
   const [usersList, setUsersList] = useState<any[]>([]);
+  const [onlineUserIds, setOnlineUserIds] = useState<Set<string>>(() => new Set());
+  const [postsList, setPostsList] = useState<PostItem[]>([]);
   const [chatsList, setChatsList] = useState<any[]>([]);
   const [filterRegion, setFilterRegion] = useState('Barchasi');
   const [filterDistrict, setFilterDistrict] = useState('Barchasi');
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedProfile, setSelectedProfile] = useState<any | null>(null);
+  const [followModalState, setFollowModalState] = useState<{ user: any; tab: 'followers' | 'following' } | null>(null);
   const [followingIds, setFollowingIds] = useState<string[]>([]);
   const [showAdminPanel, setShowAdminPanel] = useState(false);
   const [chatFriendships, setChatFriendships] = useState<Record<string, boolean>>({});
@@ -354,7 +367,7 @@ export default function App() {
   const [geoWatchId, setGeoWatchId] = useState<number | null>(null);
   const [userCoords, setUserCoords] = useState<{lat: number, lng: number, accuracy?: number}>({ lat: 41.2995, lng: 69.2401, accuracy: 20 });
   const [gpsStatusMsg, setGpsStatusMsg] = useState<string>('');
-  const [activeUsersCount, setActiveUsersCount] = useState<number>(1);
+  const [activeUsersCount, setActiveUsersCount] = useState<number>(0);
   const [mobileChatViewportHeight, setMobileChatViewportHeight] = useState<number | null>(null);
 
   useEffect(() => {
@@ -426,10 +439,109 @@ export default function App() {
 
     socket.on('connect', registerSocketUser);
 
+    const heartbeatTimer = window.setInterval(() => {
+      const myUid = currentUserRef.current?.uid || firebaseUser?.uid;
+      if (myUid && socket.connected) {
+        socket.emit('presence_heartbeat', { uid: myUid });
+      }
+    }, 20000);
+
     socket.on('active_users_count', ({ count }: { count: number }) => {
-      if (typeof count === 'number' && count > 0) {
+      if (typeof count === 'number' && count >= 0) {
         setActiveUsersCount(count);
       }
+    });
+
+    socket.on('presence_sync', ({ onlineUserIds: ids, onlineCount }: { onlineUserIds?: string[]; onlineCount?: number }) => {
+      const nextSet = new Set((ids || []).map(String));
+      setOnlineUserIds(nextSet);
+      if (typeof onlineCount === 'number' && onlineCount >= 0) {
+        setActiveUsersCount(onlineCount);
+      } else {
+        setActiveUsersCount(nextSet.size);
+      }
+      setUsersList(prev =>
+        prev.map(u => {
+          const isOn = Boolean((u.uid && nextSet.has(u.uid)) || (u.id && nextSet.has(u.id)));
+          if (u.isOnline === isOn && (u.status === 'online') === isOn) return u;
+          return { ...u, isOnline: isOn, status: isOn ? 'online' : 'offline' };
+        })
+      );
+    });
+
+    socket.on('user_updated', (updatedUser: any) => {
+      if (!updatedUser) return;
+      setUsersList(prev => {
+        const userMap = new Map<string, any>();
+        prev.forEach(u => userMap.set(u.uid || u.id, u));
+        userMap.set(updatedUser.uid || updatedUser.id, updatedUser);
+        return Array.from(userMap.values());
+      });
+
+      const myUid = currentUserRef.current?.uid;
+      if (myUid && (updatedUser.uid === myUid || updatedUser.id === myUid)) {
+        setCurrentUser((prev: any) => {
+          const merged = { ...(prev || {}), ...updatedUser };
+          try {
+            localStorage.setItem('alov_current_user', JSON.stringify(merged));
+            localStorage.setItem('alov_user_' + merged.uid, JSON.stringify(merged));
+          } catch (e) {}
+          return merged;
+        });
+      }
+
+      setSelectedProfile((prev: any) => {
+        if (prev && (prev.uid === updatedUser.uid || prev.id === updatedUser.id)) {
+          return { ...prev, ...updatedUser };
+        }
+        return prev;
+      });
+
+      setSelectedChatUser((prev: any) => {
+        if (prev && (prev.uid === updatedUser.uid || prev.id === updatedUser.id)) {
+          return { ...prev, ...updatedUser };
+        }
+        return prev;
+      });
+    });
+
+    socket.on('user_deleted', ({ uid }: { uid: string }) => {
+      if (!uid) return;
+      setUsersList(prev => prev.filter(u => u.uid !== uid && u.id !== uid));
+      setSelectedProfile((prev: any) => (prev && (prev.uid === uid || prev.id === uid) ? null : prev));
+    });
+
+    socket.on('stream_started', (streamData: any) => {
+      setUsersList(prev => prev.map(u => {
+        if (u.uid === streamData.hostUid) {
+          return { ...u, isLive: true, liveStreamId: streamData.id, liveTitle: streamData.title };
+        }
+        return u;
+      }));
+    });
+
+    socket.on('stream_stopped', ({ hostUid }: { hostUid: string }) => {
+      setUsersList(prev => prev.map(u => {
+        if (u.uid === hostUid) {
+          return { ...u, isLive: false, liveStreamId: null, liveTitle: null };
+        }
+        return u;
+      }));
+    });
+
+    socket.on('post_created', (post: PostItem) => {
+      if (!post?.id) return;
+      setPostsList(prev => (prev.some(p => p.id === post.id) ? prev : [post, ...prev]));
+    });
+
+    socket.on('post_updated', (post: PostItem) => {
+      if (!post?.id) return;
+      setPostsList(prev => prev.map(p => (p.id === post.id ? post : p)));
+    });
+
+    socket.on('post_deleted', ({ postId }: { postId: string }) => {
+      if (!postId) return;
+      setPostsList(prev => prev.filter(p => p.id !== postId));
     });
 
     const handleIncomingChatMessage = (payload: any) => {
@@ -642,8 +754,17 @@ export default function App() {
     });
 
     return () => {
+      window.clearInterval(heartbeatTimer);
       socket.off('connect', registerSocketUser);
       socket.off('active_users_count');
+      socket.off('presence_sync');
+      socket.off('user_updated');
+      socket.off('user_deleted');
+      socket.off('stream_started');
+      socket.off('stream_stopped');
+      socket.off('post_created');
+      socket.off('post_updated');
+      socket.off('post_deleted');
       socket.off('receive_message', handleIncomingChatMessage);
       socket.off('chat:message', handleIncomingChatMessage);
       socket.off('message_ack');
@@ -1050,23 +1171,6 @@ export default function App() {
         setFirebaseUser(user);
         if (user) {
           await syncUserWithBackend(user);
-          
-          // Update status on beforeunload via sendBeacon / fetch keepalive
-          const handleOffline = () => {
-            if (auth.currentUser) {
-              fetch(getApiUrl('/api/users/update'), {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ uid: auth.currentUser.uid, updates: { status: 'offline' } }),
-                keepalive: true
-              }).catch(() => {});
-            }
-          };
-          window.addEventListener('beforeunload', handleOffline);
-          return () => {
-            window.removeEventListener('beforeunload', handleOffline);
-            handleOffline();
-          };
         } else {
           let hasLocalSession = false;
           try {
@@ -1090,85 +1194,60 @@ export default function App() {
     return () => unsubscribe();
   }, []);
 
-  // Real-time users loader from Render server & Socket.io (Zero Firestore)
+  // Mark user offline on browser tab close / pagehide (regardless of Telegram vs Google auth)
   useEffect(() => {
-    const fetchUsers = async () => {
+    const activeUid = currentUser?.uid || firebaseUser?.uid;
+    if (!activeUid) return;
+    const notifyOffline = () => {
       try {
-        const data = await safeFetchJson(getApiUrl('/api/users'));
-        if (data && data.success && Array.isArray(data.users)) {
-          setUsersList(data.users);
-          setIsLoadingCandidates(false);
+        socketRef.current?.emit('unregister_user', { uid: activeUid });
+        if (navigator.sendBeacon) {
+          navigator.sendBeacon(getApiUrl('/api/users/offline'), JSON.stringify({ uid: activeUid }));
+        } else {
+          fetch(getApiUrl('/api/users/offline'), {
+            method: 'POST',
+            headers: { 'Content-Type': 'text/plain' },
+            body: JSON.stringify({ uid: activeUid }),
+            keepalive: true
+          }).catch(() => {});
+        }
+      } catch {}
+    };
+    window.addEventListener('beforeunload', notifyOffline);
+    window.addEventListener('pagehide', notifyOffline);
+    return () => {
+      window.removeEventListener('beforeunload', notifyOffline);
+      window.removeEventListener('pagehide', notifyOffline);
+    };
+  }, [currentUser?.uid, firebaseUser?.uid]);
+
+  // Initial loader for users, live presence state, and posts from backend
+  useEffect(() => {
+    const fetchInitialData = async () => {
+      try {
+        const [usersData, postsData] = await Promise.all([
+          safeFetchJson(getApiUrl('/api/users')),
+          safeFetchJson(getApiUrl('/api/posts')).catch(() => null),
+        ]);
+        if (usersData && usersData.success && Array.isArray(usersData.users)) {
+          setUsersList(usersData.users);
+          if (Array.isArray(usersData.onlineUserIds)) {
+            setOnlineUserIds(new Set(usersData.onlineUserIds.map(String)));
+            setActiveUsersCount(
+              typeof usersData.onlineCount === 'number' ? usersData.onlineCount : usersData.onlineUserIds.length
+            );
+          }
+        }
+        if (postsData && postsData.success && Array.isArray(postsData.posts)) {
+          setPostsList(postsData.posts);
         }
       } catch (err) {
-        console.warn("Could not fetch users from server:", err);
+        console.warn("Could not fetch users/posts from server:", err);
+      } finally {
         setIsLoadingCandidates(false);
       }
     };
-    fetchUsers();
-
-    const socket = io(getBaseUrl());
-    socket.on('user_updated', (updatedUser: any) => {
-      if (!updatedUser) return;
-      setUsersList(prev => {
-        const userMap = new Map<string, any>();
-        prev.forEach(u => userMap.set(u.uid || u.id, u));
-        userMap.set(updatedUser.uid || updatedUser.id, updatedUser);
-        return Array.from(userMap.values());
-      });
-
-      const myUid = currentUserRef.current?.uid;
-      if (myUid && (updatedUser.uid === myUid || updatedUser.id === myUid)) {
-        setCurrentUser((prev: any) => {
-          const merged = { ...(prev || {}), ...updatedUser };
-          try {
-            localStorage.setItem('alov_current_user', JSON.stringify(merged));
-            localStorage.setItem('alov_user_' + merged.uid, JSON.stringify(merged));
-          } catch (e) {}
-          return merged;
-        });
-      }
-
-      setSelectedProfile((prev: any) => {
-        if (prev && (prev.uid === updatedUser.uid || prev.id === updatedUser.id)) {
-          return { ...prev, ...updatedUser };
-        }
-        return prev;
-      });
-
-      setSelectedChatUser((prev: any) => {
-        if (prev && (prev.uid === updatedUser.uid || prev.id === updatedUser.id)) {
-          return { ...prev, ...updatedUser };
-        }
-        return prev;
-      });
-    });
-
-    socket.on('user_deleted', ({ uid }: { uid: string }) => {
-      if (!uid) return;
-      setUsersList(prev => prev.filter(u => u.uid !== uid && u.id !== uid));
-    });
-
-    socket.on('stream_started', (streamData: any) => {
-      setUsersList(prev => prev.map(u => {
-        if (u.uid === streamData.hostUid) {
-          return { ...u, isLive: true, liveStreamId: streamData.id, liveTitle: streamData.title };
-        }
-        return u;
-      }));
-    });
-
-    socket.on('stream_stopped', ({ hostUid }: { hostUid: string }) => {
-      setUsersList(prev => prev.map(u => {
-        if (u.uid === hostUid) {
-          return { ...u, isLive: false, liveStreamId: null, liveTitle: null };
-        }
-        return u;
-      }));
-    });
-
-    return () => {
-      socket.disconnect();
-    };
+    fetchInitialData();
   }, []);
 
 
@@ -1350,13 +1429,50 @@ export default function App() {
     setActiveTab('map');
   };
 
+  const openUserProfileByUid = async (targetUidOrId: string, snapshot?: any) => {
+    const key = String(targetUidOrId || '').trim();
+    if (!key) return;
+    const { isSelf, user: localMatch } = resolveExactUserByUid(key, usersList, currentUser, snapshot);
+    if (isSelf) {
+      setSelectedProfile(null);
+      setFollowModalState(null);
+      setActiveTab('profile');
+      return;
+    }
+    if (localMatch && (localMatch.uid || localMatch.id)) {
+      setSelectedProfile(localMatch);
+      const canonical = localMatch.uid || localMatch.id;
+      fetch(getApiUrl(`/api/users/${encodeURIComponent(canonical)}`))
+        .then((r) => (r.ok ? r.json() : null))
+        .then((d) => {
+          if (d?.success && d?.user && (d.user.uid === canonical || d.user.id === canonical)) {
+            setSelectedProfile((prev: any) =>
+              prev && (prev.uid === d.user.uid || prev.id === d.user.id) ? { ...prev, ...d.user } : prev
+            );
+          }
+        })
+        .catch(() => {});
+      return;
+    }
+    try {
+      const data = await safeFetchJson(getApiUrl(`/api/users/${encodeURIComponent(key)}`));
+      if (data?.success && data?.user) {
+        setUsersList((prev) =>
+          prev.some((u) => u.uid === data.user.uid) ? prev : [...prev, data.user]
+        );
+        setSelectedProfile(data.user);
+      }
+    } catch (err) {
+      console.warn('Could not resolve profile:', err);
+    }
+  };
+
   // Listen to Custom Map Marker Click Events
   useEffect(() => {
     const handleOpenProfile = (e: any) => {
       const userId = e.detail;
-      const found = usersList.find(u => u.id === userId || u.uid === userId);
-      if (found) {
-        setSelectedProfile(found);
+      if (userId) {
+        openUserProfileByUid(String(userId));
       }
     };
     const handleDrawRoute = (e: any) => {
@@ -1551,7 +1667,7 @@ export default function App() {
         const safeName = getSafeUserDisplayName(u, 'Foydalanuvchi');
         const initial = safeName.charAt(0).toUpperCase();
         const isLive = u.isLive === true;
-        const isOnline = u.status === 'online' || u.isOnline === true;
+        const isOnline = isUserOnlineStrict(u, onlineUserIds);
 
         const otherIcon = L.divIcon({
           className: isLive ? 'custom-live-marker' : 'custom-other-marker',
@@ -1604,7 +1720,7 @@ export default function App() {
         }
       });
     });
-  }, [activeTab, mapReadyTick, usersList, userCoords, isLocationEnabled, currentUser, firebaseUser, filterRegion, filterDistrict]);
+  }, [activeTab, mapReadyTick, usersList, onlineUserIds, userCoords, isLocationEnabled, currentUser, firebaseUser, filterRegion, filterDistrict]);
 
 
   // Device Image File Upload Handler -> Opens Avatar Image Crop Modal
@@ -1621,6 +1737,52 @@ export default function App() {
         }
       };
       reader.readAsDataURL(file);
+    }
+  };
+
+  // Upload Cover Banner directly via server media store (and optionally save immediately to profile)
+  const handleBannerFileChange = async (e: React.ChangeEvent<HTMLInputElement>, saveImmediately: boolean = false) => {
+    const file = e.target.files?.[0];
+    e.target.value = '';
+    if (!file) return;
+    setIsUploadingBanner(true);
+    setErrorMsg('');
+    try {
+      const res = await fetch('/api/media/upload-raw', {
+        method: 'POST',
+        headers: {
+          'Content-Type': file.type || 'image/jpeg',
+          'x-file-name': encodeURIComponent(file.name || 'banner.jpg'),
+        },
+        body: file,
+      });
+      const data = await res.json();
+      if (!res.ok || !data?.success || !data?.url) {
+        setErrorMsg(data?.error || 'Banner yuklanmadi.');
+        return;
+      }
+      setRegBanner(data.url);
+      if (saveImmediately && currentUser?.uid) {
+        const updated = { ...currentUser, banner: data.url };
+        const syncRes = await safeFetchJson(getApiUrl('/api/users/sync'), {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ user: updated }),
+        });
+        const finalUser = syncRes?.user || updated;
+        setCurrentUser(finalUser);
+        setUsersList((prev) =>
+          prev.map((u) => (u.uid === finalUser.uid ? { ...u, ...finalUser } : u))
+        );
+        try {
+          localStorage.setItem('alov_current_user', JSON.stringify(finalUser));
+          localStorage.setItem('alov_user_' + finalUser.uid, JSON.stringify(finalUser));
+        } catch {}
+      }
+    } catch (err: any) {
+      setErrorMsg(err?.message || 'Banner yuklashda xatolik.');
+    } finally {
+      setIsUploadingBanner(false);
     }
   };
 
@@ -1794,6 +1956,7 @@ export default function App() {
         instagram: regInstagram || currentUser?.instagram || '@user_insta',
         bio: regBio,
         avatar: pickPreferredAvatar(regAvatar, firebaseUser?.photoURL, currentUser?.avatar),
+        banner: showProfileModal ? regBanner : (regBanner || currentUser?.banner || ''),
         videoUrl: currentUser?.videoUrl || 'https://assets.mixkit.co/videos/preview/mixkit-young-woman-looking-at-camera-in-a-park-41686-large.mp4',
         followersCount: currentUser?.followersCount ?? 0,
         followingCount: currentUser?.followingCount ?? 0,
@@ -1833,6 +1996,11 @@ export default function App() {
 
   const handleLocationVisibilityChange = (value: 'everyone' | 'mutual' | 'ghost') => {
     setRegLocationVisibility(value);
+    const enabled = value !== 'ghost';
+    setIsLocationEnabled(enabled);
+    setCurrentUser((prev: any) =>
+      prev ? { ...prev, locationVisibility: value, isLocationEnabled: enabled } : prev
+    );
     const activeUid = currentUser?.uid || firebaseUser?.uid;
     if (activeUid) {
       fetch(getApiUrl('/api/users/update'), {
@@ -1840,10 +2008,44 @@ export default function App() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           uid: activeUid,
-          updates: { locationVisibility: value }
+          updates: { locationVisibility: value, isLocationEnabled: enabled }
         })
       }).catch(console.error);
     }
+  };
+
+  const resetAuthFormState = () => {
+    const clean = getInitialAuthDraftState();
+    setAuthEmail(clean.authEmail);
+    setAuthPassword(clean.authPassword);
+    setTelegramInput(clean.telegramInput);
+    setEnteredTgCode(clean.enteredTgCode);
+    setGeneratedTgCode(clean.generatedTgCode);
+    setPendingTgUser(null);
+    setPendingGoogleUser(null);
+    setPendingFaceId(null);
+    setHasStartedBotError(false);
+    setErrorMsg('');
+    setRegName(clean.regName);
+    setRegBirthDate(clean.regBirthDate);
+    setRegAge(clean.regAge);
+    setRegGender(clean.regGender);
+    setRegRegion(clean.regRegion);
+    setRegDistrict(clean.regDistrict);
+    setRegNeighborhood(clean.regNeighborhood);
+    setRegPhone(clean.regPhone);
+    setRegTelegram(clean.regTelegram);
+    setRegInstagram(clean.regInstagram);
+    setRegBio(clean.regBio);
+    setRegAvatar(clean.regAvatar);
+    setRegBanner(clean.regBanner);
+  };
+
+  const openAuthModalClean = (mode: 'login' | 'register' | 'telegram' = 'login') => {
+    resetAuthFormState();
+    setTelegramStep('input_phone');
+    setAuthMode(mode);
+    setShowAuthModal(true);
   };
 
   const handleEmailLogin = async (e: React.FormEvent) => {
@@ -2059,13 +2261,12 @@ export default function App() {
       setErrorMsg('');
       setHasStartedBotError(false);
 
-      // Check if user has previously saved telegramChatId in localStorage
+      // Check ONLY chatId bound strictly to this entered Telegram identifier
       let cachedChatId = undefined;
       try {
         const cleanKey = telegramInput.trim().replace(/^(https?:\/\/t\.me\/|@)/i, '').toLowerCase();
-        cachedChatId = localStorage.getItem('alov_tg_chat_' + cleanKey);
-        if (!cachedChatId && currentUser) {
-          cachedChatId = currentUser.telegramChatId || currentUser.chatId;
+        if (cleanKey) {
+          cachedChatId = localStorage.getItem('alov_tg_chat_' + cleanKey) || undefined;
         }
       } catch (e) {}
 
@@ -2293,24 +2494,28 @@ export default function App() {
   const handleLogout = async () => {
     const activeUid = currentUser?.uid || firebaseUser?.uid;
     if (activeUid) {
+      socketRef.current?.emit('unregister_user', { uid: activeUid });
       try {
-        await fetch(getApiUrl('/api/users/update'), {
+        await fetch(getApiUrl('/api/users/offline'), {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            uid: activeUid,
-            updates: { isOnline: false, status: 'offline' }
-          })
+          headers: { 'Content-Type': 'text/plain' },
+          body: JSON.stringify({ uid: activeUid })
         });
       } catch (e) {}
     }
     try {
       localStorage.removeItem('alov_current_user');
+      localStorage.removeItem('alov_last_tg_chat');
     } catch (e) {}
     await signOut(auth).catch(() => {});
     setFirebaseUser(null);
     setCurrentUser(null);
+    setSelectedProfile(null);
+    setSelectedChatUser(null);
+    setFollowModalState(null);
+    setChatView('list');
     setShowAdminPanel(false);
+    resetAuthFormState();
     setActiveTab('landing');
   };
 
@@ -2343,8 +2548,22 @@ export default function App() {
             localStorage.setItem('alov_user_' + data.follower.uid, JSON.stringify(data.follower));
           } catch (e) {}
         }
+        setUsersList(prev =>
+          prev.map(u => {
+            if (data.follower && (u.uid === data.follower.uid || u.id === data.follower.id)) {
+              return { ...u, ...data.follower };
+            }
+            if (data.target && (u.uid === data.target.uid || u.id === data.target.id)) {
+              return { ...u, ...data.target };
+            }
+            return u;
+          })
+        );
         if (data.target && selectedProfile && (selectedProfile.uid === data.target.uid || selectedProfile.id === data.target.id)) {
           setSelectedProfile(data.target);
+        }
+        if (data.target && followModalState?.user && (followModalState.user.uid === data.target.uid || followModalState.user.id === data.target.id)) {
+          setFollowModalState(prev => prev ? { ...prev, user: data.target } : null);
         }
       }
     } catch (err) {
@@ -2813,16 +3032,17 @@ export default function App() {
   const dashboardContent = (
     <div className="h-full bg-[#FDFBF9] text-[#221719] font-sans flex flex-col w-full relative overflow-hidden">
       
-      {/* Top Header (always pinned cleanly at top) */}
-      <header className="shrink-0 bg-white/95 backdrop-blur-md border-b border-[rgba(166,36,51,0.1)] px-2.5 sm:px-5 h-14 flex items-center justify-between gap-1.5 z-40">
-          <div className="flex items-center gap-1.5 sm:gap-2.5 shrink-0 cursor-pointer" onClick={() => setActiveTab('discover')}>
+      {/* Top Header (always pinned cleanly at top, zero overflow on 390px mobile) */}
+      <header className="shrink-0 bg-white/95 backdrop-blur-md border-b border-[rgba(166,36,51,0.1)] px-3 sm:px-5 h-14 flex items-center justify-between gap-2 z-40 overflow-hidden">
+          <div className="flex items-center gap-1.5 sm:gap-2.5 min-w-0 shrink-0 cursor-pointer" onClick={() => setActiveTab('discover')}>
             <img src="/assets/aistudio/image_e20a1307.png" alt="Alov.uz Logo" className="w-7 h-7 rounded-xl object-cover border border-[#C93545]/30 shadow-xs shrink-0" />
-            <span className="text-[16px] sm:text-[18px] font-black font-editorial tracking-tight text-[#221719] whitespace-nowrap shrink-0">
+            <span className="text-[15px] sm:text-[18px] font-black font-editorial tracking-tight text-[#221719] whitespace-nowrap shrink-0">
               alov<span className="text-[#C93545]">.uz</span>
             </span>
-            <span className="text-[9.5px] sm:text-[10.5px] font-bold text-emerald-700 bg-emerald-50/90 px-2 py-0.5 rounded-full flex items-center gap-1 border border-emerald-200/80 shadow-xs whitespace-nowrap shrink-0">
+            <span className="text-[10px] font-bold text-emerald-700 bg-emerald-50/90 px-1.5 sm:px-2 py-0.5 rounded-full flex items-center gap-1 border border-emerald-200/80 shadow-xs whitespace-nowrap shrink-0">
               <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse shrink-0" />
-              <span>{activeUsersCount} onlayn</span>
+              <span>{activeUsersCount}</span>
+              <span className="hidden xs:inline sm:inline">onlayn</span>
             </span>
           </div>
 
@@ -2831,8 +3051,17 @@ export default function App() {
               <>
                 <button
                   onClick={() => setActiveTab('profile')}
+                  title="Admin Full Almaz & Moneta Balansi"
+                  className="sm:hidden flex items-center gap-1 bg-[#FAF4F2] border border-[#C89B54]/40 text-[#221719] py-1 px-2 rounded-full text-[10px] font-bold shadow-xs transition whitespace-nowrap shrink-0"
+                >
+                  <span>💎</span>
+                  <Coins className="w-3 h-3 text-amber-600 fill-amber-400 shrink-0" />
+                  <span>Full</span>
+                </button>
+                <button
+                  onClick={() => setActiveTab('profile')}
                   title="Admin Full Almaz Balansi"
-                  className="flex items-center gap-1 bg-gradient-to-r from-cyan-50 to-sky-50 border border-cyan-200/90 text-cyan-900 py-1 px-2 rounded-full text-[9.5px] sm:text-[10.5px] font-bold shadow-xs hover:bg-cyan-100 transition whitespace-nowrap shrink-0"
+                  className="hidden sm:flex items-center gap-1 bg-gradient-to-r from-cyan-50 to-sky-50 border border-cyan-200/90 text-cyan-900 py-1 px-2.5 rounded-full text-[10.5px] font-bold shadow-xs hover:bg-cyan-100 transition whitespace-nowrap shrink-0"
                 >
                   <span>💎</span>
                   <span>Full</span>
@@ -2840,7 +3069,7 @@ export default function App() {
                 <button
                   onClick={() => setActiveTab('profile')}
                   title="Admin Full Moneta Balansi"
-                  className="flex items-center gap-1 bg-gradient-to-r from-amber-50 to-yellow-50 border border-amber-300/80 text-amber-900 py-1 px-2 rounded-full text-[9.5px] sm:text-[10.5px] font-bold shadow-xs hover:bg-amber-100 transition whitespace-nowrap shrink-0"
+                  className="hidden sm:flex items-center gap-1 bg-gradient-to-r from-amber-50 to-yellow-50 border border-amber-300/80 text-amber-900 py-1 px-2.5 rounded-full text-[10.5px] font-bold shadow-xs hover:bg-amber-100 transition whitespace-nowrap shrink-0"
                 >
                   <Coins className="w-3 h-3 text-amber-600 fill-amber-400 shrink-0" />
                   <span>Full</span>
@@ -2868,7 +3097,7 @@ export default function App() {
               <button
                 onClick={() => setShowAdminPanel(true)}
                 title="Admin Panel"
-                className="flex items-center gap-1 bg-[#221719] hover:bg-[#352427] text-[#F5D28E] py-1 px-2 rounded-full text-[9.5px] sm:text-[10.5px] font-bold shadow-xs border border-[#C89B54]/40 transition active:scale-95 whitespace-nowrap shrink-0"
+                className="flex items-center gap-1 bg-[#221719] hover:bg-[#352427] text-[#F5D28E] py-1 px-2 sm:px-2.5 rounded-full text-[10px] sm:text-[10.5px] font-bold shadow-xs border border-[#C89B54]/40 transition active:scale-95 whitespace-nowrap shrink-0"
               >
                 <Crown className="w-3 h-3 shrink-0" />
                 <span>Admin</span>
@@ -2877,7 +3106,8 @@ export default function App() {
 
             <button 
               onClick={() => setActiveTab('profile')}
-              className="flex items-center gap-1.5 bg-[#FAF4F2] border border-[rgba(166,36,51,0.14)] py-0.5 px-1.5 pr-2 rounded-full shadow-subtle whitespace-nowrap shrink-0 hover:bg-[#F5EBE7] transition"
+              title="Profil"
+              className="flex items-center gap-1.5 bg-[#FAF4F2] border border-[rgba(166,36,51,0.14)] p-0.5 sm:px-1.5 sm:pr-2 rounded-full shadow-subtle whitespace-nowrap shrink-0 hover:bg-[#F5EBE7] transition"
             >
               {(() => {
                 const headerAvatar = resolveAvatarUrl(currentUser?.avatar || firebaseUser?.photoURL);
@@ -2888,7 +3118,7 @@ export default function App() {
                       <img
                         src={headerAvatar}
                         alt={headerName}
-                        className="w-5.5 h-5.5 rounded-full object-cover shrink-0 border border-white"
+                        className="w-6 h-6 sm:w-5.5 sm:h-5.5 rounded-full object-cover shrink-0 border border-white"
                         onError={(e: any) => {
                           e.currentTarget.style.display = 'none';
                           const fallbackEl = e.currentTarget.nextElementSibling as HTMLElement | null;
@@ -2898,13 +3128,13 @@ export default function App() {
                     ) : null}
                     <span
                       className={cn(
-                        "w-5.5 h-5.5 rounded-full bg-rose-100 text-[#C93545] text-[10px] font-black items-center justify-center shrink-0",
+                        "w-6 h-6 sm:w-5.5 sm:h-5.5 rounded-full bg-rose-100 text-[#C93545] text-[10px] font-black items-center justify-center shrink-0",
                         headerAvatar ? "hidden" : "flex"
                       )}
                     >
                       {headerName.charAt(0).toUpperCase()}
                     </span>
-                    <span className="text-[10px] sm:text-[11px] font-bold truncate max-w-[46px] sm:max-w-[90px] text-[#221719]">{headerName}</span>
+                    <span className="hidden sm:inline text-[11px] font-bold truncate max-w-[90px] text-[#221719]">{headerName}</span>
                   </>
                 );
               })()}
@@ -2919,7 +3149,7 @@ export default function App() {
       <div className={`flex-1 min-h-0 relative ${(activeTab === 'reels' || activeTab === 'map' || (activeTab === 'chats' && chatView === 'conversation')) ? 'overflow-hidden flex flex-col p-0' : 'overflow-y-auto overscroll-y-contain p-3 sm:p-5 space-y-4 pb-20'}`}>
         
         {/* --- LANDING TAB --- */}
-        {activeTab === 'landing' && <LandingPage onLogin={() => setShowAuthModal(true)} />}
+        {activeTab === 'landing' && <LandingPage onLogin={() => openAuthModalClean('login')} />}
 
         {/* --- DISCOVER TAB --- */}
         {activeTab === 'discover' && (
@@ -2938,7 +3168,7 @@ export default function App() {
               <button
                 onClick={() => {
                   if (!firebaseUser && !currentUser) {
-                    setShowAuthModal(true);
+                    openAuthModalClean('login');
                     return;
                   }
                   setLiveModalMode('broadcaster');
@@ -2997,9 +3227,15 @@ export default function App() {
                 const faceVerified = Boolean(user.faceId?.verified);
                 const detectedGender = user.faceId?.detectedGender || user.gender;
                 const genderBadge = detectedGender === 'female' ? '👩 Qiz' : '👨 Yigit';
+                const isOnline = isUserOnlineStrict(user, onlineUserIds);
                 return (
                 <div key={user.uid ? `${user.uid}_${idx}` : `${user.id}_${idx}`} className="bg-white rounded-[22px] p-2.5 shadow-subtle flex flex-col justify-between space-y-2.5 border border-[rgba(166,36,51,0.1)] hover:shadow-md hover:border-[rgba(166,36,51,0.22)] transition-all">
-                  <div className="relative aspect-[3/4] w-full rounded-[16px] overflow-hidden bg-[#FAF4F2]">
+                  <button
+                    type="button"
+                    onClick={() => openUserProfileByUid(user.uid || user.id, user)}
+                    aria-label={`${candidateName} profilini ochish`}
+                    className="relative aspect-[3/4] w-full rounded-[16px] overflow-hidden bg-[#FAF4F2] block text-left focus:outline-none focus:ring-2 focus:ring-[#C93545]/40"
+                  >
                     {candidateAvatar ? (
                       <img 
                         src={candidateAvatar} 
@@ -3039,15 +3275,15 @@ export default function App() {
                       {user.id}
                     </span>
 
-                    {/* Online / Offline Status Badge */}
+                    {/* Strict Real-Time Online / Offline Status Badge */}
                     <div className={cn(
                       "absolute bottom-2 left-2 px-2 py-0.5 rounded-full backdrop-blur-md text-[8.5px] font-semibold flex items-center space-x-1 shadow-xs border border-white/20 text-white",
-                      (user.status === 'online' || user.isOnline) ? "bg-emerald-600/90" : "bg-[#221719]/75"
+                      isOnline ? "bg-emerald-600/90" : "bg-[#221719]/75"
                     )}>
-                      <span className={cn("w-1.5 h-1.5 rounded-full bg-white", (user.status === 'online' || user.isOnline) && "animate-pulse")} />
-                      <span>{(user.status === 'online' || user.isOnline) ? "Onlayn" : "Oflayn"}</span>
+                      <span className={cn("w-1.5 h-1.5 rounded-full bg-white", isOnline && "animate-pulse")} />
+                      <span>{isOnline ? "Onlayn" : "Oflayn"}</span>
                     </div>
-                  </div>
+                  </button>
 
                   <div className="min-w-0 space-y-1">
                     <h3 className="text-sm font-bold font-editorial text-[#221719] truncate">{candidateName}, {calculateAge(user.birthDate, user.age)} yoshda</h3>
@@ -3095,7 +3331,7 @@ export default function App() {
                   )}
 
                   <div className="flex space-x-1.5 pt-0.5">
-                    <button onClick={() => setSelectedProfile(user)} className="flex-1 py-1.5 rounded-full bg-[#FAF4F2] hover:bg-[#F3E4E0] text-[#A62433] font-bold text-[10.5px] border border-[rgba(166,36,51,0.12)] transition active:scale-95">
+                    <button onClick={() => openUserProfileByUid(user.uid || user.id, user)} className="flex-1 py-1.5 rounded-full bg-[#FAF4F2] hover:bg-[#F3E4E0] text-[#A62433] font-bold text-[10.5px] border border-[rgba(166,36,51,0.12)] transition active:scale-95">
                       Profil
                     </button>
                     <button onClick={() => openChatWithUser(user)} className="flex-1 py-1.5 rounded-full bg-[#C93545] hover:bg-[#A62433] text-white font-bold text-[10.5px] transition active:scale-95">
@@ -3109,6 +3345,39 @@ export default function App() {
           </div>
         )}
 
+        {/* --- POSTS / LENTA TAB --- */}
+        {activeTab === 'posts' && (
+          <div className="space-y-4">
+            <div className="bg-white p-4 sm:p-5 rounded-[24px] border border-[rgba(166,36,51,0.1)] shadow-subtle flex items-center justify-between gap-3">
+              <div>
+                <h2 className="text-xl sm:text-2xl font-editorial font-bold text-[#221719]">Postlar</h2>
+                <p className="text-[11px] text-[#6B5B5E]">Rasm, video va musiqiy lahzalar bilan bo'lishing</p>
+              </div>
+              <span className="px-3 py-1 rounded-full bg-[#FAF4F2] border border-[rgba(166,36,51,0.12)] text-[11px] font-bold text-[#A62433] tabular-nums shrink-0">
+                {postsList.length} ta post
+              </span>
+            </div>
+
+            <PostsFeed
+              posts={postsList}
+              currentUser={currentUser}
+              usersList={usersList}
+              onlineUserIds={onlineUserIds}
+              allowCompose={true}
+              onPostCreated={(post) =>
+                setPostsList((prev) => (prev.some((p) => p.id === post.id) ? prev : [post, ...prev]))
+              }
+              onPostUpdated={(post) =>
+                setPostsList((prev) => prev.map((p) => (p.id === post.id ? post : p)))
+              }
+              onPostDeleted={(postId) =>
+                setPostsList((prev) => prev.filter((p) => p.id !== postId))
+              }
+              onOpenProfile={openUserProfileByUid}
+              onOpenAuth={() => openAuthModalClean('login')}
+            />
+          </div>
+        )}
 
         {/* --- REELS / EFIRLAR TAB (Only active live streamers) --- */}
         {activeTab === 'reels' && (
@@ -3149,7 +3418,7 @@ export default function App() {
                     <button
                       onClick={() => {
                         if (!firebaseUser && !currentUser) {
-                          setShowAuthModal(true);
+                          openAuthModalClean('login');
                           return;
                         }
                         setLiveModalMode('broadcaster');
@@ -3341,7 +3610,7 @@ export default function App() {
                               {getSafeUserDisplayName(otherUser, 'F').charAt(0).toUpperCase()}
                             </div>
                           )}
-                          {otherUser?.status === 'online' && (
+                          {isUserOnlineStrict(otherUser, onlineUserIds) && (
                             <span className="absolute bottom-0 right-0 w-3 h-3 bg-[#10B981] border-2 border-white rounded-full"></span>
                           )}
                           {chat.isAI && (
@@ -3387,26 +3656,37 @@ export default function App() {
                     <button onClick={() => setChatView('list')} className="p-2 rounded-full hover:bg-slate-100 text-slate-700 transition active:scale-90 shrink-0">
                       <ArrowLeft className="w-5 h-5" />
                     </button>
-                    <div className="flex items-center space-x-2.5 min-w-0">
-                      <div className="relative shrink-0">
-                        {resolveAvatarUrl(selectedChatUser?.avatar) ? (
-                          <img src={resolveAvatarUrl(selectedChatUser?.avatar)} alt={selectedChatUser?.name || ''} className="w-9 h-9 rounded-full object-cover border border-slate-100" />
-                        ) : (
-                          <div className="w-9 h-9 rounded-full bg-rose-100 text-[#E8474A] font-black text-sm flex items-center justify-center border border-rose-200">
-                            {getSafeUserDisplayName(selectedChatUser, 'F').charAt(0).toUpperCase()}
+                    {(() => {
+                      const partnerOnline = isUserOnlineStrict(selectedChatUser, onlineUserIds);
+                      const partnerUid = selectedChatUser?.uid || selectedChatUser?.id;
+                      return (
+                        <button
+                          type="button"
+                          onClick={() => partnerUid && openUserProfileByUid(partnerUid, selectedChatUser)}
+                          className="flex items-center space-x-2.5 min-w-0 text-left hover:opacity-85 transition"
+                          title="Profilni ko'rish"
+                        >
+                          <div className="relative shrink-0">
+                            {resolveAvatarUrl(selectedChatUser?.avatar) ? (
+                              <img src={resolveAvatarUrl(selectedChatUser?.avatar)} alt={selectedChatUser?.name || ''} className="w-9 h-9 rounded-full object-cover border border-slate-100" />
+                            ) : (
+                              <div className="w-9 h-9 rounded-full bg-rose-100 text-[#E8474A] font-black text-sm flex items-center justify-center border border-rose-200">
+                                {getSafeUserDisplayName(selectedChatUser, 'F').charAt(0).toUpperCase()}
+                              </div>
+                            )}
+                            {partnerOnline && (
+                              <span className="absolute bottom-0 right-0 w-2.5 h-2.5 bg-[#10B981] border-2 border-white rounded-full"></span>
+                            )}
                           </div>
-                        )}
-                        {(selectedChatUser?.status === 'online' || selectedChatUser?.isOnline) && (
-                          <span className="absolute bottom-0 right-0 w-2.5 h-2.5 bg-[#10B981] border-2 border-white rounded-full"></span>
-                        )}
-                      </div>
-                      <div className="min-w-0">
-                        <h3 className="font-sans font-bold text-sm text-slate-900 leading-none truncate">{selectedChatUser?.name}</h3>
-                        <p className="text-[10px] text-slate-400 mt-1">
-                          {(selectedChatUser?.status === 'online' || selectedChatUser?.isOnline) ? 'tarmoqda' : 'yaqinda online edi'}
-                        </p>
-                      </div>
-                    </div>
+                          <div className="min-w-0">
+                            <h3 className="font-sans font-bold text-sm text-slate-900 leading-none truncate">{selectedChatUser?.name}</h3>
+                            <p className={cn("text-[10px] mt-1", partnerOnline ? "text-emerald-600 font-semibold" : "text-slate-400")}>
+                              {partnerOnline ? 'tarmoqda' : formatLastSeenUz(selectedChatUser?.lastSeen, false)}
+                            </p>
+                          </div>
+                        </button>
+                      );
+                    })()}
                   </div>
                   <div className="flex items-center space-x-1">
                     {(() => {
@@ -3688,220 +3968,450 @@ export default function App() {
           </div>
         )}
 
-        {/* --- PROFILE TAB --- */}
-        {activeTab === 'profile' && (
-          <div className="bg-white rounded-[24px] border border-[rgba(166,36,51,0.1)] shadow-subtle p-5 sm:p-6 space-y-4">
-            {(() => {
-              const profileAvatar = resolveAvatarUrl(currentUser?.avatar || firebaseUser?.photoURL);
-              const profileName = getSafeUserDisplayName(currentUser, firebaseUser?.displayName || 'Profil');
-              return (
-                <div className="flex items-center space-x-4">
-                  {profileAvatar ? (
+        {/* --- PROFILE TAB (Editorial Luxury Dating Profile) --- */}
+        {activeTab === 'profile' && (() => {
+          const profileAvatar = resolveAvatarUrl(currentUser?.avatar || firebaseUser?.photoURL);
+          const profileName = getSafeUserDisplayName(currentUser, firebaseUser?.displayName || 'Profil');
+          const isAdmin = isAdminTelegramUser(currentUser);
+          const locationText = [currentUser?.district, currentUser?.region].filter(Boolean).join(', ') || "O'zbekiston";
+          const profileBanner = resolveAvatarUrl(currentUser?.banner);
+          const followersCount = Array.isArray(currentUser?.followers)
+            ? currentUser.followers.length
+            : (currentUser?.followersCount ?? 0);
+          const followingCount = Array.isArray(currentUser?.following)
+            ? currentUser.following.length
+            : (currentUser?.followingCount ?? 0);
+          const totalLikesCount = Math.max(
+            Number(currentUser?.likesCount || 0),
+            computeAuthorTotalLikes(postsList, currentUser?.uid)
+          );
+          const openEditProfileModal = () => {
+            setRegName(currentUser?.name || '');
+            setRegAge(String(currentUser?.age || 22));
+            setRegGender(currentUser?.gender || 'female');
+            setRegRegion(currentUser?.region || 'Toshkent shahri');
+            setRegDistrict(currentUser?.district || 'Yunusobod tumani');
+            setRegNeighborhood(currentUser?.neighborhood || 'Bodomzor');
+            setRegPhone(currentUser?.phone || '');
+            setRegTelegram(currentUser?.telegram || '');
+            setRegInstagram(currentUser?.instagram || '');
+            setRegBio(currentUser?.bio || '');
+            setRegAvatar(currentUser?.avatar || '');
+            setRegBanner(currentUser?.banner || '');
+            setRegLocationVisibility(currentUser?.locationVisibility || 'everyone');
+            setShowProfileModal(true);
+          };
+
+          return (
+            <div className="space-y-4">
+              {/* Editorial Profile Hero Card */}
+              <div className="bg-white rounded-[28px] border border-[rgba(166,36,51,0.11)] shadow-[0_10px_35px_rgba(34,23,25,0.05)] overflow-hidden">
+                {/* Expanded Cover Banner (h-40 sm:h-56) with Upload Control */}
+                <div className="relative h-40 sm:h-56 bg-gradient-to-br from-[#FBE7EB] via-[#F7DDD6] to-[#EED5DC] border-b border-[rgba(166,36,51,0.1)] overflow-hidden">
+                  {profileBanner ? (
                     <img
-                      src={profileAvatar}
-                      alt={profileName}
-                      className="w-18 h-18 rounded-full object-cover border-2 border-[#C93545] shrink-0 shadow-sm"
+                      src={profileBanner}
+                      alt={`${profileName} banneri`}
+                      className="w-full h-full object-cover object-center"
                       onError={(e: any) => {
                         e.currentTarget.style.display = 'none';
-                        const fallbackEl = e.currentTarget.nextElementSibling as HTMLElement | null;
-                        if (fallbackEl) fallbackEl.style.display = 'flex';
                       }}
                     />
-                  ) : null}
-                  <div
-                    className={cn(
-                      "w-18 h-18 rounded-full bg-[#FAF4F2] text-[#C93545] font-editorial font-black text-2xl items-center justify-center border-2 border-[#C93545] shrink-0",
-                      profileAvatar ? "hidden" : "flex"
-                    )}
-                  >
-                    {profileName.charAt(0).toUpperCase()}
+                  ) : (
+                    <div className="w-full h-full flex items-center justify-center pointer-events-none">
+                      <div className="text-center opacity-55">
+                        <ImageIcon className="w-8 h-8 text-[#A62433] mx-auto mb-1" />
+                        <p className="text-[11px] font-bold text-[#7A4A53]">Profil banneri uchun joy</p>
+                      </div>
+                    </div>
+                  )}
+                  <div className="absolute inset-0 bg-gradient-to-t from-black/35 via-transparent to-black/15 pointer-events-none" />
+
+                  <div className="absolute top-3.5 left-4 right-4 flex items-center justify-between gap-2">
+                    <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-emerald-600/90 backdrop-blur-md text-white text-[10px] font-bold border border-white/25 shadow-xs">
+                      <span className="w-1.5 h-1.5 rounded-full bg-white animate-pulse" />
+                      <span>Onlayn</span>
+                    </span>
+
+                    <div className="flex items-center gap-2">
+                      <label className="cursor-pointer inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-white/95 hover:bg-white text-[#221719] border border-[rgba(166,36,51,0.14)] text-[11px] font-bold shadow-sm transition active:scale-95">
+                        <Camera className="w-3.5 h-3.5 text-[#C93545]" />
+                        <span>{isUploadingBanner ? 'Yuklanmoqda...' : 'Banner yuklash'}</span>
+                        <input
+                          type="file"
+                          accept="image/*"
+                          disabled={isUploadingBanner}
+                          onChange={(e) => handleBannerFileChange(e, true)}
+                          className="hidden"
+                        />
+                      </label>
+                      <button
+                        type="button"
+                        onClick={openEditProfileModal}
+                        className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-white/95 hover:bg-white text-[#221719] border border-[rgba(166,36,51,0.14)] text-[11px] font-bold shadow-sm transition active:scale-95"
+                      >
+                        <Edit3 className="w-3.5 h-3.5 text-[#C93545]" />
+                        <span>Tahrirlash</span>
+                      </button>
+                    </div>
                   </div>
-                  <div className="flex-1 min-w-0">
-                    <div className="flex items-center gap-2 flex-wrap">
-                      <h1 className="text-xl sm:text-2xl font-editorial font-bold truncate text-[#221719]">{profileName}</h1>
-                      {isAdminTelegramUser(currentUser) && (
-                        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-[#221719] text-[#F5D28E] text-[10px] font-bold">
-                          <Crown className="w-3 h-3" />
-                          <span>Admin</span>
+                </div>
+
+                <div className="px-5 sm:px-7 pb-6">
+                  <div className="flex flex-col sm:flex-row sm:items-end gap-4 -mt-12 sm:-mt-14 relative z-10">
+                    <div className="relative shrink-0 self-start">
+                      {profileAvatar ? (
+                        <img
+                          src={profileAvatar}
+                          alt={profileName}
+                          className="w-24 h-24 sm:w-28 sm:h-28 rounded-full object-cover border-4 border-white shadow-[0_10px_28px_rgba(166,36,51,0.16)] bg-[#FAF4F2]"
+                          onError={(e: any) => {
+                            e.currentTarget.style.display = 'none';
+                            const fallbackEl = e.currentTarget.nextElementSibling as HTMLElement | null;
+                            if (fallbackEl) fallbackEl.style.display = 'flex';
+                          }}
+                        />
+                      ) : null}
+                      <div
+                        className={cn(
+                          "w-24 h-24 sm:w-28 sm:h-28 rounded-full bg-[#FAF4F2] text-[#C93545] font-editorial font-black text-3xl items-center justify-center border-4 border-white shadow-[0_10px_28px_rgba(166,36,51,0.16)]",
+                          profileAvatar ? "hidden" : "flex"
+                        )}
+                      >
+                        {profileName.charAt(0).toUpperCase()}
+                      </div>
+                      {currentUser?.faceId?.verified && (
+                        <span
+                          title="Face ID Tasdiqlangan"
+                          className="absolute bottom-1 right-1 w-6 h-6 rounded-full bg-emerald-600 text-white border-2 border-white flex items-center justify-center shadow-sm"
+                        >
+                          <Check className="w-3.5 h-3.5" />
                         </span>
                       )}
                     </div>
-                    <p className="text-[11px] font-mono font-bold text-[#C93545]">ID: {currentUser?.id}</p>
-                    <p className="text-[11px] text-[#6B5B5E]">{[currentUser?.district, currentUser?.region].filter(Boolean).join(', ') || "O'zbekiston"}</p>
-                  </div>
-                </div>
-              );
-            })()}
 
-            {/* Admin Full Coins + Full Diamonds Card */}
-            {isAdminTelegramUser(currentUser) && (
-              <div className="grid grid-cols-2 gap-2.5 bg-gradient-to-r from-[#221719] to-[#3A2226] text-white p-3.5 rounded-[18px] border border-[#C89B54]/40 shadow-sm">
-                <div className="bg-white/10 rounded-xl p-2.5 flex items-center justify-between">
-                  <div>
-                    <p className="text-[10px] text-[#F5D28E] font-bold uppercase tracking-wider">Almaz Wallet</p>
-                    <p className="text-sm sm:text-base font-black text-white">💎 Full ({(currentUser?.diamonds ?? ADMIN_FULL_DIAMONDS).toLocaleString()})</p>
-                  </div>
-                </div>
-                <div className="bg-white/10 rounded-xl p-2.5 flex items-center justify-between">
-                  <div>
-                    <p className="text-[10px] text-[#F5D28E] font-bold uppercase tracking-wider">Moneta Balansi</p>
-                    <p className="text-sm sm:text-base font-black text-white">🪙 Full ({(currentUser?.coins ?? ADMIN_FULL_COINS).toLocaleString()})</p>
-                  </div>
-                </div>
-              </div>
-            )}
+                    <div className="flex-1 min-w-0 sm:pb-1">
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <h1 className="text-2xl sm:text-[28px] font-editorial font-bold text-[#221719] leading-tight truncate">
+                          {profileName}
+                        </h1>
+                        {isAdmin ? (
+                          <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full bg-[#221719] text-[#F5D28E] text-[10px] font-bold tracking-wide shrink-0">
+                            <Crown className="w-3 h-3" />
+                            <span>Platforma Admini</span>
+                          </span>
+                        ) : currentUser?.faceId?.verified ? (
+                          <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full bg-emerald-50 text-emerald-800 border border-emerald-200 text-[10px] font-bold shrink-0">
+                            <ShieldCheck className="w-3 h-3 text-emerald-600" />
+                            <span>Face ID Tasdiqlangan</span>
+                          </span>
+                        ) : null}
+                      </div>
 
-            {/* Face ID Biometric Card */}
-            {currentUser?.faceId?.verified ? (
-              <div className="bg-emerald-50/90 border border-emerald-200 rounded-[18px] p-3.5 space-y-2">
-                <div className="flex items-center justify-between gap-2">
-                  <div className="flex items-center gap-2">
-                    <div className="w-8 h-8 rounded-full bg-emerald-600 text-white flex items-center justify-center shrink-0">
-                      <ScanFace className="w-4 h-4" />
-                    </div>
-                    <div>
-                      <p className="text-xs font-bold text-emerald-950">Face ID Biometrik Tasdiqlangan</p>
-                      <p className="text-[10.5px] text-emerald-800 font-medium">
-                        Aniqlangan jins: <b>{genderToUzLabel(currentUser.faceId.detectedGender || currentUser.gender)}</b> · {currentUser.faceId.confidence ?? 95}%
-                      </p>
+                      <div className="mt-1 flex flex-wrap items-center gap-x-2.5 gap-y-1 text-xs text-[#6B5B5E]">
+                        <span className="inline-flex items-center gap-1">
+                          <MapPin className="w-3.5 h-3.5 text-[#C93545]" />
+                          <span>{locationText}</span>
+                        </span>
+                        <span className="text-[#D4C3C6]">·</span>
+                        <span>{genderToUzLabel(currentUser?.faceId?.detectedGender || currentUser?.gender || 'female')}</span>
+                        <span className="text-[#D4C3C6]">·</span>
+                        <span className="font-mono text-[11px] tabular-nums text-[#8B7A7E]">ID: {currentUser?.id}</span>
+                      </div>
                     </div>
                   </div>
-                  <span className="px-2 py-0.5 rounded-full bg-emerald-600 text-white text-[9.5px] font-bold shrink-0">
-                    TASDIQLANGAN ✓
-                  </span>
+
+                  {/* Clean unboxed editorial bio */}
+                  <p className="mt-4 text-[13px] sm:text-sm text-[#4A3B3D] leading-relaxed max-w-2xl">
+                    {currentUser?.bio || "Alov.uz platformasida samimiy tanishuvlar va yangi suhbatlar."}
+                  </p>
+
+                  {/* Hairline-divided Interactive Stats Row */}
+                  <div className="mt-5 pt-4 border-t border-[rgba(166,36,51,0.09)] grid grid-cols-3 divide-x divide-[rgba(166,36,51,0.09)] text-center">
+                    <button
+                      type="button"
+                      onClick={() => setFollowModalState({ user: currentUser, tab: 'followers' })}
+                      className="px-2 py-1 rounded-xl hover:bg-[#FAF4F2] transition group"
+                    >
+                      <p className="text-lg sm:text-xl font-black tabular-nums text-[#221719] group-hover:text-[#C93545] transition">{followersCount}</p>
+                      <p className="text-[11px] font-semibold text-[#7A686C] mt-0.5">Obunachilar</p>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setFollowModalState({ user: currentUser, tab: 'following' })}
+                      className="px-2 py-1 rounded-xl hover:bg-[#FAF4F2] transition group"
+                    >
+                      <p className="text-lg sm:text-xl font-black tabular-nums text-[#221719] group-hover:text-[#C93545] transition">{followingCount}</p>
+                      <p className="text-[11px] font-semibold text-[#7A686C] mt-0.5">Obunalar</p>
+                    </button>
+                    <div className="px-2 py-1">
+                      <p className="text-lg sm:text-xl font-black tabular-nums text-[#C93545]">{totalLikesCount}</p>
+                      <p className="text-[11px] font-semibold text-[#7A686C] mt-0.5">Laiklar</p>
+                    </div>
+                  </div>
                 </div>
-                <div className="flex flex-wrap items-center justify-between gap-2 text-[10px] text-emerald-800 pt-1 border-t border-emerald-200/70">
-                  <span>Jonlilik: Ko'z harakati · Tabassum ✓</span>
-                  {currentUser.faceId.verifiedAt && (
-                    <span>Sana: {formatFaceIdDateUz(currentUser.faceId.verifiedAt)}</span>
+              </div>
+
+              {/* Balanced 2-Column Account & Privacy Grid */}
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                {/* Left Card: Balans & Biometrik Tasdiq */}
+                <div className="bg-white rounded-[24px] border border-[rgba(166,36,51,0.1)] shadow-subtle p-5 flex flex-col justify-between gap-4">
+                  <div className="space-y-3.5">
+                    <div className="flex items-center justify-between">
+                      <h2 className="text-xs font-bold uppercase tracking-[0.12em] text-[#8E7C80]">
+                        Balans va Biometrik Tasdiq
+                      </h2>
+                      {isAdmin && (
+                        <span className="text-[10px] font-bold text-[#9A6F2B] bg-[#FBF4E6] px-2 py-0.5 rounded-full border border-[#C89B54]/30">
+                          Cheksiz
+                        </span>
+                      )}
+                    </div>
+
+                    {isAdmin ? (
+                      <div className="rounded-2xl bg-gradient-to-br from-[#221719] to-[#3A2226] text-white p-4 space-y-3 border border-[#C89B54]/30">
+                        <div className="grid grid-cols-2 gap-3 divide-x divide-white/15">
+                          <div>
+                            <p className="text-[10px] font-bold uppercase tracking-wider text-[#F5D28E]">Almaz Wallet</p>
+                            <p className="text-base font-black tabular-nums mt-0.5">
+                              💎 Full
+                            </p>
+                            <p className="text-[10.5px] text-white/70 font-mono tabular-nums">
+                              {(currentUser?.diamonds ?? ADMIN_FULL_DIAMONDS).toLocaleString()}
+                            </p>
+                          </div>
+                          <div className="pl-3">
+                            <p className="text-[10px] font-bold uppercase tracking-wider text-[#F5D28E]">Moneta</p>
+                            <p className="text-base font-black tabular-nums mt-0.5">
+                              🪙 Full
+                            </p>
+                            <p className="text-[10.5px] text-white/70 font-mono tabular-nums">
+                              {(currentUser?.coins ?? ADMIN_FULL_COINS).toLocaleString()}
+                            </p>
+                          </div>
+                        </div>
+                        <div className="pt-2.5 border-t border-white/10 flex items-center justify-between text-[11px] text-white/80">
+                          <span className="inline-flex items-center gap-1.5">
+                            <Crown className="w-3.5 h-3.5 text-[#F5D28E]" />
+                            <span>Admin tezkor kirishi faol</span>
+                          </span>
+                        </div>
+                      </div>
+                    ) : (
+                      <div className="space-y-3">
+                        <div className="flex items-center justify-between py-2 border-b border-[rgba(166,36,51,0.08)]">
+                          <div className="flex items-center gap-2.5">
+                            <div className="w-9 h-9 rounded-xl bg-[#FAF4F2] text-[#C93545] flex items-center justify-center shrink-0">
+                              <Wallet className="w-4 h-4" />
+                            </div>
+                            <div>
+                              <p className="text-xs font-bold text-[#221719]">
+                                {currentUser?.gender === 'female' ? 'Almaz Wallet' : 'Moneta Balansi'}
+                              </p>
+                              <p className="text-[11px] text-[#7A686C] tabular-nums">
+                                {currentUser?.gender === 'female'
+                                  ? `${currentUser?.diamonds ?? 0} olmos mavjud`
+                                  : `${currentUser?.coins ?? 100} moneta mavjud`}
+                              </p>
+                            </div>
+                          </div>
+                          <button
+                            type="button"
+                            onClick={() =>
+                              currentUser?.gender === 'female' ? setShowWithdrawModal(true) : setShowTopUpModal(true)
+                            }
+                            className="px-3 py-1.5 rounded-full bg-[#FAF4F2] hover:bg-[#F3E5E1] text-[#C93545] text-[11px] font-bold transition"
+                          >
+                            {currentUser?.gender === 'female' ? 'Chiqarish' : "To'ldirish"}
+                          </button>
+                        </div>
+
+                        {currentUser?.gender === 'female' && (() => {
+                          const progressVal = Number(currentUser?.diamondProgress || 0);
+                          const progressPct = getDiamondProgressPercent(progressVal);
+                          const pendingTotal = getPendingDiamondsTotal(currentUser?.pendingDiamondBatches);
+                          const nextUnlockAt = getNextUnlockTimestamp(currentUser?.pendingDiamondBatches);
+                          const countdown = computeCountdownParts(nextUnlockAt, countdownNow);
+                          return (
+                            <div className="space-y-1.5 pb-2 border-b border-[rgba(166,36,51,0.08)]">
+                              <div className="flex items-center justify-between text-[11px] font-bold text-[#221719]">
+                                <span>Olmos limiti</span>
+                                <span className="tabular-nums text-[#0E7490]">{progressVal} / {DIAMOND_LIMIT_TARGET} ({progressPct}%)</span>
+                              </div>
+                              <div className="w-full h-1.5 bg-[#FAF4F2] rounded-full overflow-hidden">
+                                <div
+                                  className="h-full bg-gradient-to-r from-cyan-500 to-emerald-500 transition-all duration-500"
+                                  style={{ width: `${progressPct}%` }}
+                                />
+                              </div>
+                              {pendingTotal > 0 && (
+                                <p className="text-[10.5px] font-semibold text-amber-800 flex items-center justify-between">
+                                  <span>Walletga qo'shilish vaqti ({pendingTotal} olmos):</span>
+                                  <span className="font-mono font-bold tabular-nums">{countdown.formatted}</span>
+                                </p>
+                              )}
+                            </div>
+                          );
+                        })()}
+
+                        {/* Face ID Biometric Status Row */}
+                        {currentUser?.faceId?.verified ? (
+                          <div className="flex items-center justify-between gap-2 pt-0.5">
+                            <div className="flex items-center gap-2.5 min-w-0">
+                              <div className="w-9 h-9 rounded-xl bg-emerald-50 text-emerald-700 flex items-center justify-center shrink-0">
+                                <ScanFace className="w-4 h-4" />
+                              </div>
+                              <div className="min-w-0">
+                                <p className="text-xs font-bold text-[#221719]">Face ID Tasdiqlangan</p>
+                                <p className="text-[11px] text-[#6B5B5E] truncate">
+                                  {genderToUzLabel(currentUser.faceId.detectedGender || currentUser.gender)} · {currentUser.faceId.confidence ?? 95}%
+                                  {currentUser.faceId.verifiedAt ? ` · ${formatFaceIdDateUz(currentUser.faceId.verifiedAt)}` : ''}
+                                </p>
+                              </div>
+                            </div>
+                            <span className="px-2.5 py-1 rounded-full bg-emerald-50 text-emerald-700 border border-emerald-200 text-[10px] font-bold shrink-0">
+                              Faol
+                            </span>
+                          </div>
+                        ) : (
+                          <div className="flex items-center justify-between gap-2 pt-0.5">
+                            <div className="flex items-center gap-2.5 min-w-0">
+                              <div className="w-9 h-9 rounded-xl bg-rose-50 text-[#C93545] flex items-center justify-center shrink-0">
+                                <ScanFace className="w-4 h-4" />
+                              </div>
+                              <div className="min-w-0">
+                                <p className="text-xs font-bold text-[#221719]">Face ID kutilmoqda</p>
+                                <p className="text-[11px] text-[#6B5B5E]">Haqiqiy surat va jinsni tasdiqlang</p>
+                              </div>
+                            </div>
+                            <button
+                              type="button"
+                              onClick={() => setShowProfileFaceIdModal(true)}
+                              className="px-3 py-1.5 rounded-full bg-[#C93545] hover:bg-[#A62433] text-white text-[11px] font-bold transition shrink-0"
+                            >
+                              Tasdiqlash
+                            </button>
+                          </div>
+                        )}
+                      </div>
+                    )}
+                  </div>
+
+                  {isAdmin && (
+                    <button
+                      type="button"
+                      onClick={() => setShowAdminPanel(true)}
+                      className="w-full py-2.5 px-4 rounded-xl bg-[#221719] hover:bg-[#352427] text-[#F5D28E] font-bold text-xs shadow-sm flex items-center justify-center gap-2 transition active:scale-[0.98]"
+                    >
+                      <Crown className="w-3.5 h-3.5" />
+                      <span>Admin Panelni Ochish (@Salikh_07)</span>
+                    </button>
                   )}
                 </div>
-              </div>
-            ) : isAdminTelegramUser(currentUser) ? (
-              <div className="bg-[#FAF4F2] border border-[#C89B54]/30 rounded-[16px] p-3 flex items-center justify-between">
-                <div className="flex items-center gap-2">
-                  <Crown className="w-4 h-4 text-[#C89B54]" />
-                  <span className="text-xs font-bold text-[#221719]">Admin hisobi (Face ID tekshiruvisiz kirish faol)</span>
+
+                {/* Right Card: Maxfiylik va Lokatsiya */}
+                <div className="bg-white rounded-[24px] border border-[rgba(166,36,51,0.1)] shadow-subtle p-5 flex flex-col justify-between gap-3">
+                  <div>
+                    <h2 className="text-xs font-bold uppercase tracking-[0.12em] text-[#8E7C80] mb-3">
+                      Maxfiylik va Lokatsiya
+                    </h2>
+
+                    <div className="divide-y divide-[rgba(166,36,51,0.08)]">
+                      {/* Row 1: Live GPS Toggle */}
+                      <div className="py-2.5 flex items-center justify-between gap-3">
+                        <div className="min-w-0">
+                          <p className="text-xs font-bold text-[#221719] flex items-center gap-1.5">
+                            <span className={`w-2 h-2 rounded-full ${isLocationEnabled ? 'bg-emerald-500' : 'bg-slate-300'}`} />
+                            <span>Jonli GPS Lokatsiya</span>
+                          </p>
+                          <p className="text-[11px] text-[#6B5B5E] mt-0.5">
+                            {isLocationEnabled ? 'Koordinatalaringiz real vaqtda faol' : 'Xaritada vaqtincha yashirilgan'}
+                          </p>
+                        </div>
+                        <button
+                          type="button"
+                          role="switch"
+                          aria-checked={isLocationEnabled}
+                          aria-label="Jonli GPS lokatsiya"
+                          onClick={() => handleToggleLocation(!isLocationEnabled)}
+                          className={`w-11 h-6 rounded-full transition-colors duration-200 p-0.5 flex items-center shrink-0 ${
+                            isLocationEnabled ? 'bg-[#C93545] justify-end' : 'bg-slate-200 justify-start'
+                          }`}
+                        >
+                          <span className="w-5 h-5 rounded-full bg-white shadow-xs" />
+                        </button>
+                      </div>
+
+                      {/* Row 2: Privacy Visibility */}
+                      <div className="py-2.5 flex items-center justify-between gap-3">
+                        <div className="min-w-0">
+                          <p className="text-xs font-bold text-[#221719]">Kimlarga ko'rinadi</p>
+                          <p className="text-[11px] text-[#6B5B5E] mt-0.5">
+                            {regLocationVisibility === 'mutual'
+                              ? 'Faqat obunachilarga'
+                              : regLocationVisibility === 'everyone'
+                              ? 'Barcha foydalanuvchilarga'
+                              : 'Hech kimga (Yashirin)'}
+                          </p>
+                        </div>
+                        <select
+                          aria-label="Lokatsiya maxfiyligi"
+                          value={regLocationVisibility}
+                          onChange={(e) => handleLocationVisibilityChange(e.target.value as any)}
+                          className="px-2.5 py-1.5 rounded-xl bg-[#FAF4F2] border border-[rgba(166,36,51,0.12)] text-[11px] font-bold text-[#221719] outline-none focus:border-[#C93545] cursor-pointer"
+                        >
+                          <option value="everyone">Barchaga ochiq</option>
+                          <option value="mutual">Faqat tanishlar</option>
+                          <option value="ghost">Yashirin</option>
+                        </select>
+                      </div>
+                    </div>
+                  </div>
+
+                  <button
+                    type="button"
+                    onClick={openEditProfileModal}
+                    className="w-full py-2.5 px-4 rounded-xl bg-[#FAF4F2] hover:bg-[#F3E5E1] text-[#221719] border border-[rgba(166,36,51,0.12)] font-bold text-xs flex items-center justify-center gap-2 transition active:scale-[0.98]"
+                  >
+                    <Edit3 className="w-3.5 h-3.5 text-[#C93545]" />
+                    <span>Anketa ma'lumotlarini tahrirlash</span>
+                  </button>
                 </div>
               </div>
-            ) : null}
 
-            {/* Public Account Stats (Followers / Following / Likes) */}
-            <div className="grid grid-cols-3 gap-2 text-center bg-[#FAF4F2] p-3 rounded-[16px] border border-[rgba(166,36,51,0.08)]">
-              <div>
-                <p className="text-sm font-black text-[#C93545]">{currentUser?.followersCount ?? 0}</p>
-                <p className="text-[9.5px] text-[#6B5B5E] font-bold">Obunachilar</p>
-              </div>
-              <div>
-                <p className="text-sm font-black text-[#221719]">{currentUser?.followingCount ?? 0}</p>
-                <p className="text-[9.5px] text-[#6B5B5E] font-bold">Obunalar</p>
-              </div>
-              <div>
-                <p className="text-sm font-black text-[#A62433]">{currentUser?.likesCount ?? 0}</p>
-                <p className="text-[9.5px] text-[#6B5B5E] font-bold">Laiklar</p>
-              </div>
-            </div>
-
-            {currentUser?.gender === 'female' && !isAdminTelegramUser(currentUser) && (() => {
-              const progressVal = Number(currentUser?.diamondProgress || 0);
-              const progressPct = getDiamondProgressPercent(progressVal);
-              const pendingTotal = getPendingDiamondsTotal(currentUser?.pendingDiamondBatches);
-              const nextUnlockAt = getNextUnlockTimestamp(currentUser?.pendingDiamondBatches);
-              const countdown = computeCountdownParts(nextUnlockAt, countdownNow);
-              return (
-                <div className="bg-cyan-50/70 border border-cyan-200 rounded-[14px] p-3 space-y-1.5">
-                  <div className="flex items-center justify-between text-[11px] font-bold text-cyan-950">
-                    <span>💎 Olmos limiti (0% - 100%)</span>
-                    <span>{progressVal} / {DIAMOND_LIMIT_TARGET} ({progressPct}%)</span>
-                  </div>
-                  <div className="w-full h-2 bg-white rounded-full overflow-hidden border border-cyan-100">
-                    <div
-                      className="h-full bg-gradient-to-r from-cyan-500 to-emerald-500 transition-all duration-500"
-                      style={{ width: `${progressPct}%` }}
-                    />
-                  </div>
-                  {pendingTotal > 0 && (
-                    <p className="text-[10px] font-bold text-amber-800 flex items-center justify-between">
-                      <span>⏳ Walletga qo'shilish vaqti ({pendingTotal} 💎):</span>
-                      <span className="font-mono font-black">{countdown.formatted}</span>
-                    </p>
-                  )}
-                </div>
-              );
-            })()}
-
-            <p className="text-xs text-[#4A3B3D] bg-[#FAF4F2] p-3.5 rounded-[14px] border border-[rgba(166,36,51,0.06)]">{currentUser?.bio}</p>
-
-            {/* Privacy Guard Status Badge */}
-            <div className="bg-[#FAFAFB] p-3 rounded-[14px] border border-slate-200 flex items-center justify-between">
-              <div className="flex items-center space-x-2">
-                <Shield className="w-4 h-4 text-[#E8474A]" />
-                <div>
-                  <span className="text-xs font-bold text-slate-900 block">Lokatsiya Maxfiyligi 🔒</span>
-                  <span className="text-[10px] text-slate-500 block">
-                    {regLocationVisibility === 'mutual' ? 'Faqat obunachilarga ko\'rinadi' : regLocationVisibility === 'everyone' ? 'Barchaga ochiq' : 'Ghost Mode (Yashirin)'}
+              {/* Own Posts Section */}
+              <div className="space-y-3 pt-1">
+                <div className="flex items-center justify-between px-1">
+                  <h2 className="text-base sm:text-lg font-editorial font-bold text-[#221719]">
+                    Mening postlarim
+                  </h2>
+                  <span className="text-[11px] font-semibold text-[#7A686C]">
+                    Rasm, video va musiqa ulashing
                   </span>
                 </div>
+                <PostsFeed
+                  posts={postsList}
+                  currentUser={currentUser}
+                  usersList={usersList}
+                  onlineUserIds={onlineUserIds}
+                  authorUid={currentUser?.uid}
+                  allowCompose={true}
+                  onPostCreated={(post) =>
+                    setPostsList((prev) => (prev.some((p) => p.id === post.id) ? prev : [post, ...prev]))
+                  }
+                  onPostUpdated={(post) =>
+                    setPostsList((prev) => prev.map((p) => (p.id === post.id ? post : p)))
+                  }
+                  onPostDeleted={(postId) =>
+                    setPostsList((prev) => prev.filter((p) => p.id !== postId))
+                  }
+                  onOpenProfile={openUserProfileByUid}
+                  onOpenAuth={() => openAuthModalClean('login')}
+                />
               </div>
-              <span className="px-2.5 py-1 rounded-full bg-rose-50 text-[#E8474A] text-[10px] font-bold">
-                {regLocationVisibility.toUpperCase()}
-              </span>
             </div>
-
-            {/* Real Live GPS Location Toggle (Ghost Mode) */}
-            <div className="bg-[#FAFAFB] p-3.5 rounded-[16px] border border-slate-200 flex items-center justify-between">
-              <div className="flex items-center space-x-2.5">
-                <MapPin className={`w-5 h-5 ${isLocationEnabled ? 'text-[#E8474A] animate-pulse' : 'text-slate-400'}`} />
-                <div>
-                  <p className="text-xs font-bold text-slate-900">
-                    {isLocationEnabled ? 'Jonli GPS Lokatsiya Faol 🟢' : 'Ghost Mode (Lokatsiya o\'chirilgan) 👻'}
-                  </p>
-                  <p className="text-[10px] text-slate-500">
-                    {isLocationEnabled ? 'Koordinatalaringiz real vaqtda yangilanmoqda' : 'Xaritada ko\'rinmaysiz'}
-                  </p>
-                </div>
-              </div>
-              <button 
-                onClick={() => handleToggleLocation(!isLocationEnabled)}
-                className={`px-3 py-1.5 rounded-full text-xs font-bold transition-all shadow-subtle ${isLocationEnabled ? 'bg-[#E8474A] text-white' : 'bg-slate-200 text-slate-700'}`}
-              >
-                {isLocationEnabled ? 'O\'chirish' : 'Yoqish'}
-              </button>
-            </div>
-
-            {isAdminTelegramUser(currentUser) && (
-              <button
-                onClick={() => setShowAdminPanel(true)}
-                className="w-full py-3 rounded-full bg-gradient-to-r from-slate-900 to-slate-800 text-amber-300 font-bold text-xs shadow-md flex items-center justify-center space-x-2"
-              >
-                <Crown className="w-4 h-4" />
-                <span>Admin Panelni Ochish (@Salikh_07)</span>
-              </button>
-            )}
-
-            <button 
-              onClick={() => {
-                setRegName(currentUser?.name || '');
-                setRegAge(String(currentUser?.age || 22));
-                setRegGender(currentUser?.gender || 'female');
-                setRegRegion(currentUser?.region || 'Toshkent shahri');
-                setRegDistrict(currentUser?.district || 'Yunusobod tumani');
-                setRegNeighborhood(currentUser?.neighborhood || 'Bodomzor');
-                setRegPhone(currentUser?.phone || '');
-                setRegTelegram(currentUser?.telegram || '');
-                setRegInstagram(currentUser?.instagram || '');
-                setRegBio(currentUser?.bio || '');
-                setRegAvatar(currentUser?.avatar || '');
-                setRegLocationVisibility(currentUser?.locationVisibility || 'everyone');
-                setShowProfileModal(true);
-              }}
-              className="w-full py-3 rounded-full bg-slate-900 text-white font-bold text-xs shadow-md flex items-center justify-center space-x-2"
-            >
-              <Edit3 className="w-3.5 h-3.5" />
-              <span>Profilni tahrirlash</span>
-            </button>
-          </div>
-        )}
+          );
+        })()}
 
         {/* --- MAP / XARITA TAB (Unified Standard Map + Smooth In-Bounds Markers) --- */}
         {activeTab === 'map' && (
@@ -3975,7 +4485,7 @@ export default function App() {
               <button
                 onClick={() => {
                   if (!firebaseUser && !currentUser) {
-                    setShowAuthModal(true);
+                    openAuthModalClean('login');
                     return;
                   }
                   setLiveModalMode('broadcaster');
@@ -4043,28 +4553,32 @@ export default function App() {
 
       </div>
 
-      {/* Sticky Bottom Navigation - Pinned permanently to bottom */}
+      {/* Sticky Bottom Navigation - 6 Responsive Tabs */}
       {activeTab !== 'reels' && !(activeTab === 'chats' && chatView === 'conversation') && (
-        <nav className="sticky bottom-0 left-0 right-0 z-50 shrink-0 bg-white/95 backdrop-blur-xl border-t border-[rgba(166,36,51,0.1)] px-2 py-2.5 flex items-center justify-around shadow-medium">
-          <button onClick={() => setActiveTab('discover')} className={`flex flex-col items-center p-1 transition ${activeTab === 'discover' ? 'text-[#C93545] font-bold' : 'text-[#6B5B5E] hover:text-[#221719]'}`}>
-            <Users className="w-4.5 h-4.5" />
-            <span className="text-[10px]">Nomzodlar</span>
+        <nav className="sticky bottom-0 left-0 right-0 z-50 shrink-0 bg-white/95 backdrop-blur-xl border-t border-[rgba(166,36,51,0.1)] px-1 sm:px-2 py-2 flex items-center justify-around shadow-medium">
+          <button onClick={() => setActiveTab('discover')} className={`flex flex-col items-center px-1.5 py-1 transition min-w-0 ${activeTab === 'discover' ? 'text-[#C93545] font-bold' : 'text-[#6B5B5E] hover:text-[#221719]'}`}>
+            <Users className="w-4 h-4 sm:w-4.5 sm:h-4.5" />
+            <span className="text-[9.5px] sm:text-[10px] truncate">Nomzodlar</span>
           </button>
-          <button onClick={() => setActiveTab('map')} className={`flex flex-col items-center p-1 transition ${activeTab === 'map' ? 'text-[#C93545] font-bold' : 'text-[#6B5B5E] hover:text-[#221719]'}`}>
-            <MapPin className="w-4.5 h-4.5" />
-            <span className="text-[10px]">Xarita</span>
+          <button onClick={() => setActiveTab('posts')} className={`flex flex-col items-center px-1.5 py-1 transition min-w-0 ${activeTab === 'posts' ? 'text-[#C93545] font-bold' : 'text-[#6B5B5E] hover:text-[#221719]'}`}>
+            <Newspaper className="w-4 h-4 sm:w-4.5 sm:h-4.5" />
+            <span className="text-[9.5px] sm:text-[10px] truncate">Postlar</span>
           </button>
-          <button onClick={() => setActiveTab('reels')} className={`flex flex-col items-center p-1 transition ${activeTab === 'reels' ? 'text-[#C93545] font-bold' : 'text-[#6B5B5E] hover:text-[#221719]'}`}>
-            <Video className="w-4.5 h-4.5" />
-            <span className="text-[10px]">Efirlar</span>
+          <button onClick={() => setActiveTab('map')} className={`flex flex-col items-center px-1.5 py-1 transition min-w-0 ${activeTab === 'map' ? 'text-[#C93545] font-bold' : 'text-[#6B5B5E] hover:text-[#221719]'}`}>
+            <MapPin className="w-4 h-4 sm:w-4.5 sm:h-4.5" />
+            <span className="text-[9.5px] sm:text-[10px] truncate">Xarita</span>
           </button>
-          <button onClick={() => { setChatView('list'); setActiveTab('chats'); }} className={`flex flex-col items-center p-1 transition ${activeTab === 'chats' ? 'text-[#C93545] font-bold' : 'text-[#6B5B5E] hover:text-[#221719]'}`}>
-            <MessageCircle className="w-4.5 h-4.5" />
-            <span className="text-[10px]">Chatlar</span>
+          <button onClick={() => setActiveTab('reels')} className={`flex flex-col items-center px-1.5 py-1 transition min-w-0 ${activeTab === 'reels' ? 'text-[#C93545] font-bold' : 'text-[#6B5B5E] hover:text-[#221719]'}`}>
+            <Video className="w-4 h-4 sm:w-4.5 sm:h-4.5" />
+            <span className="text-[9.5px] sm:text-[10px] truncate">Efirlar</span>
           </button>
-          <button onClick={() => setActiveTab('profile')} className={`flex flex-col items-center p-1 transition ${activeTab === 'profile' ? 'text-[#C93545] font-bold' : 'text-[#6B5B5E] hover:text-[#221719]'}`}>
-            <UserIcon className="w-4.5 h-4.5" />
-            <span className="text-[10px]">Profil</span>
+          <button onClick={() => { setChatView('list'); setActiveTab('chats'); }} className={`flex flex-col items-center px-1.5 py-1 transition min-w-0 ${activeTab === 'chats' ? 'text-[#C93545] font-bold' : 'text-[#6B5B5E] hover:text-[#221719]'}`}>
+            <MessageCircle className="w-4 h-4 sm:w-4.5 sm:h-4.5" />
+            <span className="text-[9.5px] sm:text-[10px] truncate">Chatlar</span>
+          </button>
+          <button onClick={() => setActiveTab('profile')} className={`flex flex-col items-center px-1.5 py-1 transition min-w-0 ${activeTab === 'profile' ? 'text-[#C93545] font-bold' : 'text-[#6B5B5E] hover:text-[#221719]'}`}>
+            <UserIcon className="w-4 h-4 sm:w-4.5 sm:h-4.5" />
+            <span className="text-[9.5px] sm:text-[10px] truncate">Profil</span>
           </button>
         </nav>
       )}
@@ -4092,7 +4606,7 @@ export default function App() {
       
       {/* Landing Page */}
       {(!firebaseUser && !currentUser) || activeTab === 'landing' ? (
-        <LandingPage onLogin={() => setShowAuthModal(true)} />
+        <LandingPage onLogin={() => openAuthModalClean('login')} />
       ) : (
         <div className="min-h-screen bg-gradient-to-br from-[#FBF5F2] via-[#F6ECE7] to-[#EFE1D9] flex flex-col items-center justify-center p-0 md:p-4 overflow-hidden">
           {showUpdateBanner && (
@@ -4126,17 +4640,20 @@ export default function App() {
             "bg-[#FDFBF9] rounded-[32px] w-full p-6 text-left space-y-4 relative shadow-2xl border border-[rgba(166,36,51,0.14)] max-h-[92vh] overflow-y-auto",
             (authMode === 'google_face_id' || authMode === 'register_face_id' || (authMode === 'telegram' && telegramStep === 'face_id')) ? "max-w-md" : "max-w-sm"
           )}>
-            <button 
-              onClick={() => {
-                setShowAuthModal(false);
-                setAuthMode('login');
-                setTelegramStep('input_phone');
-              }} 
-              aria-label="Oynani yopish"
-              className="absolute top-5 right-5 p-1.5 rounded-full text-[#6B5B5E] hover:text-[#221719] hover:bg-[#FAF4F2] transition z-10"
-            >
-              <X className="w-4 h-4" />
-            </button>
+            {!(authMode === 'google_face_id' || authMode === 'register_face_id' || (authMode === 'telegram' && telegramStep === 'face_id')) && (
+              <button 
+                onClick={() => {
+                  resetAuthFormState();
+                  setShowAuthModal(false);
+                  setAuthMode('login');
+                  setTelegramStep('input_phone');
+                }} 
+                aria-label="Oynani yopish"
+                className="absolute top-5 right-5 p-1.5 rounded-full text-[#6B5B5E] hover:text-[#221719] hover:bg-[#FAF4F2] transition z-10"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            )}
 
             {(authMode === 'google_face_id' || authMode === 'register_face_id' || (authMode === 'telegram' && telegramStep === 'face_id')) ? (
               <FaceIdVerificationModal
@@ -4164,6 +4681,7 @@ export default function App() {
                   )
                 }
                 onCancel={() => {
+                  resetAuthFormState();
                   setShowAuthModal(false);
                   setAuthMode('login');
                   setTelegramStep('input_phone');
@@ -4353,6 +4871,8 @@ export default function App() {
                     <label className="block text-[11px] font-bold text-slate-700 mb-1">Telefon raqam yoki Username</label>
                     <input 
                       type="text" 
+                      name="alov_tg_identifier"
+                      autoComplete="off"
                       value={telegramInput}
                       onChange={(e) => {
                         setTelegramInput(e.target.value);
@@ -4374,7 +4894,7 @@ export default function App() {
 
                   <button 
                     type="button"
-                    onClick={() => { setAuthMode('login'); setTelegramStep('input_phone'); setHasStartedBotError(false); setErrorMsg(''); }}
+                    onClick={() => { resetAuthFormState(); setAuthMode('login'); setTelegramStep('input_phone'); }}
                     className="w-full text-center text-xs font-bold text-slate-500 hover:text-slate-800 pt-1"
                   >
                     Orqaga qaytish
@@ -4414,6 +4934,8 @@ export default function App() {
                     <label className="block text-[11px] font-bold text-slate-700 mb-1">6 xonali tasdiqlash kodi</label>
                     <input 
                       type="text" 
+                      name="alov_tg_otp_code"
+                      autoComplete="one-time-code"
                       maxLength={6}
                       value={enteredTgCode}
                       onChange={(e) => setEnteredTgCode(e.target.value)}
@@ -4433,7 +4955,7 @@ export default function App() {
 
                   <button 
                     type="button"
-                    onClick={() => { setTelegramStep('input_phone'); setEnteredTgCode(''); setErrorMsg(''); }}
+                    onClick={() => { setTelegramStep('input_phone'); setEnteredTgCode(''); setGeneratedTgCode(''); setPendingTgUser(null); setErrorMsg(''); }}
                     className="w-full text-center text-xs font-bold text-slate-500 hover:text-slate-800 pt-1"
                   >
                     Raqamni qayta kiritish
@@ -4587,14 +5109,14 @@ export default function App() {
                 <div className="grid grid-cols-2 p-1 bg-slate-100 rounded-2xl">
                   <button 
                     type="button"
-                    onClick={() => { setAuthMode('login'); setErrorMsg(''); }}
+                    onClick={() => { resetAuthFormState(); setAuthMode('login'); }}
                     className={`py-2 rounded-xl text-xs font-bold transition ${authMode === 'login' ? 'bg-white text-slate-900 shadow-sm' : 'text-slate-500 hover:text-slate-900'}`}
                   >
                     Kirish (Login)
                   </button>
                   <button 
                     type="button"
-                    onClick={() => { setAuthMode('register'); setErrorMsg(''); }}
+                    onClick={() => { resetAuthFormState(); setAuthMode('register'); }}
                     className={`py-2 rounded-xl text-xs font-bold transition ${authMode === 'register' ? 'bg-white text-slate-900 shadow-sm' : 'text-slate-500 hover:text-slate-900'}`}
                   >
                     Ro'yxatdan o'tish
@@ -4779,6 +5301,48 @@ export default function App() {
                   <span>Qurilmadan rasm yuklash</span>
                   <input type="file" accept="image/*" onChange={handleImageUpload} className="hidden" />
                 </label>
+              </div>
+
+              {/* Cover Banner Upload & Preview */}
+              <div className="p-3.5 rounded-2xl bg-[#FAF4F2] border border-[rgba(166,36,51,0.12)] space-y-2.5">
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-xs font-bold text-[#221719] flex items-center gap-1.5">
+                    <ImageIcon className="w-4 h-4 text-[#C93545]" />
+                    <span>Profil Banneri (Orqa fon)</span>
+                  </span>
+                  <div className="flex items-center gap-1.5">
+                    {regBanner && (
+                      <button
+                        type="button"
+                        onClick={() => setRegBanner('')}
+                        className="px-2.5 py-1 rounded-full bg-white text-[10px] font-bold text-rose-700 border border-rose-200 hover:bg-rose-50 transition"
+                      >
+                        Olib tashlash
+                      </button>
+                    )}
+                    <label className="cursor-pointer px-3 py-1 rounded-full bg-[#C93545] hover:bg-[#A62433] text-white text-[10px] font-bold transition">
+                      {isUploadingBanner ? 'Yuklanmoqda...' : 'Banner yuklash'}
+                      <input
+                        type="file"
+                        accept="image/*"
+                        disabled={isUploadingBanner}
+                        onChange={(e) => handleBannerFileChange(e, false)}
+                        className="hidden"
+                      />
+                    </label>
+                  </div>
+                </div>
+                <div className="h-24 rounded-xl overflow-hidden bg-gradient-to-r from-[#FBE7EB] via-[#F7DDD6] to-[#EED5DC] border border-white shadow-inner flex items-center justify-center">
+                  {resolveAvatarUrl(regBanner) ? (
+                    <img
+                      src={resolveAvatarUrl(regBanner)}
+                      alt="Banner ko'rinishi"
+                      className="w-full h-full object-cover"
+                    />
+                  ) : (
+                    <span className="text-[11px] font-semibold text-[#7A686C]">Hali banner yuklanmagan</span>
+                  )}
+                </div>
               </div>
 
               {/* Jonli lokatsiyani yoqish (GPS) Card */}
@@ -5180,146 +5744,87 @@ export default function App() {
         </div>
       )}
 
-      {/* --- PUBLIC USER PROFILE POPUP MODAL (Triggered from Map or Candidate Cards) --- */}
+      {/* --- 2ND-PERSON EDITORIAL PUBLIC USER PROFILE MODAL --- */}
       {selectedProfile && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-[#221719]/60 backdrop-blur-md animate-fadeIn">
-          <div className="bg-[#FDFBF9] rounded-[32px] max-w-sm w-full p-6 space-y-4 relative card-shadow max-h-[90vh] overflow-y-auto border border-[rgba(166,36,51,0.14)] shadow-2xl text-[#221719]">
-            <button 
-              onClick={() => setSelectedProfile(null)} 
-              aria-label="Profilni yopish"
-              className="absolute top-5 right-5 p-2 rounded-full bg-[#FAF4F2] hover:bg-[#F1E2DD] text-[#221719] font-bold transition active:scale-90"
-            >
-              <X className="w-4 h-4" />
-            </button>
+        <PublicProfileModal
+          profile={selectedProfile}
+          currentUser={currentUser}
+          usersList={usersList}
+          onlineUserIds={onlineUserIds}
+          posts={postsList}
+          onClose={() => setSelectedProfile(null)}
+          onToggleFollow={(u) => handleToggleFollow(u.uid || u.id)}
+          onOpenChat={(u) => {
+            openChatWithUser(u);
+            setSelectedProfile(null);
+          }}
+          onStartCall={(u) => {
+            setActiveCallUser(u);
+            setSelectedProfile(null);
+          }}
+          onShowRoute={(u) => {
+            handleDrawRouteToUser(u);
+            setSelectedProfile(null);
+          }}
+          onOpenConnections={(u, tab) => setFollowModalState({ user: u, tab })}
+          onOpenProfile={openUserProfileByUid}
+          onPostCreated={(post) =>
+            setPostsList((prev) => (prev.some((p) => p.id === post.id) ? prev : [post, ...prev]))
+          }
+          onPostUpdated={(post) =>
+            setPostsList((prev) => prev.map((p) => (p.id === post.id ? post : p)))
+          }
+          onPostDeleted={(postId) =>
+            setPostsList((prev) => prev.filter((p) => p.id !== postId))
+          }
+          onOpenAuth={() => openAuthModalClean('login')}
+        />
+      )}
 
-            <div className="flex items-center space-x-4 pt-1">
-              {(() => {
-                const spAvatar = resolveAvatarUrl(selectedProfile.avatar);
-                const spName = getSafeUserDisplayName(selectedProfile, selectedProfile.name || 'Profil');
-                return (
-                  <div className="relative w-18 h-18 rounded-full overflow-hidden border-2 border-[#C93545] shrink-0 bg-[#FAF4F2] shadow-md flex items-center justify-center">
-                    {spAvatar ? (
-                      <img 
-                        src={spAvatar} 
-                        alt={spName} 
-                        className="w-full h-full object-cover object-center" 
-                        onError={(e: any) => {
-                          e.currentTarget.style.display = 'none';
-                          const fallback = e.currentTarget.nextElementSibling as HTMLElement | null;
-                          if (fallback) fallback.style.display = 'flex';
-                        }}
-                      />
-                    ) : null}
-                    <div
-                      className={cn(
-                        "w-full h-full items-center justify-center bg-[#FAF4F2] text-[#C93545] font-editorial font-black text-2xl",
-                        spAvatar ? "hidden" : "flex"
-                      )}
-                    >
-                      {spName.charAt(0).toUpperCase()}
-                    </div>
-                  </div>
-                );
-              })()}
-              <div className="flex-1 min-w-0">
-                <h3 className="text-xl font-editorial font-bold text-[#221719] truncate">{selectedProfile.name}, {calculateAge(selectedProfile.birthDate, selectedProfile.age)}</h3>
-                <p className="text-[10.5px] font-mono font-bold text-[#C93545]">ID: {selectedProfile.id}</p>
-                <p className="text-[11px] text-[#6B5B5E] truncate">{selectedProfile.district}, {selectedProfile.region}</p>
-              </div>
-            </div>
+      {/* --- INTERACTIVE FOLLOWERS / FOLLOWING LIST MODAL --- */}
+      <FollowListModal
+        isOpen={Boolean(followModalState)}
+        targetUser={followModalState?.user || null}
+        initialTab={followModalState?.tab || 'followers'}
+        currentUser={currentUser}
+        usersList={usersList}
+        onlineUserIds={onlineUserIds}
+        onClose={() => setFollowModalState(null)}
+        onOpenProfile={openUserProfileByUid}
+        onToggleFollow={(u) => handleToggleFollow(u.uid || u.id)}
+      />
 
-            {/* Face ID Biometric Verification Data inside Public Profile */}
-            {selectedProfile.faceId?.verified ? (
-              <div className="bg-emerald-50 border border-emerald-200 rounded-[18px] p-3.5 space-y-1.5">
-                <div className="flex items-center justify-between">
-                  <span className="inline-flex items-center gap-1.5 text-xs font-bold text-emerald-950">
-                    <ScanFace className="w-4 h-4 text-emerald-600" />
-                    <span>Face ID Biometrik Tasdiq</span>
-                  </span>
-                  <span className="px-2 py-0.5 rounded-full bg-emerald-600 text-white text-[9px] font-bold">
-                    TASDIQLANGAN ✓
-                  </span>
-                </div>
-                <div className="flex items-center justify-between text-[11px] font-semibold text-emerald-900">
-                  <span>Jins: {genderToUzLabel(selectedProfile.faceId.detectedGender || selectedProfile.gender)}</span>
-                  <span className="font-mono">{selectedProfile.faceId.confidence ?? 95}% aniqlik</span>
-                </div>
-                <div className="flex items-center justify-between text-[10px] text-emerald-700">
-                  <span>Jonlilik: Ko'z harakati · Tabassum ✓</span>
-                  {selectedProfile.faceId.verifiedAt && (
-                    <span>{formatFaceIdDateUz(selectedProfile.faceId.verifiedAt)}</span>
-                  )}
-                </div>
-              </div>
-            ) : isAdminTelegramUser(selectedProfile) ? (
-              <div className="bg-amber-50 border border-amber-200 rounded-[16px] p-3 flex items-center gap-2 text-xs font-bold text-amber-900">
-                <Crown className="w-4 h-4 text-amber-600" />
-                <span>Alov.uz Platforma Admini</span>
-              </div>
-            ) : (
-              <div className="bg-[#FAF4F2] border border-[rgba(166,36,51,0.1)] rounded-[16px] p-3 flex items-center justify-between text-xs text-[#6B5B5E]">
-                <span>Jins: <b>{genderToUzLabel(selectedProfile.gender)}</b></span>
-                <span className="text-[10px]">Face ID kutilmoqda</span>
-              </div>
-            )}
-
-            <div className="grid grid-cols-3 gap-2 text-center bg-[#FAF4F2] p-3 rounded-[16px] border border-[rgba(166,36,51,0.08)]">
-              <div>
-                <p className="text-sm font-black text-[#C93545]">{selectedProfile.followersCount ?? 0}</p>
-                <p className="text-[9.5px] text-[#6B5B5E] font-bold">Obunachilar</p>
-              </div>
-              <div>
-                <p className="text-sm font-black text-[#221719]">{selectedProfile.followingCount ?? 0}</p>
-                <p className="text-[9.5px] text-[#6B5B5E] font-bold">Obunalar</p>
-              </div>
-              <div>
-                <p className="text-sm font-black text-[#A62433]">{selectedProfile.likesCount ?? 0}</p>
-                <p className="text-[9.5px] text-[#6B5B5E] font-bold">Laiklar</p>
-              </div>
-            </div>
-
-            <p className="text-xs text-[#4A3B3D] bg-[#FAF4F2] p-3.5 rounded-[14px] leading-relaxed border border-[rgba(166,36,51,0.08)]">{selectedProfile.bio || 'Alov.uz da yangi tanishuvlar va suhbatlar uchun.'}</p>
-
-            <div className="flex space-x-2 pt-1">
-              <button 
-                onClick={() => handleToggleFollow(selectedProfile.uid || selectedProfile.id)} 
-                className={`flex-1 py-2.5 rounded-full font-bold text-xs shadow-sm transition-all active:scale-95 ${(followingIds.includes(selectedProfile.uid) || followingIds.includes(selectedProfile.id)) ? 'bg-slate-200 text-slate-800' : 'bg-[#E8474A] text-white hover:bg-[#CB2E31]'}`}
-              >
-                {(followingIds.includes(selectedProfile.uid) || followingIds.includes(selectedProfile.id)) ? 'Obuna bo\'lingan' : '+ Obuna'}
-              </button>
-              <button 
-                onClick={() => {
-                  openChatWithUser(selectedProfile);
-                  setSelectedProfile(null);
-                }} 
-                className="flex-1 py-2.5 rounded-full bg-slate-100 hover:bg-slate-200 text-slate-800 font-bold text-xs shadow-sm flex items-center justify-center space-x-1 active:scale-95 transition-all"
-              >
-                <MessageCircle className="w-3.5 h-3.5 text-[#E8474A]" />
-                <span>Chat</span>
-              </button>
-              <button 
-                onClick={() => {
-                  setActiveCallUser(selectedProfile);
-                  setSelectedProfile(null);
-                }} 
-                className="px-3.5 py-2.5 rounded-full bg-rose-600 hover:bg-rose-500 text-white font-bold text-xs shadow-sm flex items-center justify-center space-x-1 active:scale-95 transition-all"
-                title="Video qo'ng'iroq va ekran ulashish"
-              >
-                <Video className="w-3.5 h-3.5" />
-                <span>Qo'ng'iroq</span>
-              </button>
-            </div>
-
-            <button 
-              onClick={() => {
-                handleDrawRouteToUser(selectedProfile);
-                setSelectedProfile(null);
-              }} 
-              className="w-full py-2.5 rounded-full bg-slate-900 hover:bg-slate-800 text-white font-bold text-xs shadow-md flex items-center justify-center space-x-1.5 active:scale-95 transition-all"
-            >
-              <Navigation className="w-3.5 h-3.5 text-rose-400" />
-              <span>Marshrut chizish (Yo'l) 🚗</span>
-            </button>
+      {/* --- PROFILE FACE ID VERIFICATION MODAL --- */}
+      {showProfileFaceIdModal && currentUser && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-[#221719]/65 backdrop-blur-md animate-fadeIn">
+          <div className="bg-[#FDFBF9] rounded-[32px] max-w-md w-full p-6 relative shadow-2xl border border-[rgba(166,36,51,0.14)] max-h-[92vh] overflow-y-auto">
+            <FaceIdVerificationModal
+              apiBaseUrl={getBaseUrl()}
+              userUid={currentUser.uid}
+              userName={getSafeUserDisplayName(currentUser, currentUser.name || 'Foydalanuvchi')}
+              onVerified={async (result) => {
+                const updatedUser = {
+                  ...currentUser,
+                  avatar: result.photoUrl || result.photoDataUrl,
+                  gender: result.detectedGender,
+                  faceId: result.faceId,
+                  isVerified: true,
+                };
+                const syncData = await safeFetchJson(getApiUrl('/api/users/sync'), {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({ user: updatedUser }),
+                });
+                const finalUser = syncData?.user || updatedUser;
+                setCurrentUser(finalUser);
+                try {
+                  localStorage.setItem('alov_current_user', JSON.stringify(finalUser));
+                  localStorage.setItem('alov_user_' + finalUser.uid, JSON.stringify(finalUser));
+                } catch {}
+                setShowProfileFaceIdModal(false);
+              }}
+              onCancel={() => setShowProfileFaceIdModal(false)}
+            />
           </div>
         </div>
       )}

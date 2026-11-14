@@ -1,1 +1,42 @@
-{}
+{
+  "pw_test_user_a_tg_salikh_07": [
+    {
+      "id": "msg_1794647780055up6",
+      "senderId": "tg_salikh_07",
+      "senderName": "Salikh",
+      "text": "salom",
+      "type": "text",
+      "fileUrl": null,
+      "status": "read",
+      "read": true,
+      "createdAt": "2026-11-14T09:16:20.055Z",
+      "time": "02:16 PM",
+      "senderAvatar": "/api/telegram/avatar/6621230534?v=1794586557877",
+      "sender": {
+        "_id": "tg_salikh_07",
+        "uid": "tg_salikh_07",
+        "name": "Salikh",
+        "avatar": "/api/telegram/avatar/6621230534?v=1794586557877"
+      }
+    },
+    {
+      "id": "msg_1794647987236yzc",
+      "senderId": "tg_salikh_07",
+      "senderName": "Salikh",
+      "text": "bu platforma yaqinda ishga tushadi va har bir yozganiz uchun olmos hisoblanib boradi va 100olmozga chiqganingizdan sung pul qilib olishiz mumkin ya'niy 100ming sum",
+      "type": "text",
+      "fileUrl": null,
+      "status": "read",
+      "read": true,
+      "createdAt": "2026-11-14T09:19:47.236Z",
+      "time": "02:19 PM",
+      "senderAvatar": "/api/telegram/avatar/6621230534?v=1794586557877",
+      "sender": {
+        "_id": "tg_salikh_07",
+        "uid": "tg_salikh_07",
+        "name": "Salikh",
+        "avatar": "/api/telegram/avatar/6621230534?v=1794586557877"
+      }
+    }
+  ]
+}

@@ -14,6 +14,7 @@ import {
 } from 'lucide-react';
 import { PostItem, computeAuthorTotalLikes } from '../utils/posts';
 import { isUserOnlineStrict, formatLastSeenUz } from '../utils/presence';
+import { formatUsernameDisplay } from '../utils/username';
 import { PostsFeed } from './PostsFeed';
 
 interface PublicProfileModalProps {
@@ -252,6 +253,14 @@ export const PublicProfileModal: React.FC<PublicProfileModalProps> = ({
               </div>
 
               <div className="flex items-center flex-wrap gap-2 text-xs text-[#6B5B5E] tabular-nums">
+                {liveProfile.username && (
+                  <>
+                    <span className="font-mono font-bold text-[#C93545]">
+                      {formatUsernameDisplay(liveProfile.username)}
+                    </span>
+                    <span>·</span>
+                  </>
+                )}
                 {(() => {
                   const locText = [liveProfile.district, liveProfile.region].filter(Boolean).join(', ') || liveProfile.city || '';
                   return locText ? (

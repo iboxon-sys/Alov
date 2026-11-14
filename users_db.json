@@ -14,9 +14,9 @@
     "name": "Salikh",
     "telegram": "https://t.me/Salikh_07",
     "telegramChatId": 6621230534,
-    "avatar": "/api/telegram/avatar/6621230534?v=1794586557877",
+    "avatar": "/api/telegram/avatar/6621230534",
     "gender": "male",
-    "age": 17,
+    "age": 24,
     "region": "Samarqand viloyati",
     "district": "Paxtachi tumani",
     "bio": "Alov.uz Platforma asoschisi va admini.",
@@ -34,14 +34,20 @@
     },
     "isOnline": true,
     "status": "online",
-    "updatedAt": "2026-11-14T09:20:57.636Z",
-    "lastSeen": "2026-11-14T09:19:16.940Z",
+    "updatedAt": "2026-11-14T15:39:24.558Z",
+    "lastSeen": "2026-11-14T15:37:40.731Z",
     "firstName": "Salikh",
-    "birthDate": "2009-08-28",
+    "birthDate": "2002-05-15",
     "neighborhood": "Mirzo Salimiy",
     "phone": "+998910890967",
     "instagram": "@user_insta",
     "videoUrl": "https://assets.mixkit.co/videos/preview/mixkit-young-woman-looking-at-camera-in-a-park-41686-large.mp4",
-    "banner": ""
+    "banner": "",
+    "username": "salikhnewuser",
+    "faceId": {
+      "verified": true,
+      "detectedGender": "male",
+      "confidence": 99
+    }
   }
 ]

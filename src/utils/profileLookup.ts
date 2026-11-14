@@ -73,6 +73,7 @@ export interface CleanAuthDraftState {
   hasStartedBotError: boolean;
   errorMsg: string;
   regName: string;
+  regUsername: string;
   regBirthDate: string;
   regAge: string;
   regGender: 'female' | 'male';
@@ -100,6 +101,7 @@ export function getInitialAuthDraftState(): CleanAuthDraftState {
     hasStartedBotError: false,
     errorMsg: '',
     regName: '',
+    regUsername: '',
     regBirthDate: '2002-05-15',
     regAge: '22',
     regGender: 'female',

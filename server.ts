@@ -242,6 +242,57 @@ async function startServer() {
     res.sendFile(filePath);
   });
 
+  function generatePresetWav(freq: number = 440, durationSec: number = 5): Buffer {
+    const sampleRate = 22050;
+    const numSamples = Math.floor(sampleRate * durationSec);
+    const dataSize = numSamples * 2;
+    const buffer = Buffer.alloc(44 + dataSize);
+    buffer.write('RIFF', 0);
+    buffer.writeUInt32LE(36 + dataSize, 4);
+    buffer.write('WAVE', 8);
+    buffer.write('fmt ', 12);
+    buffer.writeUInt32LE(16, 16);
+    buffer.writeUInt16LE(1, 20);
+    buffer.writeUInt16LE(1, 22);
+    buffer.writeUInt32LE(sampleRate, 24);
+    buffer.writeUInt32LE(sampleRate * 2, 28);
+    buffer.writeUInt16LE(2, 32);
+    buffer.writeUInt16LE(16, 34);
+    buffer.write('data', 36);
+    buffer.writeUInt32LE(dataSize, 40);
+
+    for (let i = 0; i < numSamples; i++) {
+      const t = i / sampleRate;
+      const wave =
+        Math.sin(2 * Math.PI * freq * t) * 0.45 +
+        Math.sin(2 * Math.PI * (freq * 1.25) * t) * 0.3 +
+        Math.sin(2 * Math.PI * (freq * 1.5) * t) * 0.25;
+      const env = Math.sin((Math.PI * i) / numSamples);
+      const sample = Math.max(-1, Math.min(1, wave * env)) * 32767 * 0.6;
+      buffer.writeInt16LE(Math.floor(sample), 44 + i * 2);
+    }
+    return buffer;
+  }
+
+  const PRESET_FREQ_MAP: Record<string, number> = {
+    toshkent_oqshomi: 440,
+    bahor_nafasi: 523.25,
+    samarqand_yulduzlari: 392,
+    samimiy_hislar: 349.23,
+    tungi_sayr: 329.63,
+    yor_yor_melody: 587.33,
+  };
+
+  app.get('/api/media/preset-audio/:id', (req, res) => {
+    const trackId = String(req.params.id || '').toLowerCase();
+    const freq = PRESET_FREQ_MAP[trackId] || 440;
+    const wav = generatePresetWav(freq, 6);
+    res.setHeader('Content-Type', 'audio/wav');
+    res.setHeader('Content-Length', wav.length);
+    res.setHeader('Cache-Control', 'public, max-age=86400');
+    res.end(wav);
+  });
+
   interface TelegramBotUser {
     chatId: number;
     username?: string;
@@ -1903,6 +1954,19 @@ Suhbatlashish qoidalaringiz:
 
       const fallbackAvatar = '';
 
+      const rawUsername = String(user.username || existing.username || `user_${targetUid.slice(-6)}`).trim().replace(/^@/, '');
+      if (/\s/.test(rawUsername) || !/^[a-zA-Z0-9_]{3,20}$/.test(rawUsername)) {
+        return res.status(400).json({ success: false, error: 'Username da bo\x27sh joy bo\'lishi mumkin emas (faqat harflar, raqamlar va pastki chiziq, 3-20 ta belgi).' });
+      }
+      for (const [uUid, uObj] of usersStore.entries()) {
+        if (uUid !== targetUid) {
+          const uName = String(uObj.username || '').trim().toLowerCase();
+          if (uName === rawUsername.toLowerCase()) {
+            return res.status(400).json({ success: false, error: `Ushbu "@${rawUsername}" username band. Iltimos, boshqa username tanlang.` });
+          }
+        }
+      }
+
       const currentlyOnline = presenceRegistry.isUidOnline(targetUid);
       const mergedUser = {
         isVerified: false,
@@ -1916,6 +1980,7 @@ Suhbatlashish qoidalaringiz:
         pendingDiamondBatches: [],
         ...existing,
         ...user,
+        username: rawUsername,
         name: fetchedName || (!isPlaceholderOrUsername(user.name, incomingTgHandle, incomingPhone) ? user.name : '') || (!isPlaceholderOrUsername(existing.name, incomingTgHandle, incomingPhone) ? existing.name : '') || (isTelegramAccount ? '' : 'Foydalanuvchi'),
         avatar: user.faceId?.capturedPhotoUrl || existing.faceId?.capturedPhotoUrl || fetchedAvatar || fallbackAvatar,
         banner: user.banner !== undefined ? user.banner : (existing.banner || ''),
@@ -2299,6 +2364,7 @@ Suhbatlashish qoidalaringiz:
       return {
         ...c,
         authorName: commentAuthor?.name || c.authorName,
+        authorUsername: commentAuthor?.username || c.authorUsername || '',
         authorAvatar: commentAuthor?.avatar || c.authorAvatar || '',
         authorId: commentAuthor?.id || c.authorId,
       };
@@ -2306,6 +2372,7 @@ Suhbatlashish qoidalaringiz:
     return {
       ...post,
       authorName: author?.name || post.authorName,
+      authorUsername: author?.username || post.authorUsername || '',
       authorAvatar: author?.avatar || post.authorAvatar || '',
       authorId: author?.id || post.authorId,
       authorGender: author?.gender || post.authorGender,
@@ -2327,13 +2394,24 @@ Suhbatlashish qoidalaringiz:
 
   app.post('/api/posts', (req, res) => {
     try {
-      const { authorUid, type = 'photo', caption = '', mediaUrl = '', coverUrl = '', audioTitle = '', audioArtist = '' } = req.body || {};
+      const {
+        authorUid,
+        type = 'photo',
+        caption = '',
+        mediaUrl = '',
+        embedUrl = '',
+        mediaProvider = '',
+        isVerticalVideo = false,
+        coverUrl = '',
+        audioTitle = '',
+        audioArtist = '',
+      } = req.body || {};
       if (!authorUid) {
         return res.status(400).json({ success: false, error: 'Avtor aniqlanmadi' });
       }
       const author = usersStore.get(authorUid);
       const safeType = ['photo', 'video', 'music', 'text'].includes(type) ? type : 'text';
-      if (safeType !== 'text' && !String(mediaUrl).trim()) {
+      if (safeType !== 'text' && !String(mediaUrl || embedUrl).trim()) {
         return res.status(400).json({ success: false, error: 'Media fayli yoki havolasi talab qilinadi' });
       }
       if (safeType === 'text' && !String(caption).trim()) {
@@ -2345,12 +2423,16 @@ Suhbatlashish qoidalaringiz:
         authorUid,
         authorId: author?.id,
         authorName: author?.name || 'Foydalanuvchi',
+        authorUsername: author?.username || '',
         authorAvatar: author?.avatar || '',
         authorGender: author?.gender,
         authorVerified: Boolean(author?.faceId?.verified || author?.isVerified),
         type: safeType,
         caption: String(caption || '').trim(),
         mediaUrl: String(mediaUrl || '').trim() || undefined,
+        embedUrl: String(embedUrl || '').trim() || undefined,
+        mediaProvider: String(mediaProvider || '').trim() || undefined,
+        isVerticalVideo: Boolean(isVerticalVideo),
         coverUrl: String(coverUrl || '').trim() || undefined,
         audioTitle: String(audioTitle || '').trim() || undefined,
         audioArtist: String(audioArtist || '').trim() || undefined,
@@ -2413,6 +2495,7 @@ Suhbatlashish qoidalaringiz:
         authorUid,
         authorId: commentAuthor?.id,
         authorName: commentAuthor?.name || 'Foydalanuvchi',
+        authorUsername: commentAuthor?.username || '',
         authorAvatar: commentAuthor?.avatar || '',
         text: String(text).trim(),
         createdAt: new Date().toISOString(),

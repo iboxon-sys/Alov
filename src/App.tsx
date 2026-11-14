@@ -60,6 +60,7 @@ import {
 import { isUserOnlineStrict, formatLastSeenUz } from './utils/presence';
 import { resolveExactUserByUid, getInitialAuthDraftState } from './utils/profileLookup';
 import { computeAuthorTotalLikes, type PostItem } from './utils/posts';
+import { validateUsername, isUsernameUnique, formatUsernameDisplay } from './utils/username';
 
 function resolveAvatarUrl(rawUrl?: string | null): string {
   const clean = pickPreferredAvatar(rawUrl);
@@ -265,6 +266,7 @@ export default function App() {
 
   // Profile Form Fields (including Avatar URL and Location Visibility)
   const [regName, setRegName] = useState('');
+  const [regUsername, setRegUsername] = useState('');
   const [regBirthDate, setRegBirthDate] = useState('2002-05-15');
   const [regAge, setRegAge] = useState('22');
   const [regGender, setRegGender] = useState<'male' | 'female'>('female');
@@ -1939,12 +1941,27 @@ export default function App() {
     setErrorMsg('');
 
     try {
+      let finalUsername = currentUser?.username || '';
+      if (regUsername.trim()) {
+        const uRes = validateUsername(regUsername);
+        if (!uRes.valid) {
+          setErrorMsg(uRes.error || "Username xato kiritilgan.");
+          return;
+        }
+        if (!isUsernameUnique(uRes.normalized, usersList, activeUid)) {
+          setErrorMsg(`"@${uRes.normalized}" username band! Iltimos, boshqa username tanlang.`);
+          return;
+        }
+        finalUsername = uRes.normalized;
+      }
+
       const computedAge = calculateAge(regBirthDate, Number(regAge));
       const newUserData = {
         ...currentUser,
         id: currentUser?.id || `ALOV-${activeUid.slice(0, 5).toUpperCase()}`,
         uid: activeUid,
         name: regName || firebaseUser?.displayName || currentUser?.name || '',
+        username: finalUsername,
         birthDate: regBirthDate,
         age: computedAge,
         gender: regGender,
@@ -2027,6 +2044,7 @@ export default function App() {
     setHasStartedBotError(false);
     setErrorMsg('');
     setRegName(clean.regName);
+    setRegUsername(clean.regUsername);
     setRegBirthDate(clean.regBirthDate);
     setRegAge(clean.regAge);
     setRegGender(clean.regGender);
@@ -2197,6 +2215,23 @@ export default function App() {
     try {
       setIsLoggingIn(true);
       setErrorMsg('');
+
+      let finalUsername = '';
+      if (regUsername.trim()) {
+        const uRes = validateUsername(regUsername);
+        if (!uRes.valid) {
+          setErrorMsg(uRes.error || "Username xato kiritilgan.");
+          setIsLoggingIn(false);
+          return;
+        }
+        if (!isUsernameUnique(uRes.normalized, usersList, pendingGoogleUser.uid)) {
+          setErrorMsg(`"@${uRes.normalized}" username band! Iltimos, boshqa username tanlang.`);
+          setIsLoggingIn(false);
+          return;
+        }
+        finalUsername = uRes.normalized;
+      }
+
       const cleanTg = (regTelegram || '').replace(/^(https?:\/\/t\.me\/|@)/i, '').toLowerCase();
       const formattedTg = cleanTg ? `https://t.me/${cleanTg}` : undefined;
       const verifiedGender = pendingFaceId.detectedGender;
@@ -2206,6 +2241,7 @@ export default function App() {
         uid: pendingGoogleUser.uid,
         id: `ALOV-${pendingGoogleUser.uid.slice(0, 5).toUpperCase()}`,
         name: regName.trim(),
+        username: finalUsername,
         email: pendingGoogleUser.email || authEmail || '',
         telegram: formattedTg,
         password: authPassword.trim() || undefined,
@@ -2437,6 +2473,23 @@ export default function App() {
     try {
       setIsLoggingIn(true);
       setErrorMsg('');
+
+      let finalUsername = '';
+      if (regUsername.trim()) {
+        const uRes = validateUsername(regUsername);
+        if (!uRes.valid) {
+          setErrorMsg(uRes.error || "Username xato kiritilgan.");
+          setIsLoggingIn(false);
+          return;
+        }
+        if (!isUsernameUnique(uRes.normalized, usersList, pendingTgUser.uid)) {
+          setErrorMsg(`"@${uRes.normalized}" username band! Iltimos, boshqa username tanlang.`);
+          setIsLoggingIn(false);
+          return;
+        }
+        finalUsername = uRes.normalized;
+      }
+
       const cleanTg = (regTelegram || pendingTgUser.telegram || telegramInput || '').replace(/^(https?:\/\/t\.me\/|@)/i, '').toLowerCase();
       const formattedTg = cleanTg && !/^\d+$/.test(cleanTg) ? `https://t.me/${cleanTg}` : undefined;
       const verifiedGender = pendingFaceId.detectedGender;
@@ -2446,6 +2499,7 @@ export default function App() {
         uid: pendingTgUser.uid,
         id: pendingTgUser.id || `ALOV-TG-${pendingTgUser.uid.slice(0, 5).toUpperCase()}`,
         name: regName.trim(),
+        username: finalUsername,
         telegram: formattedTg,
         telegramChatId: pendingTgUser.telegramChatId,
         password: authPassword.trim() || undefined,
@@ -3987,6 +4041,7 @@ export default function App() {
           );
           const openEditProfileModal = () => {
             setRegName(currentUser?.name || '');
+            setRegUsername(currentUser?.username || '');
             setRegAge(String(currentUser?.age || 22));
             setRegGender(currentUser?.gender || 'female');
             setRegRegion(currentUser?.region || 'Toshkent shahri');
@@ -4095,6 +4150,11 @@ export default function App() {
                         <h1 className="text-2xl sm:text-[28px] font-editorial font-bold text-[#221719] leading-tight truncate">
                           {profileName}
                         </h1>
+                        {currentUser?.username && (
+                          <span className="font-mono text-xs font-bold text-[#C93545] bg-[#FDF2F3] px-2.5 py-0.5 rounded-lg border border-[#F2D5D9] shrink-0">
+                            {formatUsernameDisplay(currentUser.username)}
+                          </span>
+                        )}
                         {isAdmin ? (
                           <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full bg-[#221719] text-[#F5D28E] text-[10px] font-bold tracking-wide shrink-0">
                             <Crown className="w-3 h-3" />
@@ -4553,34 +4613,38 @@ export default function App() {
 
       </div>
 
-      {/* Sticky Bottom Navigation - 6 Responsive Tabs */}
+      {/* Sticky Bottom Navigation - 6 Luxury Glassmorphic Tabs */}
       {activeTab !== 'reels' && !(activeTab === 'chats' && chatView === 'conversation') && (
-        <nav className="sticky bottom-0 left-0 right-0 z-50 shrink-0 bg-white/95 backdrop-blur-xl border-t border-[rgba(166,36,51,0.1)] px-1 sm:px-2 py-2 flex items-center justify-around shadow-medium">
-          <button onClick={() => setActiveTab('discover')} className={`flex flex-col items-center px-1.5 py-1 transition min-w-0 ${activeTab === 'discover' ? 'text-[#C93545] font-bold' : 'text-[#6B5B5E] hover:text-[#221719]'}`}>
-            <Users className="w-4 h-4 sm:w-4.5 sm:h-4.5" />
-            <span className="text-[9.5px] sm:text-[10px] truncate">Nomzodlar</span>
-          </button>
-          <button onClick={() => setActiveTab('posts')} className={`flex flex-col items-center px-1.5 py-1 transition min-w-0 ${activeTab === 'posts' ? 'text-[#C93545] font-bold' : 'text-[#6B5B5E] hover:text-[#221719]'}`}>
-            <Newspaper className="w-4 h-4 sm:w-4.5 sm:h-4.5" />
-            <span className="text-[9.5px] sm:text-[10px] truncate">Postlar</span>
-          </button>
-          <button onClick={() => setActiveTab('map')} className={`flex flex-col items-center px-1.5 py-1 transition min-w-0 ${activeTab === 'map' ? 'text-[#C93545] font-bold' : 'text-[#6B5B5E] hover:text-[#221719]'}`}>
-            <MapPin className="w-4 h-4 sm:w-4.5 sm:h-4.5" />
-            <span className="text-[9.5px] sm:text-[10px] truncate">Xarita</span>
-          </button>
-          <button onClick={() => setActiveTab('reels')} className={`flex flex-col items-center px-1.5 py-1 transition min-w-0 ${activeTab === 'reels' ? 'text-[#C93545] font-bold' : 'text-[#6B5B5E] hover:text-[#221719]'}`}>
-            <Video className="w-4 h-4 sm:w-4.5 sm:h-4.5" />
-            <span className="text-[9.5px] sm:text-[10px] truncate">Efirlar</span>
-          </button>
-          <button onClick={() => { setChatView('list'); setActiveTab('chats'); }} className={`flex flex-col items-center px-1.5 py-1 transition min-w-0 ${activeTab === 'chats' ? 'text-[#C93545] font-bold' : 'text-[#6B5B5E] hover:text-[#221719]'}`}>
-            <MessageCircle className="w-4 h-4 sm:w-4.5 sm:h-4.5" />
-            <span className="text-[9.5px] sm:text-[10px] truncate">Chatlar</span>
-          </button>
-          <button onClick={() => setActiveTab('profile')} className={`flex flex-col items-center px-1.5 py-1 transition min-w-0 ${activeTab === 'profile' ? 'text-[#C93545] font-bold' : 'text-[#6B5B5E] hover:text-[#221719]'}`}>
-            <UserIcon className="w-4 h-4 sm:w-4.5 sm:h-4.5" />
-            <span className="text-[9.5px] sm:text-[10px] truncate">Profil</span>
-          </button>
-        </nav>
+        <div className="sticky bottom-0 left-0 right-0 z-50 shrink-0 pointer-events-none pb-2 pt-1 px-2 sm:px-4">
+          <nav className="pointer-events-auto max-w-lg mx-auto bg-white/95 backdrop-blur-2xl border border-[rgba(166,36,51,0.14)] rounded-2xl sm:rounded-full px-1.5 py-1.5 flex items-center justify-around shadow-[0_12px_36px_rgba(34,23,25,0.08)]">
+            {[
+              { id: 'discover', label: 'Nomzodlar', icon: Users, onClick: () => setActiveTab('discover') },
+              { id: 'posts', label: 'Postlar', icon: Newspaper, onClick: () => setActiveTab('posts') },
+              { id: 'map', label: 'Xarita', icon: MapPin, onClick: () => setActiveTab('map') },
+              { id: 'reels', label: 'Efirlar', icon: Video, onClick: () => setActiveTab('reels') },
+              { id: 'chats', label: 'Chatlar', icon: MessageCircle, onClick: () => { setChatView('list'); setActiveTab('chats'); } },
+              { id: 'profile', label: 'Profil', icon: UserIcon, onClick: () => setActiveTab('profile') },
+            ].map((tab) => {
+              const Icon = tab.icon;
+              const isActive = activeTab === tab.id;
+              return (
+                <button
+                  key={tab.id}
+                  onClick={tab.onClick}
+                  data-testid={`tab-${tab.id}`}
+                  className={`relative flex flex-col items-center justify-center px-2 sm:px-3 py-1.5 rounded-xl sm:rounded-full transition-all duration-200 cursor-pointer min-w-0 ${
+                    isActive
+                      ? 'text-[#C93545] font-bold bg-[#FDF2F3] shadow-xs'
+                      : 'text-[#6B5B5E] hover:text-[#221719] hover:bg-[#FAF4F2]'
+                  }`}
+                >
+                  <Icon className={`w-4 h-4 sm:w-4.5 sm:h-4.5 transition-transform duration-200 ${isActive ? 'scale-110' : ''}`} />
+                  <span className="text-[9.5px] sm:text-[10px] truncate mt-0.5 font-medium">{tab.label}</span>
+                </button>
+              );
+            })}
+          </nav>
+        </div>
       )}
 
     </div>
@@ -4732,6 +4796,28 @@ export default function App() {
                       className="w-full px-3.5 py-2.5 rounded-xl bg-white border border-[rgba(166,36,51,0.15)] text-xs font-semibold text-[#221719] focus:border-[#C93545] outline-none"
                       placeholder="Ismingiz..."
                     />
+                  </div>
+
+                  <div>
+                    <div className="flex items-center justify-between mb-1">
+                      <label className="block text-[11px] font-bold text-[#221719]">
+                        Foydalanuvchi nomi (@username)
+                      </label>
+                      <span className="text-[10px] text-[#A62433] font-bold">Probel mumkin emas</span>
+                    </div>
+                    <div className="relative">
+                      <span className="absolute left-3.5 top-1/2 -translate-y-1/2 text-xs font-mono font-bold text-[#837275]">@</span>
+                      <input 
+                        type="text" 
+                        value={regUsername}
+                        onChange={(e) => {
+                          const clean = e.target.value.replace(/\s+/g, '').replace(/^@+/, '');
+                          setRegUsername(clean);
+                        }}
+                        className="w-full pl-8 pr-3.5 py-2.5 rounded-xl bg-white border border-[rgba(166,36,51,0.15)] text-xs font-mono font-bold text-[#221719] focus:border-[#C93545] outline-none"
+                        placeholder="username"
+                      />
+                    </div>
                   </div>
 
                   <div className="grid grid-cols-2 gap-2">
@@ -5032,6 +5118,27 @@ export default function App() {
                       className="w-full px-3.5 py-2.5 rounded-xl bg-white border border-[rgba(166,36,51,0.15)] text-xs font-semibold text-[#221719] focus:border-[#C93545] outline-none transition-all shadow-xs"
                       placeholder="Ismingiz (masalan: Malika)..."
                     />
+                  </div>
+                  <div>
+                    <div className="flex items-center justify-between mb-1">
+                      <label className="block text-[11px] font-bold text-slate-700">
+                        Foydalanuvchi nomi (@username)
+                      </label>
+                      <span className="text-[10px] text-[#A62433] font-bold">Probel mumkin emas</span>
+                    </div>
+                    <div className="relative">
+                      <span className="absolute left-3.5 top-1/2 -translate-y-1/2 text-xs font-mono font-bold text-[#837275]">@</span>
+                      <input 
+                        type="text" 
+                        value={regUsername}
+                        onChange={(e) => {
+                          const clean = e.target.value.replace(/\s+/g, '').replace(/^@+/, '');
+                          setRegUsername(clean);
+                        }}
+                        className="w-full pl-8 pr-3.5 py-2.5 rounded-xl bg-white border border-[rgba(166,36,51,0.15)] text-xs font-mono font-bold text-[#221719] focus:border-[#C93545] outline-none transition-all shadow-xs"
+                        placeholder="username (masalan: dilnoza_9)"
+                      />
+                    </div>
                   </div>
                   <div className="grid grid-cols-2 gap-3">
                     <div>
@@ -5397,6 +5504,31 @@ export default function App() {
                     className="w-full px-4 py-3 rounded-xl bg-white border border-gray-300 text-xs font-semibold text-gray-900 focus:border-red-500 focus:ring-1 focus:ring-red-500 transition-all outline-none placeholder:text-gray-400"
                     placeholder="Ismingiz..."
                   />
+                </div>
+
+                <div>
+                  <div className="flex items-center justify-between mb-1">
+                    <label className="block text-[11px] font-bold text-slate-700">
+                      Foydalanuvchi nomi (@username) *
+                    </label>
+                    <span className="text-[10px] text-[#A62433] font-bold">Bo'sh joy (probel) mumkin emas</span>
+                  </div>
+                  <div className="relative">
+                    <span className="absolute left-3.5 top-1/2 -translate-y-1/2 text-xs font-mono font-bold text-slate-400">@</span>
+                    <input 
+                      type="text" 
+                      value={regUsername}
+                      onChange={(e) => {
+                        const clean = e.target.value.replace(/\s+/g, '').replace(/^@+/, '');
+                        setRegUsername(clean);
+                      }}
+                      className="w-full pl-8 pr-4 py-3 rounded-xl bg-white border border-gray-300 text-xs font-mono font-bold text-gray-900 focus:border-red-500 focus:ring-1 focus:ring-red-500 transition-all outline-none placeholder:text-gray-400"
+                      placeholder="username (masalan: alisher_01)"
+                    />
+                  </div>
+                  <p className="text-[10px] text-slate-500 mt-1">
+                    3-20 belgi, lotin harflari va raqamlar. Har bir foydalanuvchida yagona bo'lishi shart.
+                  </p>
                 </div>
 
                 <div>

@@ -6,6 +6,7 @@ export interface PostComment {
   authorUid: string;
   authorId?: string;
   authorName: string;
+  authorUsername?: string;
   authorAvatar?: string;
   text: string;
   createdAt: string;
@@ -16,12 +17,16 @@ export interface PostItem {
   authorUid: string;
   authorId?: string;
   authorName: string;
+  authorUsername?: string;
   authorAvatar?: string;
   authorGender?: 'male' | 'female';
   authorVerified?: boolean;
   type: PostMediaType;
   caption: string;
   mediaUrl?: string;
+  embedUrl?: string;
+  mediaProvider?: string;
+  isVerticalVideo?: boolean;
   coverUrl?: string;
   audioTitle?: string;
   audioArtist?: string;

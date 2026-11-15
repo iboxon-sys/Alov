@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useState } from 'react';
 import { X, Users, UserPlus, UserCheck, ShieldCheck, Search, MapPin } from 'lucide-react';
 import { isUserOnlineStrict, formatLastSeenUz } from '../utils/presence';
 import { resolveConnectionUsers } from '../utils/profileLookup';
+import { getApiUrl, resolveApiMediaUrl } from '../config/api';
 
 interface FollowListModalProps {
   isOpen: boolean;
@@ -41,7 +42,7 @@ export const FollowListModal: React.FC<FollowListModalProps> = ({
     setSearchQuery('');
     let cancelled = false;
     setLoading(true);
-    fetch(`/api/users/${encodeURIComponent(targetUser.uid)}/connections`)
+    fetch(getApiUrl(`/api/users/${encodeURIComponent(targetUser.uid)}/connections`))
       .then((res) => (res.ok ? res.json() : null))
       .then((data) => {
         if (cancelled || !data?.success) return;
@@ -120,7 +121,7 @@ export const FollowListModal: React.FC<FollowListModalProps> = ({
           <div className="flex items-center gap-2.5 min-w-0">
             <div className="w-9 h-9 rounded-full overflow-hidden border border-[#F2E8E6] shrink-0 bg-[#FAF4F2]">
               <img
-                src={targetUser.avatar || `https://ui-avatars.com/api/?name=${encodeURIComponent(targetUser.name || 'U')}&background=FDF2F3&color=C93545`}
+                src={resolveApiMediaUrl(targetUser.avatar || `https://ui-avatars.com/api/?name=${encodeURIComponent(targetUser.name || 'U')}&background=FDF2F3&color=C93545`)}
                 alt={targetUser.name}
                 className="w-full h-full object-cover"
               />
@@ -224,10 +225,10 @@ export const FollowListModal: React.FC<FollowListModalProps> = ({
                   >
                     <div className="relative w-11 h-11 shrink-0">
                       <img
-                        src={
+                        src={resolveApiMediaUrl(
                           liveUser.avatar ||
-                          `https://ui-avatars.com/api/?name=${encodeURIComponent(liveUser.name || 'U')}&background=FDF2F3&color=C93545`
-                        }
+                            `https://ui-avatars.com/api/?name=${encodeURIComponent(liveUser.name || 'U')}&background=FDF2F3&color=C93545`
+                        )}
                         alt={liveUser.name}
                         className="w-11 h-11 rounded-full object-cover border border-[#F2E8E6] group-hover:scale-105 transition-transform"
                       />

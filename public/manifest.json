@@ -11,21 +11,21 @@
   "theme_color": "#E8474A",
   "icons": [
     {
-      "src": "/src/assets/images/alov_app_logo_1793451330582.jpg",
+      "src": "/assets/images/alov_app_logo_1793451330582.webp",
       "sizes": "192x192",
-      "type": "image/jpeg",
+      "type": "image/webp",
       "purpose": "any"
     },
     {
-      "src": "/src/assets/images/alov_app_logo_1793451330582.jpg",
+      "src": "/assets/images/alov_app_logo_1793451330582.webp",
       "sizes": "512x512",
-      "type": "image/jpeg",
+      "type": "image/webp",
       "purpose": "any"
     },
     {
-      "src": "/src/assets/images/alov_app_logo_1793451330582.jpg",
+      "src": "/assets/images/alov_app_logo_1793451330582.webp",
       "sizes": "512x512",
-      "type": "image/jpeg",
+      "type": "image/webp",
       "purpose": "maskable"
     }
   ]

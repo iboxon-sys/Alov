@@ -22,7 +22,7 @@ import {
   ExternalLink,
   Disc,
 } from 'lucide-react';
-import { PostItem, PostMediaType, formatPostTimeUz, validateNewPostDraft } from '../utils/posts';
+import { PostItem, PostMediaType, formatPostTimeUz, isPostVisibleToViewer, validateNewPostDraft } from '../utils/posts';
 import { isUserOnlineStrict } from '../utils/presence';
 import {
   parseMediaLink,
@@ -31,6 +31,8 @@ import {
   MusicCatalogTrack,
 } from '../utils/mediaLinks';
 import { formatUsernameDisplay } from '../utils/username';
+import { isDirectPlayableVideoUrl } from '../utils/videoImport';
+import { getApiUrl, resolveApiMediaUrl } from '../config/api';
 
 interface MusicPlayerCardProps {
   mediaUrl: string;
@@ -45,13 +47,15 @@ export const MusicPlayerCard: React.FC<MusicPlayerCardProps> = ({ mediaUrl, titl
   const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState(0);
   const [loadError, setLoadError] = useState(false);
+  const resolvedMediaUrl = resolveApiMediaUrl(mediaUrl);
+  const resolvedCoverUrl = coverUrl ? resolveApiMediaUrl(coverUrl) : '';
 
   useEffect(() => {
     setIsPlaying(false);
     setCurrentTime(0);
     setDuration(0);
     setLoadError(false);
-  }, [mediaUrl]);
+  }, [resolvedMediaUrl]);
 
   const togglePlay = () => {
     const audio = audioRef.current;
@@ -75,7 +79,7 @@ export const MusicPlayerCard: React.FC<MusicPlayerCardProps> = ({ mediaUrl, titl
     <div className="relative overflow-hidden rounded-2xl bg-gradient-to-br from-[#221719] via-[#2E1F22] to-[#3B262B] text-white p-4 border border-[#C89B54]/30 shadow-md">
       <audio
         ref={audioRef}
-        src={mediaUrl}
+        src={resolvedMediaUrl}
         preload="metadata"
         onTimeUpdate={() => setCurrentTime(audioRef.current?.currentTime || 0)}
         onLoadedMetadata={() => setDuration(audioRef.current?.duration || 0)}
@@ -89,8 +93,8 @@ export const MusicPlayerCard: React.FC<MusicPlayerCardProps> = ({ mediaUrl, titl
           aria-label={isPlaying ? 'Pauza' : 'Ijro etish'}
           className="relative w-14 h-14 rounded-2xl shrink-0 bg-[#1A1113] border border-[#C89B54]/40 flex items-center justify-center overflow-hidden group hover:border-[#C89B54] transition-all cursor-pointer"
         >
-          {coverUrl ? (
-            <img src={coverUrl} alt={title || 'Musiqa'} className="w-full h-full object-cover opacity-55" />
+          {resolvedCoverUrl ? (
+            <img src={resolvedCoverUrl} alt={title || 'Musiqa'} className="w-full h-full object-cover opacity-55" />
           ) : (
             <div
               className={`w-10 h-10 rounded-full border-2 border-dashed border-[#C89B54]/70 flex items-center justify-center ${
@@ -141,7 +145,7 @@ export const MusicPlayerCard: React.FC<MusicPlayerCardProps> = ({ mediaUrl, titl
             className="w-full mt-2.5 accent-[#C89B54] h-1.5 bg-white/15 rounded-lg cursor-pointer"
           />
           {loadError && (
-            <p className="text-[10px] text-rose-300 mt-1">Audio manbasini yuklab bo'lmadi</p>
+            <p className="text-[10px] text-rose-200 mt-1">Audio manbasini yuklab bo'lmadi</p>
           )}
         </div>
       </div>
@@ -201,6 +205,7 @@ export const PostsFeed: React.FC<PostsFeedProps> = ({
   const [commentInputs, setCommentInputs] = useState<Record<string, string>>({});
   const [expandedComments, setExpandedComments] = useState<Record<string, boolean>>({});
   const [submittingCommentId, setSubmittingCommentId] = useState<string | null>(null);
+  const [detectedVerticalByPostId, setDetectedVerticalByPostId] = useState<Record<string, boolean>>({});
 
   // File Inputs
   const galleryInputRef = useRef<HTMLInputElement | null>(null);
@@ -209,6 +214,10 @@ export const PostsFeed: React.FC<PostsFeedProps> = ({
   const audioInputRef = useRef<HTMLInputElement | null>(null);
 
   const visiblePosts = posts.filter((p) => {
+    const postAuthor =
+      usersList.find((u) => u.uid === p.authorUid || (p.authorId && u.id === p.authorId)) ||
+      (currentUser && (currentUser.uid === p.authorUid || currentUser.id === p.authorId) ? currentUser : null);
+    if (!isPostVisibleToViewer(p, currentUser, postAuthor?.gender)) return false;
     if (authorUid && p.authorUid !== authorUid) return false;
     if (!authorUid && filterType !== 'all' && p.type !== filterType) return false;
     return true;
@@ -228,10 +237,55 @@ export const PostsFeed: React.FC<PostsFeedProps> = ({
     setSelectedPresetId(null);
   };
 
-  const handleApplyLink = (urlToParse: string) => {
+  const handleApplyLink = async (urlToParse: string) => {
     const raw = (urlToParse || '').trim();
     if (!raw) return;
+    setDraftError('');
+
     const parsed = parseMediaLink(raw, draftType);
+
+    if (draftType === 'video' && !raw.startsWith('/api/media/') && !raw.startsWith('blob:') && !raw.startsWith('data:')) {
+      setUploadingMedia(true);
+      try {
+        const res = await fetch(getApiUrl('/api/media/import-video-url'), {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ url: parsed.normalizedUrl || raw }),
+        });
+        const data = await res.json();
+        if (!res.ok || !data?.success) {
+          setDraftError(
+            data?.error ||
+              "Havoladan videoni yuklab bo'lmadi. Boshqa havola kiriting yoki qurilmadan video yuklang."
+          );
+          return;
+        }
+        if (data.mode === 'embed' && data.embedUrl) {
+          setMediaUrl(data.url || parsed.normalizedUrl || raw);
+          setEmbedUrl(data.embedUrl);
+          setMediaProvider(data.provider || parsed.provider || 'direct');
+          setIsVerticalVideo(Boolean(data.isVertical));
+          return;
+        }
+        if (!data.url) {
+          setDraftError(
+            "Havoladan videoni yuklab bo'lmadi. Boshqa havola kiriting yoki qurilmadan video yuklang."
+          );
+          return;
+        }
+        setMediaUrl(data.url);
+        setEmbedUrl('');
+        setMediaProvider('direct');
+        setIsVerticalVideo(Boolean(data.isVertical));
+        return;
+      } catch {
+        setDraftError("Video havolasini yuklab olishda server bilan aloqa uzildi.");
+        return;
+      } finally {
+        setUploadingMedia(false);
+      }
+    }
+
     setMediaUrl(parsed.normalizedUrl);
     setEmbedUrl(parsed.embedUrl || '');
     setMediaProvider(parsed.provider || 'direct');
@@ -259,7 +313,7 @@ export const PostsFeed: React.FC<PostsFeedProps> = ({
 
     setUploadingMedia(true);
     try {
-      const res = await fetch('/api/media/upload-raw', {
+      const res = await fetch(getApiUrl('/api/media/upload-raw'), {
         method: 'POST',
         headers: {
           'Content-Type': file.type || 'application/octet-stream',
@@ -274,7 +328,7 @@ export const PostsFeed: React.FC<PostsFeedProps> = ({
         setMediaUrl(data.url);
         setEmbedUrl('');
         setMediaProvider('direct');
-        setIsVerticalVideo(false);
+        setIsVerticalVideo(Boolean(data.isVertical));
 
         if (typeHint === 'music') {
           const meta = parseAudioFilenameMetadata(file.name);
@@ -322,7 +376,7 @@ export const PostsFeed: React.FC<PostsFeedProps> = ({
 
     setPublishing(true);
     try {
-      const res = await fetch('/api/posts', {
+      const res = await fetch(getApiUrl('/api/posts'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -360,7 +414,7 @@ export const PostsFeed: React.FC<PostsFeedProps> = ({
       return;
     }
     try {
-      const res = await fetch(`/api/posts/${encodeURIComponent(post.id)}/like`, {
+      const res = await fetch(getApiUrl(`/api/posts/${encodeURIComponent(post.id)}/like`), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ uid: currentUser.uid }),
@@ -383,7 +437,7 @@ export const PostsFeed: React.FC<PostsFeedProps> = ({
 
     setSubmittingCommentId(postId);
     try {
-      const res = await fetch(`/api/posts/${encodeURIComponent(postId)}/comments`, {
+      const res = await fetch(getApiUrl(`/api/posts/${encodeURIComponent(postId)}/comments`), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -406,7 +460,7 @@ export const PostsFeed: React.FC<PostsFeedProps> = ({
   const handleDeletePost = async (postId: string) => {
     if (!currentUser) return;
     try {
-      const res = await fetch(`/api/posts/${encodeURIComponent(postId)}?uid=${encodeURIComponent(currentUser.uid)}`, {
+      const res = await fetch(getApiUrl(`/api/posts/${encodeURIComponent(postId)}?uid=${encodeURIComponent(currentUser.uid)}`), {
         method: 'DELETE',
       });
       const data = await res.json();
@@ -647,21 +701,21 @@ export const PostsFeed: React.FC<PostsFeedProps> = ({
                       >
                         <X className="w-4 h-4" />
                       </button>
-                      <img src={mediaUrl} alt="Preview" className="w-full max-h-72 object-cover" />
+                      <img src={resolveApiMediaUrl(mediaUrl)} alt="Preview" className="w-full max-h-72 object-cover" />
                     </div>
                   )}
                 </div>
               )}
 
-              {/* VIDEO UPLOAD OPTIONS (Universal Social Media Embeds) */}
+              {/* VIDEO UPLOAD OPTIONS (Universal Social Media Link & Direct Video) */}
               {draftType === 'video' && (
                 <div className="space-y-3">
                   <div className="flex items-center justify-between">
                     <label className="text-[11px] font-bold text-[#6B5B5E] uppercase tracking-wider">
-                      Universal video havolasi yoki fayl
+                      Istalgan ijtimoiy tarmoq havolasi yoki video fayl
                     </label>
                     <span className="text-[10px] text-[#A62433] font-bold">
-                      YouTube, TikTok, Reels, VK, FB
+                      MP4 / TikTok / Reels / Shorts
                     </span>
                   </div>
 
@@ -670,27 +724,29 @@ export const PostsFeed: React.FC<PostsFeedProps> = ({
                       <div className="p-3 rounded-2xl bg-[#FAF4F2] border border-[#F2E8E6] space-y-2">
                         <p className="text-xs font-bold text-[#221719] flex items-center gap-1.5">
                           <LinkIcon className="w-3.5 h-3.5 text-[#C93545]" />
-                          <span>Ijtimoiy tarmoq yoki video havolasi:</span>
+                          <span>Video havolasini kiriting (avtomatik yuklanadi):</span>
                         </p>
                         <div className="flex gap-2">
                           <input
                             type="url"
                             value={linkInputText}
                             onChange={(e) => setLinkInputText(e.target.value)}
-                            placeholder="https://youtube.com/shorts/..., tiktok.com/..., instagram.com/reel/..."
+                            placeholder="TikTok, Instagram, YouTube, X, Telegram yoki .mp4 havola"
                             data-testid="post-video-link-input"
                             className="flex-1 px-3.5 py-2.5 bg-white border border-[#F2E8E6] rounded-xl text-xs text-[#221719] placeholder-[#837275] focus:outline-none focus:border-[#C93545]"
                           />
                           <button
                             type="button"
+                            disabled={uploadingMedia || !linkInputText.trim()}
                             onClick={() => handleApplyLink(linkInputText)}
-                            className="px-4 py-2.5 rounded-xl bg-gradient-to-r from-[#C93545] to-[#A62433] text-white text-xs font-bold hover:opacity-95 transition cursor-pointer"
+                            data-testid="post-video-link-submit-btn"
+                            className="px-4 py-2.5 rounded-xl bg-gradient-to-r from-[#C93545] to-[#A62433] text-white text-xs font-bold hover:opacity-95 transition cursor-pointer disabled:opacity-50"
                           >
-                            Yuklash
+                            {uploadingMedia ? 'Yuklanmoqda...' : 'Yuklash'}
                           </button>
                         </div>
-                        <p className="text-[10.5px] text-[#837275]">
-                          Cheklovsiz: YouTube (oddiy va Shorts), TikTok, Instagram (Reels va postlar), Vimeo, Rutube, VK va to'g'ridan-to'g'ri MP4 havolalari avtomatik ochiladi.
+                        <p className="text-[10.5px] text-[#6B5B5E]">
+                          TikTok, Instagram, YouTube, X, Facebook, Telegram va boshqa istalgan tarmoqdagi video avtomatik ajratib olinadi va ramkasiz toza pleyerda ko'rsatiladi.
                         </p>
                       </div>
 
@@ -708,7 +764,7 @@ export const PostsFeed: React.FC<PostsFeedProps> = ({
                       </div>
                     </div>
                   ) : (
-                    <div className="relative rounded-2xl overflow-hidden border border-[#F2E8E6] bg-black">
+                    <div className="relative overflow-hidden bg-black">
                       <button
                         type="button"
                         onClick={() => {
@@ -722,7 +778,7 @@ export const PostsFeed: React.FC<PostsFeedProps> = ({
                         <X className="w-4 h-4" />
                       </button>
 
-                      {embedUrl ? (
+                      {embedUrl && !isDirectPlayableVideoUrl(mediaUrl) ? (
                         <div className={`relative w-full ${isVerticalVideo ? 'aspect-[9/16] max-w-[280px] mx-auto' : 'aspect-video'}`}>
                           <iframe
                             src={embedUrl}
@@ -733,7 +789,21 @@ export const PostsFeed: React.FC<PostsFeedProps> = ({
                           />
                         </div>
                       ) : (
-                        <video src={mediaUrl} controls className="w-full max-h-72 object-contain" />
+                        <div className={isVerticalVideo ? 'aspect-[9/16] max-w-[260px] mx-auto bg-black overflow-hidden' : 'w-full bg-black'}>
+                          <video
+                            src={resolveApiMediaUrl(mediaUrl)}
+                            controls
+                            playsInline
+                            preload="metadata"
+                            onLoadedMetadata={(e) => {
+                              const v = e.currentTarget;
+                              if (v.videoHeight > v.videoWidth) {
+                                setIsVerticalVideo(true);
+                              }
+                            }}
+                            className={isVerticalVideo ? 'w-full h-full object-contain bg-black block' : 'w-full max-h-72 object-contain bg-black block'}
+                          />
+                        </div>
                       )}
                     </div>
                   )}
@@ -956,10 +1026,11 @@ export const PostsFeed: React.FC<PostsFeedProps> = ({
               usersList.find((u) => u.uid === post.authorUid || (post.authorId && u.id === post.authorId)) ||
               (currentUser && (currentUser.uid === post.authorUid || currentUser.id === post.authorId) ? currentUser : null);
             const authorOnline = liveAuthor ? isUserOnlineStrict(liveAuthor, onlineUserIds) : onlineUserIds.has(post.authorUid);
-            const authorAvatar =
+            const authorAvatar = resolveApiMediaUrl(
               liveAuthor?.avatar ||
-              post.authorAvatar ||
-              `https://ui-avatars.com/api/?name=${encodeURIComponent(liveAuthor?.name || post.authorName || 'U')}&background=FDF2F3&color=C93545`;
+                post.authorAvatar ||
+                `https://ui-avatars.com/api/?name=${encodeURIComponent(liveAuthor?.name || post.authorName || 'U')}&background=FDF2F3&color=C93545`
+            );
             const authorName = liveAuthor?.name || post.authorName || 'Foydalanuvchi';
             const authorUsername = liveAuthor?.username || post.authorUsername || '';
             const authorVerified = Boolean(liveAuthor?.faceId?.verified || liveAuthor?.isVerified || post.authorVerified);
@@ -984,6 +1055,7 @@ export const PostsFeed: React.FC<PostsFeedProps> = ({
               (post.type === 'video' && post.mediaUrl ? parseMediaLink(post.mediaUrl, 'video').embedUrl : undefined);
             const isVertical = Boolean(
               post.isVerticalVideo ||
+              detectedVerticalByPostId[post.id] ||
               (post.mediaUrl && parseMediaLink(post.mediaUrl, 'video').isVertical)
             );
 
@@ -1016,8 +1088,19 @@ export const PostsFeed: React.FC<PostsFeedProps> = ({
                       <img
                         src={authorAvatar}
                         alt={authorName}
+                        onError={(e) => {
+                          e.currentTarget.style.display = 'none';
+                          const fallback = e.currentTarget.nextElementSibling as HTMLElement | null;
+                          if (fallback) fallback.style.display = 'flex';
+                        }}
                         className="w-10 h-10 rounded-full object-cover border border-[#F2E8E6] group-hover:scale-105 transition-transform"
                       />
+                      <div
+                        className="hidden w-10 h-10 rounded-full bg-[#FAF4F2] text-[#C93545] font-editorial font-black text-sm items-center justify-center border border-[#F2D5D9]"
+                        aria-hidden="true"
+                      >
+                        {authorName.charAt(0).toUpperCase()}
+                      </div>
                       <span
                         className={`absolute bottom-0 right-0 w-2.5 h-2.5 rounded-full border-2 border-white ${
                           authorOnline ? 'bg-emerald-500' : 'bg-slate-400'
@@ -1043,7 +1126,7 @@ export const PostsFeed: React.FC<PostsFeedProps> = ({
                           {post.type === 'photo'
                             ? 'Rasm'
                             : post.type === 'video'
-                              ? 'Video'
+                              ? (isVertical ? 'Shorts Video' : 'Video')
                               : post.type === 'music'
                                 ? 'Musiqa'
                                 : 'Matn'}
@@ -1057,6 +1140,7 @@ export const PostsFeed: React.FC<PostsFeedProps> = ({
                       type="button"
                       onClick={() => handleDeletePost(post.id)}
                       aria-label="Postni o'chirish"
+                      data-testid={`delete-post-btn-${post.id}`}
                       className="p-2 rounded-xl text-[#837275] hover:text-[#C93545] hover:bg-[#FDF2F3] transition-colors cursor-pointer"
                     >
                       <Trash2 className="w-4 h-4" />
@@ -1075,7 +1159,7 @@ export const PostsFeed: React.FC<PostsFeedProps> = ({
                 {post.type === 'photo' && post.mediaUrl && (
                   <div className="px-4 sm:px-5 pb-3">
                     <img
-                      src={post.mediaUrl}
+                      src={resolveApiMediaUrl(post.mediaUrl)}
                       alt={post.caption || authorName}
                       className="w-full max-h-[520px] object-cover rounded-2xl border border-[#F2E8E6] bg-[#FAF4F2]"
                     />
@@ -1083,8 +1167,34 @@ export const PostsFeed: React.FC<PostsFeedProps> = ({
                 )}
 
                 {post.type === 'video' && (
-                  <div className="w-full bg-black">
-                    {resolvedEmbedUrl ? (
+                  <div className="w-full bg-black" data-vertical-video={isVertical ? 'true' : 'false'}>
+                    {post.mediaUrl && isDirectPlayableVideoUrl(post.mediaUrl) ? (
+                      <div
+                        className={
+                          isVertical
+                            ? 'aspect-[9/16] max-w-[360px] mx-auto bg-black overflow-hidden'
+                            : 'w-full bg-black'
+                        }
+                      >
+                        <video
+                          src={resolveApiMediaUrl(post.mediaUrl)}
+                          controls
+                          playsInline
+                          preload="metadata"
+                          onLoadedMetadata={(e) => {
+                            const v = e.currentTarget;
+                            if (v.videoHeight > v.videoWidth && !detectedVerticalByPostId[post.id]) {
+                              setDetectedVerticalByPostId((prev) => ({ ...prev, [post.id]: true }));
+                            }
+                          }}
+                          className={
+                            isVertical
+                              ? 'w-full h-full object-contain bg-black block'
+                              : 'w-full max-h-[520px] bg-black object-contain mx-auto block'
+                          }
+                        />
+                      </div>
+                    ) : resolvedEmbedUrl ? (
                       <div
                         className={`relative w-full overflow-hidden bg-black ${
                           isVertical ? 'aspect-[9/16] max-w-[360px] mx-auto' : 'aspect-video w-full'
@@ -1099,13 +1209,31 @@ export const PostsFeed: React.FC<PostsFeedProps> = ({
                         />
                       </div>
                     ) : post.mediaUrl ? (
-                      <video
-                        src={post.mediaUrl}
-                        controls
-                        playsInline
-                        preload="metadata"
-                        className="w-full max-h-[520px] bg-black object-contain mx-auto"
-                      />
+                      <div
+                        className={
+                          isVertical
+                            ? 'aspect-[9/16] max-w-[360px] mx-auto bg-black overflow-hidden'
+                            : 'w-full bg-black'
+                        }
+                      >
+                        <video
+                          src={resolveApiMediaUrl(post.mediaUrl)}
+                          controls
+                          playsInline
+                          preload="metadata"
+                          onLoadedMetadata={(e) => {
+                            const v = e.currentTarget;
+                            if (v.videoHeight > v.videoWidth && !detectedVerticalByPostId[post.id]) {
+                              setDetectedVerticalByPostId((prev) => ({ ...prev, [post.id]: true }));
+                            }
+                          }}
+                          className={
+                            isVertical
+                              ? 'w-full h-full object-contain bg-black block'
+                              : 'w-full max-h-[520px] bg-black object-contain mx-auto block'
+                          }
+                        />
+                      </div>
                     ) : null}
                   </div>
                 )}
@@ -1170,10 +1298,11 @@ export const PostsFeed: React.FC<PostsFeedProps> = ({
                           (currentUser && (currentUser.uid === c.authorUid || currentUser.id === c.authorId)
                             ? currentUser
                             : null);
-                        const commentAvatar =
+                        const commentAvatar = resolveApiMediaUrl(
                           commentLiveUser?.avatar ||
-                          c.authorAvatar ||
-                          `https://ui-avatars.com/api/?name=${encodeURIComponent(commentLiveUser?.name || c.authorName || 'U')}&background=FDF2F3&color=C93545`;
+                            c.authorAvatar ||
+                            `https://ui-avatars.com/api/?name=${encodeURIComponent(commentLiveUser?.name || c.authorName || 'U')}&background=FDF2F3&color=C93545`
+                        );
                         const commentName = commentLiveUser?.name || c.authorName || 'Foydalanuvchi';
                         const commentUsername = commentLiveUser?.username || c.authorUsername || '';
 
@@ -1204,8 +1333,19 @@ export const PostsFeed: React.FC<PostsFeedProps> = ({
                               <img
                                 src={commentAvatar}
                                 alt={commentName}
+                                onError={(e) => {
+                                  e.currentTarget.style.display = 'none';
+                                  const fallback = e.currentTarget.nextElementSibling as HTMLElement | null;
+                                  if (fallback) fallback.style.display = 'flex';
+                                }}
                                 className="w-8 h-8 rounded-full object-cover border border-[#F2E8E6] group-hover:ring-2 group-hover:ring-[#C93545]/50 transition-all"
                               />
+                              <div
+                                className="hidden w-8 h-8 rounded-full bg-[#FAF4F2] text-[#C93545] font-editorial font-black text-xs items-center justify-center border border-[#F2D5D9]"
+                                aria-hidden="true"
+                              >
+                                {commentName.charAt(0).toUpperCase()}
+                              </div>
                             </button>
                             <div className="flex-1 min-w-0">
                               <div className="flex items-center gap-1.5 flex-wrap">

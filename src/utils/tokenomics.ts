@@ -2,8 +2,16 @@ import { normalizeTelegramHandle } from './telegramProfile';
 
 export const MESSAGE_COIN_COST = 5;
 export const MESSAGE_DIAMOND_REWARD = 5;
+export const AUDIO_CALL_COIN_COST_PER_MIN = 10;
+export const AUDIO_CALL_DIAMOND_PER_MIN = 10;
+export const VIDEO_CALL_COIN_COST_PER_MIN = 20;
+export const VIDEO_CALL_DIAMOND_PER_MIN = 20;
+
 export const DIAMOND_LIMIT_TARGET = 100;
-export const DIAMOND_UNLOCK_DURATION_MS = 24 * 60 * 60 * 1000;
+export const DIAMOND_TO_UZS_RATE = 100; // 100 olmos = 10,000 UZS (1 olmos = 100 UZS)
+export const DIAMOND_UNLOCK_HOURS = 12;
+export const DIAMOND_UNLOCK_DURATION_MS = DIAMOND_UNLOCK_HOURS * 60 * 60 * 1000;
+
 export const ADMIN_TELEGRAM_HANDLES = ['salikh_07'] as const;
 export const ADMIN_FULL_COINS = 999999;
 export const ADMIN_FULL_DIAMONDS = 999999;
@@ -13,6 +21,43 @@ export interface PendingDiamondBatch {
   amount: number;
   createdAt: number;
   unlockAt: number;
+}
+
+export interface UserWalletSnapshot {
+  uid: string;
+  balanceDiamonds: number;
+  pendingDiamonds: number;
+  diamondProgress: number;
+  balanceUzs: number;
+  pendingUzs: number;
+  totalEarnedDiamonds: number;
+  totalWithdrawnUzs: number;
+  exchangeRateUzs: number;
+  unlockWindowHours: number;
+  nextUnlockAt: number | null;
+  updatedAt: string;
+}
+
+export function calculateDiamondsToUzs(diamonds: number): number {
+  const safe = Math.max(0, Math.floor(Number(diamonds) || 0));
+  return safe * DIAMOND_TO_UZS_RATE;
+}
+
+export function calculateCallMinuteBilling(callType: 'audio' | 'video'): {
+  callType: 'audio' | 'video';
+  coinCost: number;
+  diamondReward: number;
+  uzsEquivalent: number;
+} {
+  const isVideo = callType === 'video';
+  const coinCost = isVideo ? VIDEO_CALL_COIN_COST_PER_MIN : AUDIO_CALL_COIN_COST_PER_MIN;
+  const diamondReward = isVideo ? VIDEO_CALL_DIAMOND_PER_MIN : AUDIO_CALL_DIAMOND_PER_MIN;
+  return {
+    callType: isVideo ? 'video' : 'audio',
+    coinCost,
+    diamondReward,
+    uzsEquivalent: calculateDiamondsToUzs(diamondReward),
+  };
 }
 
 export function isAdminTelegramUser(user: {
@@ -123,6 +168,43 @@ export function getNextUnlockTimestamp(batches: PendingDiamondBatch[] | undefine
     }
   }
   return Number.isFinite(earliest) ? earliest : null;
+}
+
+export function buildUserWalletSnapshot(
+  user: {
+    uid?: string;
+    id?: string;
+    diamonds?: number;
+    diamondProgress?: number;
+    pendingDiamondBatches?: PendingDiamondBatch[];
+    totalEarnedDiamonds?: number;
+    totalWithdrawnUzs?: number;
+  },
+  nowMs: number = Date.now()
+): UserWalletSnapshot {
+  const balanceDiamonds = Math.max(0, Math.floor(Number(user?.diamonds) || 0));
+  const diamondProgress = Math.max(0, Math.floor(Number(user?.diamondProgress) || 0));
+  const pendingDiamonds = getPendingDiamondsTotal(user?.pendingDiamondBatches);
+  const nextUnlockAt = getNextUnlockTimestamp(user?.pendingDiamondBatches);
+  const totalEarnedDiamonds = Math.max(
+    balanceDiamonds + pendingDiamonds + diamondProgress,
+    Math.floor(Number(user?.totalEarnedDiamonds) || 0)
+  );
+
+  return {
+    uid: String(user?.uid || user?.id || ''),
+    balanceDiamonds,
+    pendingDiamonds,
+    diamondProgress,
+    balanceUzs: calculateDiamondsToUzs(balanceDiamonds),
+    pendingUzs: calculateDiamondsToUzs(pendingDiamonds),
+    totalEarnedDiamonds,
+    totalWithdrawnUzs: Math.max(0, Math.floor(Number(user?.totalWithdrawnUzs) || 0)),
+    exchangeRateUzs: DIAMOND_TO_UZS_RATE,
+    unlockWindowHours: DIAMOND_UNLOCK_HOURS,
+    nextUnlockAt,
+    updatedAt: new Date(nowMs).toISOString(),
+  };
 }
 
 export function computeCountdownParts(

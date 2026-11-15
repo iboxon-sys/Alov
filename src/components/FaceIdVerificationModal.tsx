@@ -112,6 +112,7 @@ export const FaceIdVerificationModal: React.FC<FaceIdVerificationModalProps> = (
   onCancel,
 }) => {
   const videoRef = useRef<HTMLVideoElement>(null);
+  const meshCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const frameCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const loopTimerRef = useRef<number | null>(null);
@@ -189,14 +190,25 @@ export const FaceIdVerificationModal: React.FC<FaceIdVerificationModalProps> = (
 
       const cameraPromise = (async () => {
         try {
-          const stream = await navigator.mediaDevices.getUserMedia({
-            video: {
-              facingMode: 'user',
-              width: { ideal: 640 },
-              height: { ideal: 800 },
-            },
-            audio: false,
-          });
+          let stream: MediaStream;
+          try {
+            stream = await navigator.mediaDevices.getUserMedia({
+              video: {
+                facingMode: { ideal: 'user' },
+                width: { ideal: 640 },
+                height: { ideal: 800 },
+              },
+              audio: false,
+            });
+          } catch (constraintErr: any) {
+            if (constraintErr?.name === 'NotAllowedError' || constraintErr?.name === 'PermissionDeniedError') {
+              throw constraintErr;
+            }
+            stream = await navigator.mediaDevices.getUserMedia({
+              video: true,
+              audio: false,
+            });
+          }
 
           if (!active) {
             stream.getTracks().forEach((t) => t.stop());
@@ -206,6 +218,8 @@ export const FaceIdVerificationModal: React.FC<FaceIdVerificationModalProps> = (
           streamRef.current = stream;
           const videoEl = videoRef.current;
           if (videoEl) {
+            videoEl.setAttribute('playsinline', 'true');
+            videoEl.setAttribute('webkit-playsinline', 'true');
             videoEl.srcObject = stream;
             await videoEl.play().catch(() => {});
             const ready = await waitForVideoDimensions(videoEl);
@@ -280,13 +294,66 @@ export const FaceIdVerificationModal: React.FC<FaceIdVerificationModalProps> = (
               .detectSingleFace(
                 offscreen,
                 new faceapi.TinyFaceDetectorOptions({
-                  inputSize: 224,
-                  scoreThreshold: 0.24,
+                  inputSize: 192,
+                  scoreThreshold: 0.22,
                 })
               )
               .withFaceLandmarks(true);
 
             if (!cancelled && mountedRef.current) {
+              const overlay = meshCanvasRef.current;
+              if (overlay) {
+                const oW = overlay.clientWidth || targetW;
+                const oH = overlay.clientHeight || targetH;
+                if (overlay.width !== oW || overlay.height !== oH) {
+                  overlay.width = oW;
+                  overlay.height = oH;
+                }
+                const oCtx = overlay.getContext('2d');
+                if (oCtx) {
+                  oCtx.clearRect(0, 0, oW, oH);
+                  if (baseDet) {
+                    const scaleX = oW / targetW;
+                    const scaleY = oH / targetH;
+                    const isGreen = phaseRef.current === 'verified_ready';
+                    oCtx.strokeStyle = isGreen ? 'rgba(52, 211, 153, 0.72)' : 'rgba(251, 113, 133, 0.72)';
+                    oCtx.fillStyle = isGreen ? 'rgba(167, 243, 208, 0.92)' : 'rgba(254, 205, 211, 0.92)';
+                    oCtx.lineWidth = 1.25;
+
+                    const pts = baseDet.landmarks.positions;
+                    const connectChain = (indices: number[], close = false) => {
+                      if (indices.length < 2) return;
+                      oCtx.beginPath();
+                      indices.forEach((idx, posIdx) => {
+                        const pt = pts[idx];
+                        if (!pt) return;
+                        const x = pt.x * scaleX;
+                        const y = pt.y * scaleY;
+                        if (posIdx === 0) oCtx.moveTo(x, y);
+                        else oCtx.lineTo(x, y);
+                      });
+                      if (close) oCtx.closePath();
+                      oCtx.stroke();
+                    };
+
+                    // Jawline (0-16), eyebrows (17-21, 22-26), nose (27-35), eyes (36-41, 42-47), lips (48-59)
+                    connectChain(Array.from({ length: 17 }, (_, i) => i));
+                    connectChain([17, 18, 19, 20, 21]);
+                    connectChain([22, 23, 24, 25, 26]);
+                    connectChain([27, 28, 29, 30, 33]);
+                    connectChain([36, 37, 38, 39, 40, 41], true);
+                    connectChain([42, 43, 44, 45, 46, 47], true);
+                    connectChain([48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59], true);
+
+                    for (let i = 0; i < pts.length; i += 2) {
+                      oCtx.beginPath();
+                      oCtx.arc(pts[i].x * scaleX, pts[i].y * scaleY, 1.6, 0, Math.PI * 2);
+                      oCtx.fill();
+                    }
+                  }
+                }
+              }
+
               if (baseDet) {
                 consecutiveMisses = 0;
                 frameCounter += 1;
@@ -303,8 +370,8 @@ export const FaceIdVerificationModal: React.FC<FaceIdVerificationModalProps> = (
                       .detectSingleFace(
                         offscreen,
                         new faceapi.TinyFaceDetectorOptions({
-                          inputSize: 224,
-                          scoreThreshold: 0.24,
+                          inputSize: 192,
+                          scoreThreshold: 0.22,
                         })
                       )
                       .withFaceLandmarks(true)
@@ -582,13 +649,19 @@ export const FaceIdVerificationModal: React.FC<FaceIdVerificationModalProps> = (
             className="w-full h-full object-cover"
           />
         ) : (
-          <video
-            ref={videoRef}
-            autoPlay
-            playsInline
-            muted
-            className="w-full h-full object-cover -scale-x-100"
-          />
+          <>
+            <video
+              ref={videoRef}
+              autoPlay
+              playsInline
+              muted
+              className="w-full h-full object-cover -scale-x-100"
+            />
+            <canvas
+              ref={meshCanvasRef}
+              className="absolute inset-0 w-full h-full pointer-events-none -scale-x-100"
+            />
+          </>
         )}
 
         {/* Biometric Oval Frame Guide */}
@@ -633,7 +706,7 @@ export const FaceIdVerificationModal: React.FC<FaceIdVerificationModalProps> = (
                 </>
               ) : (
                 <>
-                  <ShieldCheck className="w-3.5 h-3.5 text-rose-300 shrink-0" />
+                  <ShieldCheck className="w-3.5 h-3.5 text-rose-200 shrink-0" />
                   <span>{faceDetected ? 'Yuzingiz aniqlandi' : 'Yuzingizni ramkaga tuting'}</span>
                 </>
               )}
@@ -662,7 +735,7 @@ export const FaceIdVerificationModal: React.FC<FaceIdVerificationModalProps> = (
         {/* Camera Error State */}
         {cameraError && (
           <div className="absolute inset-0 bg-[#1B1215] p-5 flex flex-col items-center justify-center text-center space-y-3 text-white">
-            <div className="w-12 h-12 rounded-full bg-rose-500/20 text-rose-300 flex items-center justify-center">
+            <div className="w-12 h-12 rounded-full bg-rose-500/20 text-rose-200 flex items-center justify-center">
               <Camera className="w-6 h-6" />
             </div>
             <p className="text-xs font-medium text-rose-100 leading-relaxed">{cameraError}</p>
@@ -737,21 +810,50 @@ export const FaceIdVerificationModal: React.FC<FaceIdVerificationModalProps> = (
         </div>
       )}
 
-      {/* Captured Photo Preview -> Retake or Confirm */}
+      {/* Captured Photo Preview -> Retake, Correct Gender if needed, or Confirm */}
       {phase === 'captured_preview' && (
         <div className="space-y-3">
-          <div className="bg-[#FAF4F2] border border-rose-200/70 rounded-2xl p-3 flex items-center justify-between text-xs">
-            <div>
-              <p className="font-bold text-[#221719]">
-                Face ID aniqlagan jins: <span className="text-[#C93545]">{genderToUzLabel(detectedGender)}</span>
-              </p>
-              <p className="text-[11px] text-[#6B5B5E]">
-                {isAnalyzingServer
-                  ? "Biometrik aniqlik tekshirilmoqda..."
-                  : `Ishonchlilik: ${genderConfidence}% · Profil rasmi sifatida saqlanadi`}
-              </p>
+          <div className="bg-[#FAF4F2] border border-rose-200/70 rounded-2xl p-3 space-y-2.5 text-xs">
+            <div className="flex items-center justify-between gap-2">
+              <div>
+                <p className="font-bold text-[#221719]">
+                  Aniqlangan jins: <span className="text-[#C93545]">{genderToUzLabel(detectedGender)}</span>
+                </p>
+                <p className="text-[11px] text-[#6B5B5E]">
+                  {isAnalyzingServer
+                    ? "Biometrik aniqlik tekshirilmoqda..."
+                    : `Ishonchlilik: ${genderConfidence}% · Noto'g'ri bo'lsa quyida to'g'rilang`}
+                </p>
+              </div>
+              <ShieldCheck className="w-5 h-5 text-emerald-600 shrink-0" />
             </div>
-            <ShieldCheck className="w-5 h-5 text-emerald-600 shrink-0" />
+
+            <div className="grid grid-cols-2 gap-2 pt-0.5">
+              <button
+                type="button"
+                data-testid="faceid-gender-female"
+                onClick={() => setDetectedGender('female')}
+                className={`py-2 px-3 rounded-xl text-xs font-bold border transition cursor-pointer ${
+                  detectedGender === 'female'
+                    ? 'bg-[#C93545] text-white border-[#C93545] shadow-xs'
+                    : 'bg-white text-[#36272A] border-[#E5D9D6] hover:border-[#C93545]/50'
+                }`}
+              >
+                Ayol / Qiz
+              </button>
+              <button
+                type="button"
+                data-testid="faceid-gender-male"
+                onClick={() => setDetectedGender('male')}
+                className={`py-2 px-3 rounded-xl text-xs font-bold border transition cursor-pointer ${
+                  detectedGender === 'male'
+                    ? 'bg-[#221719] text-white border-[#221719] shadow-xs'
+                    : 'bg-white text-[#36272A] border-[#E5D9D6] hover:border-[#221719]/50'
+                }`}
+              >
+                Erkak / Yigit
+              </button>
+            </div>
           </div>
 
           <div className="grid grid-cols-2 gap-2.5">

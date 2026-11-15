@@ -1,0 +1,14 @@
+# Alov.uz
+
+> O'zbekistondagi Face ID orqali tasdiqlangan zamonaviy tanishuv, postlar lentasi, jonli ovozli/video xonalar va real-time muloqot platformasi.
+
+## Asosiy imkoniyatlar
+- **Face ID verifikatsiya**: Har bir foydalanuvchi jonli kamera orqali ko'z ochib-yumish va tabassum tekshiruvidan o'tadi.
+- **Postlar lentasi**: Rasm, video va musiqiy postlar, layklar va izohlar.
+- **Jonli efir va video qo'ng'iroqlar**: Real-time chat, jonli translatsiya va 1-ga-1 WebRTC video suhbatlar.
+- **Xarita va Maxfiylik**: Hududlar bo'yicha qidiruv va Ghost Mode maxfiylik nazorati.
+- **Telegram Bot**: [@alovuz_bot](https://t.me/alovuz_bot) orqali tezkor tasdiqlash.
+
+## Manbalar
+- Bosh sahifa: https://alov.uz/
+- Xavfsizlik va maxfiylik: https://alov.uz/#xavfsizlik

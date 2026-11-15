@@ -42,42 +42,42 @@ export const GenderStatsBar: React.FC = () => {
   }, []);
 
   return (
-    <div className="bg-white border-2 border-black rounded-[28px] p-5 shadow-[0_8px_30px_rgb(0,0,0,0.06)] space-y-3 w-full max-w-md mx-auto">
+    <div className="bg-[#14161F] border border-white/15 rounded-[28px] p-5 shadow-2xl space-y-3 w-full max-w-md mx-auto">
       <div className="flex items-center justify-between">
-        <div className="flex items-center space-x-2">
-          <div className="w-8 h-8 rounded-full bg-rose-100 text-rose-900 flex items-center justify-center font-bold">
+        <div className="flex items-center space-x-2.5">
+          <div className="w-9 h-9 rounded-full bg-rose-500/20 text-rose-400 border border-rose-500/30 flex items-center justify-center font-bold">
             <Users className="w-4 h-4" />
           </div>
           <div>
-            <h4 className="font-black text-sm text-slate-900">Platforma Statistikasi</h4>
-            <p className="text-[10px] text-slate-700 font-semibold">Jami faol foydalanuvchilar: {totalCount}</p>
+            <h4 className="font-black text-sm text-white">Platforma Statistikasi</h4>
+            <p className="text-[11px] text-zinc-300 font-semibold">Jami faol foydalanuvchilar: {totalCount}</p>
           </div>
         </div>
-        <div className="flex items-center space-x-1 text-xs font-extrabold text-rose-900 bg-rose-100 px-3 py-1 rounded-full shadow-xs">
-          <Heart className="w-3 h-3 fill-current text-rose-700" />
+        <div className="flex items-center space-x-1 text-xs font-extrabold text-rose-200 bg-rose-950/90 border border-rose-500/40 px-3 py-1 rounded-full shadow-xs">
+          <Heart className="w-3 h-3 fill-current text-rose-400" />
           <span>Real-time</span>
         </div>
       </div>
 
       <div className="flex justify-between items-center text-xs font-black tracking-wide pt-1">
-        <span className="text-blue-900 flex items-center space-x-1">
+        <span className="text-sky-300 flex items-center space-x-1">
           <span>👨 ERKAKLAR</span>
           <span className="font-mono text-sm">{malePercent}%</span>
         </span>
-        <span className="text-rose-900 flex items-center space-x-1">
+        <span className="text-rose-300 flex items-center space-x-1">
           <span className="font-mono text-sm">{femalePercent}%</span>
           <span>AYOLLAR 👩</span>
         </span>
       </div>
 
       {/* Dynamic Ratio Bar */}
-      <div className="relative w-full h-4 bg-slate-100 rounded-full overflow-hidden border-2 border-black flex p-0.5">
+      <div className="relative w-full h-4 bg-[#0B0C11] rounded-full overflow-hidden border border-white/15 flex p-0.5">
         <div 
-          className="h-full bg-blue-600 rounded-l-full transition-all duration-700 ease-in-out relative"
+          className="h-full bg-sky-500 rounded-l-full transition-all duration-700 ease-in-out relative"
           style={{ width: `${malePercent}%` }}
         />
         <div 
-          className="h-full bg-rose-600 rounded-r-full transition-all duration-700 ease-in-out relative"
+          className="h-full bg-rose-500 rounded-r-full transition-all duration-700 ease-in-out relative"
           style={{ width: `${femalePercent}%` }}
         />
       </div>

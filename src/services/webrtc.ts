@@ -85,7 +85,16 @@ export class BroadcasterSignaling {
   constructor(streamId: string, localStream: MediaStream, socket?: Socket) {
     this.streamId = streamId;
     this.localStream = localStream;
-    this.socket = socket || io(getBaseUrl());
+    this.socket =
+      socket ||
+      io(getBaseUrl(), {
+        transports: ['polling', 'websocket'],
+        reconnection: true,
+        reconnectionAttempts: 12,
+        reconnectionDelay: 1000,
+        reconnectionDelayMax: 5000,
+        timeout: 20000,
+      });
   }
 
   public startListening() {
@@ -182,7 +191,16 @@ export class ViewerSignaling {
     this.viewerId = viewerId;
     this.viewerInfo = viewerInfo;
     this.onRemoteStreamCb = onRemoteStream;
-    this.socket = socket || io(getBaseUrl());
+    this.socket =
+      socket ||
+      io(getBaseUrl(), {
+        transports: ['polling', 'websocket'],
+        reconnection: true,
+        reconnectionAttempts: 12,
+        reconnectionDelay: 1000,
+        reconnectionDelayMax: 5000,
+        timeout: 20000,
+      });
   }
 
   public async connect() {

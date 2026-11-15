@@ -16,6 +16,7 @@ import { PostItem, computeAuthorTotalLikes } from '../utils/posts';
 import { isUserOnlineStrict, formatLastSeenUz } from '../utils/presence';
 import { formatUsernameDisplay } from '../utils/username';
 import { PostsFeed } from './PostsFeed';
+import { resolveApiMediaUrl } from '../config/api';
 
 interface PublicProfileModalProps {
   profile: any | null;
@@ -78,9 +79,10 @@ export const PublicProfileModal: React.FC<PublicProfileModalProps> = ({
   );
   const isSelf = Boolean(currentUser && currentUser.uid === liveProfile.uid);
 
-  const avatarSrc =
+  const avatarSrc = resolveApiMediaUrl(
     liveProfile.avatar ||
-    `https://ui-avatars.com/api/?name=${encodeURIComponent(liveProfile.name || 'U')}&background=FDF2F3&color=C93545`;
+      `https://ui-avatars.com/api/?name=${encodeURIComponent(liveProfile.name || 'U')}&background=FDF2F3&color=C93545`
+  );
 
   return (
     <div
@@ -97,7 +99,7 @@ export const PublicProfileModal: React.FC<PublicProfileModalProps> = ({
           <div className="relative h-44 sm:h-56 w-full bg-gradient-to-br from-[#F7DCD8] via-[#F9E7DC] to-[#EFE0D8] overflow-hidden">
             {liveProfile.banner ? (
               <img
-                src={liveProfile.banner}
+                src={resolveApiMediaUrl(liveProfile.banner)}
                 alt={`${liveProfile.name || 'Foydalanuvchi'} banneri`}
                 className="w-full h-full object-cover"
                 data-testid="public-profile-banner-img"

@@ -1,0 +1,15 @@
+{
+  "name": "Alov.uz",
+  "description": "O'zbekistonning Face ID bilan tasdiqlangan zamonaviy tanishuv, postlar va jonli efir platformasi.",
+  "url": "https://alov.uz",
+  "language": "uz",
+  "capabilities": [
+    "face-id-verification",
+    "realtime-chat",
+    "live-streaming",
+    "media-posts"
+  ],
+  "contact": {
+    "telegram": "https://t.me/alovuz_bot"
+  }
+}

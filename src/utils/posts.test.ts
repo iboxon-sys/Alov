@@ -6,6 +6,7 @@ import {
   appendPostComment,
   computeAuthorTotalLikes,
   formatPostTimeUz,
+  isPostVisibleToViewer,
   type PostItem,
 } from './posts.ts';
 
@@ -75,5 +76,25 @@ describe('Posts pure helpers', () => {
     assert.equal(formatPostTimeUz('2026-11-14T11:59:45Z', now), 'Hozirgina');
     assert.equal(formatPostTimeUz('2026-11-14T11:50:00Z', now), '10 daq oldin');
     assert.equal(formatPostTimeUz('2026-11-14T08:00:00Z', now), '4 soat oldin');
+  });
+
+  it('shows only opposite-gender posts and user own posts', () => {
+    const maleViewer = { uid: 'm1', gender: 'male' };
+    const femaleViewer = { uid: 'f1', gender: 'female' };
+
+    const ownMalePost = { authorUid: 'm1', authorGender: 'male' as const };
+    const otherMalePost = { authorUid: 'm2', authorGender: 'male' as const };
+    const femalePost = { authorUid: 'f2', authorGender: 'female' as const };
+    const fallbackGenderPost = { authorUid: 'f3' };
+
+    assert.equal(isPostVisibleToViewer(ownMalePost, maleViewer), true);
+    assert.equal(isPostVisibleToViewer(otherMalePost, maleViewer), false);
+    assert.equal(isPostVisibleToViewer(femalePost, maleViewer), true);
+    assert.equal(isPostVisibleToViewer(fallbackGenderPost, maleViewer, 'female'), true);
+    assert.equal(isPostVisibleToViewer(fallbackGenderPost, maleViewer, 'male'), false);
+
+    assert.equal(isPostVisibleToViewer(femalePost, femaleViewer), false);
+    assert.equal(isPostVisibleToViewer(otherMalePost, femaleViewer), true);
+    assert.equal(isPostVisibleToViewer({ authorUid: 'f1', authorGender: 'female' }, femaleViewer), true);
   });
 });

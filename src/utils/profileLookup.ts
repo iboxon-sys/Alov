@@ -108,7 +108,7 @@ export function getInitialAuthDraftState(): CleanAuthDraftState {
     regRegion: 'Toshkent shahri',
     regDistrict: 'Yunusobod tumani',
     regNeighborhood: '',
-    regPhone: '+99890',
+    regPhone: '+998 ',
     regTelegram: '',
     regInstagram: '',
     regBio: '',

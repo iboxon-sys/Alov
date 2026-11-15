@@ -3,11 +3,23 @@ import { fileURLToPath } from 'url';
 import path from 'path';
 import http from 'http';
 import fs from 'fs';
+import { execFile } from 'child_process';
+import { promisify } from 'util';
 import { Server as SocketIOServer } from 'socket.io';
 import { createServer as createViteServer } from 'vite';
+import helmet from 'helmet';
 import { GoogleGenAI, Type } from '@google/genai';
 import { AccessToken } from 'livekit-server-sdk';
 import dotenv from 'dotenv';
+import {
+  validateExternalVideoUrl,
+  inferVideoFileExtension,
+  extractVideoUrlsFromHtml,
+  isHlsStreamUrl,
+  extractTwitterStatusPath,
+  extractInstagramShortcode,
+} from './src/utils/videoImport';
+import { parseMediaLink } from './src/utils/mediaLinks';
 import {
   buildTelegramDisplayName,
   isPlaceholderAvatar,
@@ -24,17 +36,23 @@ import {
   canChargeForMessage,
   applyDiamondProgress,
   releaseMatureDiamondBatches,
-  getPendingDiamondsTotal
+  getPendingDiamondsTotal,
+  calculateDiamondsToUzs,
+  calculateCallMinuteBilling,
+  buildUserWalletSnapshot
 } from './src/utils/tokenomics';
+import { walletRepository } from './server/walletRepository';
 import { PresenceRegistry } from './src/utils/presence';
 import { telegramInputMatchesBotRecord } from './src/utils/profileLookup';
 import {
   togglePostLike,
   appendPostComment,
   computeAuthorTotalLikes,
+  isPostVisibleToViewer,
   type PostItem,
   type PostComment
 } from './src/utils/posts';
+import { formatPhoneNumberPretty } from './src/utils/phone';
 
 dotenv.config();
 
@@ -42,8 +60,86 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const isProduction = process.env.NODE_ENV === 'production';
 
 async function startServer() {
+  await walletRepository.init();
   const app = express();
+  app.set('trust proxy', 1);
   app.use(express.json({ limit: '15mb' }));
+
+  // Security headers via Helmet (HSTS, CSP, clickjacking protection compatible with preview & production)
+  app.use(
+    helmet({
+      strictTransportSecurity: {
+        maxAge: 31536000,
+        includeSubDomains: true,
+        preload: true,
+      },
+      contentSecurityPolicy: {
+        directives: {
+          defaultSrc: ["'self'"],
+          scriptSrc: [
+            "'self'",
+            "'unsafe-inline'",
+            "'unsafe-eval'",
+            'https://telegram.org',
+            'https://*.firebaseapp.com',
+            'https://apis.google.com',
+            'https://www.googletagmanager.com',
+            'blob:',
+          ],
+          styleSrc: ["'self'", "'unsafe-inline'", 'https://fonts.googleapis.com', 'https://unpkg.com'],
+          fontSrc: ["'self'", 'https://fonts.gstatic.com', 'data:'],
+          imgSrc: ["'self'", 'data:', 'blob:', 'https:', 'http:'],
+          mediaSrc: ["'self'", 'data:', 'blob:', 'https:', 'http:'],
+          connectSrc: ["'self'", 'ws:', 'wss:', 'https:', 'http:', 'blob:'],
+          frameSrc: [
+            "'self'",
+            'https://www.youtube.com',
+            'https://www.youtube-nocookie.com',
+            'https://www.tiktok.com',
+            'https://www.instagram.com',
+            'https://player.vimeo.com',
+            'https://www.dailymotion.com',
+            'https://www.facebook.com',
+            'https://t.me',
+            'https://vk.com',
+            'https://rutube.ru',
+            'https://w.soundcloud.com',
+            'https://open.spotify.com',
+            'https://*.firebaseapp.com',
+            'https://oauth.telegram.org',
+          ],
+          frameAncestors: [
+            "'self'",
+            'https://aistudio.google.com',
+            'https://*.google.com',
+            'https://*.googleusercontent.com',
+            'https://*.run.app',
+            'https://web.telegram.org',
+            'https://*.telegram.org',
+          ],
+          workerSrc: ["'self'", 'blob:'],
+        },
+      },
+      crossOriginEmbedderPolicy: false,
+      crossOriginOpenerPolicy: { policy: 'same-origin-allow-popups' },
+      crossOriginResourcePolicy: { policy: 'cross-origin' },
+      xFrameOptions: false,
+    })
+  );
+
+  // Enforce X-Frame-Options: SAMEORIGIN on production domains while keeping AI Studio preview iframe functional
+  app.use((req, res, next) => {
+    const forwardedHost = String(req.headers['x-forwarded-host'] || req.headers.host || '');
+    const referer = String(req.headers.referer || '');
+    const isAiStudioPreview =
+      forwardedHost.includes('.run.app') ||
+      referer.includes('aistudio.google.com') ||
+      referer.includes('googleusercontent.com');
+    if (!isAiStudioPreview) {
+      res.setHeader('X-Frame-Options', 'SAMEORIGIN');
+    }
+    next();
+  });
 
   // Dynamic CORS & Cross-Origin support for Render and local deployments
   app.use((req, res, next) => {
@@ -110,12 +206,30 @@ async function startServer() {
     }
   });
 
+  // --- Persistent Storage Directory (Supports Render Persistent Disk via DATA_DIR / RENDER_DISK_PATH) ---
+  const DATA_DIR = path.resolve(process.env.DATA_DIR || process.env.RENDER_DISK_PATH || __dirname);
+  if (!fs.existsSync(DATA_DIR)) {
+    fs.mkdirSync(DATA_DIR, { recursive: true });
+  }
+  const resolveDataFile = (fileName: string) => {
+    const dest = path.join(DATA_DIR, fileName);
+    if (DATA_DIR !== __dirname && !fs.existsSync(dest)) {
+      const seed = path.join(__dirname, fileName);
+      if (fs.existsSync(seed)) {
+        try {
+          fs.copyFileSync(seed, dest);
+        } catch {}
+      }
+    }
+    return dest;
+  };
+
   // --- Telegram Bot Integration (@alovuz_bot) ---
   const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || '9094192316:AAFW5DEfuwVy0Rs2kIdMg9kBwL_w_PLMVM4';
-  const BOT_USERS_FILE = path.join(__dirname, 'telegram_bot_users.json');
-  const TG_AVATARS_DIR = path.join(__dirname, 'telegram_avatars');
-  const FACE_ID_DIR = path.join(__dirname, 'face_id_photos');
-  const MEDIA_UPLOADS_DIR = path.join(__dirname, 'media_uploads');
+  const BOT_USERS_FILE = resolveDataFile('telegram_bot_users.json');
+  const TG_AVATARS_DIR = path.join(DATA_DIR, 'telegram_avatars');
+  const FACE_ID_DIR = path.join(DATA_DIR, 'face_id_photos');
+  const MEDIA_UPLOADS_DIR = path.join(DATA_DIR, 'media_uploads');
   if (!fs.existsSync(TG_AVATARS_DIR)) {
     fs.mkdirSync(TG_AVATARS_DIR, { recursive: true });
   }
@@ -157,7 +271,7 @@ async function startServer() {
     return '.jpg';
   }
 
-  app.post('/api/media/upload-raw', express.raw({ type: '*/*', limit: '35mb' }), (req, res) => {
+  app.post('/api/media/upload-raw', express.raw({ type: '*/*', limit: '35mb' }), async (req, res) => {
     try {
       const buf = req.body as Buffer;
       if (!buf || !Buffer.isBuffer(buf) || buf.length === 0) {
@@ -169,7 +283,9 @@ async function startServer() {
       const storedName = `media_${Date.now()}_${Math.random().toString(36).slice(2, 8)}${ext}`;
       const destPath = path.join(MEDIA_UPLOADS_DIR, storedName);
       fs.writeFileSync(destPath, buf);
-      return res.json({ success: true, url: `/api/media/${storedName}`, mimeType });
+      const isVideoUpload = mimeType.toLowerCase().startsWith('video/') || ['.mp4', '.webm', '.mov', '.m4v'].includes(ext);
+      const isVertical = isVideoUpload ? await probeIsVerticalVideo(destPath) : false;
+      return res.json({ success: true, url: `/api/media/${storedName}`, mimeType, isVertical });
     } catch (err: any) {
       return res.status(500).json({ success: false, error: err.message });
     }
@@ -210,6 +326,7 @@ async function startServer() {
       '.gif': 'image/gif',
       '.svg': 'image/svg+xml',
       '.mp4': 'video/mp4',
+      '.m4v': 'video/mp4',
       '.webm': 'video/webm',
       '.mov': 'video/quicktime',
       '.mp3': 'audio/mpeg',
@@ -240,6 +357,437 @@ async function startServer() {
     res.setHeader('Content-Length', stat.size);
     res.setHeader('Cache-Control', 'public, max-age=86400');
     res.sendFile(filePath);
+  });
+
+  // Download external video link directly as MP4 (or native .webm/.mov/.m4v) into MEDIA_UPLOADS_DIR
+  const execFileAsync = promisify(execFile);
+  const MAX_REMOTE_VIDEO_BYTES = 80 * 1024 * 1024;
+  const VIDEO_BROWSER_HEADERS = {
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
+    Accept: '*/*',
+  };
+
+  async function probeIsVerticalVideo(filePath: string): Promise<boolean> {
+    try {
+      const { stdout } = await execFileAsync(
+        'ffprobe',
+        [
+          '-v', 'error',
+          '-select_streams', 'v:0',
+          '-show_entries', 'stream=width,height:stream_tags=rotate:side_data_list=',
+          '-of', 'json',
+          filePath,
+        ],
+        { timeout: 6000 }
+      );
+      const parsed = JSON.parse(stdout || '{}');
+      const stream = parsed?.streams?.[0];
+      if (!stream) return false;
+      let width = Number(stream.width || 0);
+      let height = Number(stream.height || 0);
+      if (!width || !height) return false;
+
+      let rotation = Number(stream?.tags?.rotate || 0);
+      if (!rotation && Array.isArray(stream?.side_data_list)) {
+        for (const sd of stream.side_data_list) {
+          if (sd && sd.rotation !== undefined) {
+            rotation = Number(sd.rotation);
+            break;
+          }
+        }
+      }
+      const normRot = ((Math.round(rotation) % 360) + 360) % 360;
+      if (normRot === 90 || normRot === 270) {
+        const tmp = width;
+        width = height;
+        height = tmp;
+      }
+      return height > width;
+    } catch {
+      return false;
+    }
+  }
+
+  let cachedYtDlpPath: string | null = null;
+  async function ensureYtDlpBinary(): Promise<string | null> {
+    if (cachedYtDlpPath && fs.existsSync(cachedYtDlpPath)) {
+      return cachedYtDlpPath;
+    }
+    const candidatePaths = [
+      path.join(__dirname, '.bin', 'yt-dlp'),
+      path.join(DATA_DIR, '.bin', 'yt-dlp'),
+      '/tmp/alov-yt-dlp',
+      'yt-dlp',
+    ];
+    for (const p of candidatePaths) {
+      if (p === 'yt-dlp') {
+        try {
+          await execFileAsync('which', ['yt-dlp'], { timeout: 3000 });
+          cachedYtDlpPath = 'yt-dlp';
+          return cachedYtDlpPath;
+        } catch {}
+      } else if (fs.existsSync(p)) {
+        try {
+          fs.chmodSync(p, 0o755);
+          cachedYtDlpPath = p;
+          return p;
+        } catch {}
+      }
+    }
+
+    // Auto-download standalone yt-dlp Linux binary once on demand (no Python needed)
+    if (process.platform === 'linux') {
+      const targetBinDir = path.join(DATA_DIR, '.bin');
+      const targetBinPath = path.join(targetBinDir, 'yt-dlp');
+      try {
+        if (!fs.existsSync(targetBinDir)) fs.mkdirSync(targetBinDir, { recursive: true });
+        const dlRes = await fetch('https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_linux', {
+          redirect: 'follow',
+        });
+        if (dlRes.ok) {
+          const buf = Buffer.from(await dlRes.arrayBuffer());
+          if (buf.length > 5_000_000) {
+            fs.writeFileSync(targetBinPath, buf);
+            fs.chmodSync(targetBinPath, 0o755);
+            cachedYtDlpPath = targetBinPath;
+            return targetBinPath;
+          }
+        }
+      } catch (e) {
+        console.warn('Could not auto-provision yt-dlp binary:', (e as Error)?.message);
+      }
+    }
+    return null;
+  }
+
+  async function downloadHlsToMp4(m3u8Url: string, refererUrl?: string): Promise<{ url: string; mimeType: string; format: string; mode: 'mp4'; isVertical: boolean } | null> {
+    const check = validateExternalVideoUrl(m3u8Url, {
+      allowLoopback: process.env.ALLOW_LOOPBACK_MEDIA_IMPORT === 'true',
+    });
+    if (!check.ok) return null;
+    const storedName = `video_${Date.now()}_${Math.random().toString(36).slice(2, 8)}.mp4`;
+    const destPath = path.join(MEDIA_UPLOADS_DIR, storedName);
+    try {
+      const args = [
+        '-y',
+        '-user_agent', VIDEO_BROWSER_HEADERS['User-Agent'],
+        ...(refererUrl ? ['-headers', `Referer: ${refererUrl}\r\n`] : []),
+        '-i', check.url.toString(),
+        '-t', '300',
+        '-c', 'copy',
+        '-bsf:a', 'aac_adtstoasc',
+        '-movflags', '+faststart',
+        '-fs', String(MAX_REMOTE_VIDEO_BYTES),
+        destPath,
+      ];
+      await execFileAsync('ffmpeg', args, { timeout: 45000 });
+      if (fs.existsSync(destPath)) {
+        const stat = fs.statSync(destPath);
+        if (stat.size > 1024 && stat.size <= MAX_REMOTE_VIDEO_BYTES) {
+          const isVertical = await probeIsVerticalVideo(destPath);
+          return { url: `/api/media/${storedName}`, mimeType: 'video/mp4', format: 'mp4', mode: 'mp4', isVertical };
+        }
+        fs.unlinkSync(destPath);
+      }
+    } catch {
+      if (fs.existsSync(destPath)) {
+        try { fs.unlinkSync(destPath); } catch {}
+      }
+    }
+    return null;
+  }
+
+  async function downloadViaYtDlp(targetUrl: string): Promise<{ url: string; mimeType: string; format: string; mode: 'mp4'; isVertical: boolean } | null> {
+    const bin = await ensureYtDlpBinary();
+    if (!bin) return null;
+
+    const prefix = `video_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+    const outTemplate = path.join(MEDIA_UPLOADS_DIR, `${prefix}.%(ext)s`);
+
+    const cookiesRaw = process.env.YOUTUBE_COOKIES || process.env.YTDLP_COOKIES || '';
+    let tempCookiesPath: string | null = null;
+    if (cookiesRaw.trim()) {
+      tempCookiesPath = path.join('/tmp', `alov_cookies_${Date.now()}.txt`);
+      fs.writeFileSync(tempCookiesPath, cookiesRaw, 'utf-8');
+    }
+
+    try {
+      const args = [
+        '--no-playlist',
+        '--no-warnings',
+        '--max-filesize', '80M',
+        '--js-runtimes', 'node',
+        '--extractor-args', 'youtube:player_client=tv,ios,mweb',
+        '-f', 'best[ext=mp4][filesize<80M]/bestvideo[ext=mp4][height<=720]+bestaudio[ext=m4a]/best[ext=mp4]/best',
+        '--merge-output-format', 'mp4',
+        ...(tempCookiesPath ? ['--cookies', tempCookiesPath] : []),
+        '-o', outTemplate,
+        targetUrl,
+      ];
+      await execFileAsync(bin, args, { timeout: 60000, maxBuffer: 5 * 1024 * 1024 });
+
+      const files = fs.readdirSync(MEDIA_UPLOADS_DIR).filter((f) => f.startsWith(`${prefix}.`) && !f.endsWith('.part'));
+      if (files.length > 0) {
+        const chosen = files[0];
+        const fullPath = path.join(MEDIA_UPLOADS_DIR, chosen);
+        const stat = fs.statSync(fullPath);
+        if (stat.size > 1024 && stat.size <= MAX_REMOTE_VIDEO_BYTES) {
+          const ext = path.extname(chosen).toLowerCase().replace('.', '') || 'mp4';
+          const mime = ext === 'webm' ? 'video/webm' : ext === 'mov' ? 'video/quicktime' : 'video/mp4';
+          const isVertical = await probeIsVerticalVideo(fullPath);
+          return { url: `/api/media/${chosen}`, mimeType: mime, format: ext, mode: 'mp4', isVertical };
+        }
+        try { fs.unlinkSync(fullPath); } catch {}
+      }
+    } catch (err: any) {
+      // Clean partial downloads if any
+      try {
+        for (const f of fs.readdirSync(MEDIA_UPLOADS_DIR)) {
+          if (f.startsWith(`${prefix}.`)) fs.unlinkSync(path.join(MEDIA_UPLOADS_DIR, f));
+        }
+      } catch {}
+    } finally {
+      if (tempCookiesPath && fs.existsSync(tempCookiesPath)) {
+        try { fs.unlinkSync(tempCookiesPath); } catch {}
+      }
+    }
+    return null;
+  }
+
+  async function downloadVideoStreamToDisk(videoUrl: string, refererUrl?: string): Promise<{ url: string; mimeType: string; format: string; mode: 'mp4'; isVertical: boolean } | null> {
+    const check = validateExternalVideoUrl(videoUrl, {
+      allowLoopback: process.env.ALLOW_LOOPBACK_MEDIA_IMPORT === 'true',
+    });
+    if (!check.ok) return null;
+
+    if (isHlsStreamUrl(check.url.toString())) {
+      return downloadHlsToMp4(check.url.toString(), refererUrl);
+    }
+
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 30000);
+    try {
+      const headers: Record<string, string> = { ...VIDEO_BROWSER_HEADERS };
+      if (refererUrl) headers.Referer = refererUrl;
+
+      const response = await fetch(check.url.toString(), {
+        headers,
+        redirect: 'follow',
+        signal: controller.signal,
+      });
+      if (!response.ok) return null;
+
+      const contentType = String(response.headers.get('content-type') || '');
+      const contentLen = Number(response.headers.get('content-length') || 0);
+      if (contentLen > MAX_REMOTE_VIDEO_BYTES) {
+        throw new Error('Video hajmi 80 MB dan oshmasligi kerak.');
+      }
+
+      if (contentType.toLowerCase().includes('mpegurl') || isHlsStreamUrl(response.url || '')) {
+        return downloadHlsToMp4(response.url || check.url.toString(), refererUrl);
+      }
+
+      const ext = inferVideoFileExtension(contentType, response.url || videoUrl);
+      if (!ext) return null;
+
+      const arrayBuf = await response.arrayBuffer();
+      if (arrayBuf.byteLength === 0 || arrayBuf.byteLength > MAX_REMOTE_VIDEO_BYTES) {
+        return null;
+      }
+
+      const buf = Buffer.from(arrayBuf);
+      const storedName = `video_${Date.now()}_${Math.random().toString(36).slice(2, 8)}${ext}`;
+      const destPath = path.join(MEDIA_UPLOADS_DIR, storedName);
+      fs.writeFileSync(destPath, buf);
+
+      const finalMime =
+        contentType && contentType.startsWith('video/')
+          ? contentType.split(';')[0].trim()
+          : ext === '.webm'
+            ? 'video/webm'
+            : ext === '.mov'
+              ? 'video/quicktime'
+              : 'video/mp4';
+
+      const isVertical = await probeIsVerticalVideo(destPath);
+      return {
+        url: `/api/media/${storedName}`,
+        mimeType: finalMime,
+        format: ext.replace('.', ''),
+        mode: 'mp4',
+        isVertical,
+      };
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  app.post('/api/media/import-video-url', async (req, res) => {
+    try {
+      const rawUrl = String(req.body?.url || '').trim();
+      const validation = validateExternalVideoUrl(rawUrl, {
+        allowLoopback: process.env.ALLOW_LOOPBACK_MEDIA_IMPORT === 'true',
+      });
+      if (!validation.ok) {
+        return res.status(400).json({ success: false, error: validation.error });
+      }
+
+      const targetUrl = validation.url.toString();
+      const parsedSocial = parseMediaLink(targetUrl, 'video');
+      const replySuccess = (payload: any) =>
+        res.json({
+          success: true,
+          ...payload,
+          isVertical: Boolean(payload?.isVertical || parsedSocial.isVertical),
+        });
+
+      // 1. Direct MP4/WebM/MOV/M4V/HLS stream check
+      const directResult = await downloadVideoStreamToDisk(targetUrl).catch((err) => {
+        if (err?.message?.includes('80 MB')) throw err;
+        return null;
+      });
+      if (directResult) {
+        return replySuccess(directResult);
+      }
+
+      // 2. TikTok resolver (returns direct no-watermark MP4)
+      if (/tiktok\.com/i.test(targetUrl)) {
+        try {
+          const tikRes = await fetch(`https://www.tikwm.com/api/?url=${encodeURIComponent(targetUrl)}`, {
+            headers: VIDEO_BROWSER_HEADERS,
+          });
+          if (tikRes.ok) {
+            const tikData: any = await tikRes.json();
+            const mp4Url = tikData?.data?.hdplay || tikData?.data?.play;
+            if (mp4Url && typeof mp4Url === 'string') {
+              const downloaded = await downloadVideoStreamToDisk(mp4Url, 'https://www.tiktok.com/');
+              if (downloaded) {
+                return replySuccess(downloaded);
+              }
+            }
+          }
+        } catch {}
+      }
+
+      // 3. X / Twitter resolver (api.fxtwitter.com -> MP4)
+      const twitterPath = extractTwitterStatusPath(targetUrl);
+      if (twitterPath) {
+        try {
+          const fxRes = await fetch(`https://api.fxtwitter.com/${twitterPath}`, { headers: VIDEO_BROWSER_HEADERS });
+          if (fxRes.ok) {
+            const fxData: any = await fxRes.json();
+            const videoUrl = fxData?.tweet?.media?.videos?.[0]?.url;
+            if (videoUrl && typeof videoUrl === 'string') {
+              const downloaded = await downloadVideoStreamToDisk(videoUrl, 'https://x.com/');
+              if (downloaded) {
+                return replySuccess(downloaded);
+              }
+            }
+          }
+        } catch {}
+      }
+
+      // 4. Reddit JSON resolver -> fallback_url MP4
+      if (/reddit\.com\/r\/[^/]+\/comments\//i.test(targetUrl)) {
+        try {
+          const cleanBase = targetUrl.split('?')[0].replace(/\/$/, '');
+          const rdRes = await fetch(`${cleanBase}.json`, { headers: VIDEO_BROWSER_HEADERS });
+          if (rdRes.ok) {
+            const rdText = await rdRes.text();
+            const candidates = extractVideoUrlsFromHtml(rdText, targetUrl);
+            for (const c of candidates.slice(0, 3)) {
+              const downloaded = await downloadVideoStreamToDisk(c, targetUrl).catch(() => null);
+              if (downloaded) return replySuccess(downloaded);
+            }
+          }
+        } catch {}
+      }
+
+      // 5. Instagram embed/captioned HTML extraction -> MP4
+      const igShortcode = extractInstagramShortcode(targetUrl);
+      if (igShortcode) {
+        try {
+          const igRes = await fetch(`https://www.instagram.com/p/${igShortcode}/embed/captioned/`, {
+            headers: {
+              ...VIDEO_BROWSER_HEADERS,
+              Accept: 'text/html,application/xhtml+xml',
+            },
+          });
+          if (igRes.ok) {
+            const igHtml = await igRes.text();
+            const candidates = extractVideoUrlsFromHtml(igHtml, targetUrl);
+            for (const c of candidates.slice(0, 4)) {
+              const saved = await downloadVideoStreamToDisk(c, 'https://www.instagram.com/').catch(() => null);
+              if (saved) return replySuccess(saved);
+            }
+          }
+        } catch {}
+      }
+
+      // 6. Telegram & General HTML extraction -> MP4 / HLS
+      const htmlFetchUrl =
+        /t\.me\/[^/]+\/\d+/i.test(targetUrl) && !targetUrl.includes('embed=1')
+          ? `${targetUrl}${targetUrl.includes('?') ? '&' : '?'}embed=1&mode=tme`
+          : targetUrl;
+
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 15000);
+      try {
+        const pageRes = await fetch(htmlFetchUrl, {
+          headers: {
+            ...VIDEO_BROWSER_HEADERS,
+            Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+          },
+          redirect: 'follow',
+          signal: controller.signal,
+        });
+        if (pageRes.ok) {
+          const pageCt = String(pageRes.headers.get('content-type') || '').toLowerCase();
+          if (pageCt.includes('text/html') || pageCt.includes('application/xhtml')) {
+            const html = (await pageRes.text()).slice(0, 1_500_000);
+            const candidates = extractVideoUrlsFromHtml(html, pageRes.url || htmlFetchUrl);
+            for (const candidate of candidates.slice(0, 5)) {
+              const saved = await downloadVideoStreamToDisk(candidate, targetUrl).catch(() => null);
+              if (saved) {
+                return replySuccess(saved);
+              }
+            }
+          }
+        }
+      } catch {
+        // continue to yt-dlp
+      } finally {
+        clearTimeout(timer);
+      }
+
+      // 7. Universal social media extractor via yt-dlp (YouTube, Instagram, Facebook, VK, Rutube, Vimeo, Dailymotion, Pinterest, Twitch, etc.)
+      const ytDlpResult = await downloadViaYtDlp(targetUrl);
+      if (ytDlpResult) {
+        return replySuccess(ytDlpResult);
+      }
+
+      // 8. Smart chromeless social embed fallback if cloud IP bot-protection prevents server-side MP4 pull (e.g. YouTube / IG Reels / FB / VK)
+      if (parsedSocial.kind === 'embed_iframe' && parsedSocial.embedUrl) {
+        return replySuccess({
+          mode: 'embed',
+          url: parsedSocial.normalizedUrl,
+          embedUrl: parsedSocial.embedUrl,
+          provider: parsedSocial.provider,
+          isVertical: Boolean(parsedSocial.isVertical),
+        });
+      }
+
+      return res.status(422).json({
+        success: false,
+        error:
+          "Ushbu havoladan video faylni aniqlab bo'lmadi. Iltimos, boshqa havola sinab ko'ring yoki qurilmadan video yuklang.",
+      });
+    } catch (err: any) {
+      return res.status(500).json({
+        success: false,
+        error: err?.message || "Videoni yuklab olishda xatolik yuz berdi.",
+      });
+    }
   });
 
   function generatePresetWav(freq: number = 440, durationSec: number = 5): Buffer {
@@ -961,6 +1509,9 @@ async function startServer() {
       });
       const botAvatar = pickPreferredAvatar(matchedBotUser?.avatar);
 
+      const rawPhoneForTg = cleanPhone ? `+${cleanPhone}` : (matchedBotUser?.phone ? `+${matchedBotUser.phone}` : '');
+      const formattedTgPhone = rawPhoneForTg ? formatPhoneNumberPretty(rawPhoneForTg) : undefined;
+
       if (!user) {
         user = {
           uid,
@@ -968,8 +1519,9 @@ async function startServer() {
           name: botFullName,
           telegram: formattedTgUrl,
           telegramChatId: userChatId,
-          phone: cleanPhone ? `+${cleanPhone}` : (matchedBotUser?.phone ? `+${matchedBotUser.phone}` : undefined),
-          avatar: botAvatar,
+          phone: formattedTgPhone,
+          // Keep avatar empty until Face ID captures the user's real biometric camera photo
+          avatar: '',
           role: isAdminTelegramUser({ telegram: formattedTgUrl }) ? 'admin' : 'user',
           isAdmin: isAdminTelegramUser({ telegram: formattedTgUrl }),
           isVerified: isAdminTelegramUser({ telegram: formattedTgUrl }),
@@ -977,7 +1529,7 @@ async function startServer() {
           gender: 'female',
           region: 'Toshkent shahri',
           district: 'Yunusobod tumani',
-          bio: 'Telegram orqali ulandim! ✨',
+          bio: '',
           status: 'online',
           followersCount: 0,
           followingCount: 0,
@@ -1001,10 +1553,11 @@ async function startServer() {
         } else if (isPlaceholderOrUsername(user.name, tgHandle || cleanUsername, cleanPhone)) {
           user.name = botFullName || '';
         }
-        if (botAvatar && (isPlaceholderAvatar(user.avatar) || user.avatar.includes('api.telegram.org/file/'))) {
-          user.avatar = botAvatar;
-        } else if (isPlaceholderAvatar(user.avatar)) {
-          user.avatar = botAvatar || '';
+        // Always prioritize Face ID photo over any Telegram profile photo
+        if (user.faceId?.capturedPhotoUrl) {
+          user.avatar = user.faceId.capturedPhotoUrl;
+        } else if (!user.faceId?.verified && user.avatar && user.avatar.includes('api.telegram.org/file/')) {
+          user.avatar = '';
         }
         if (formattedTgUrl && (!user.telegram || user.telegram.startsWith('@'))) {
           user.telegram = formattedTgUrl;
@@ -1012,8 +1565,8 @@ async function startServer() {
         if (userChatId && !user.telegramChatId) {
           user.telegramChatId = userChatId;
         }
-        if (cleanPhone && !user.phone) {
-          user.phone = `+${cleanPhone}`;
+        if (formattedTgPhone && !user.phone) {
+          user.phone = formattedTgPhone;
         }
         user.isOnline = true;
         user.status = 'online';
@@ -1381,10 +1934,10 @@ Suhbatlashish qoidalaringiz:
   const usersStore = new Map<string, any>();
   initialUsers.forEach(u => usersStore.set(u.uid, u));
 
-  const USERS_DB_FILE = path.join(__dirname, 'users_db.json');
-  const CHATS_DB_FILE = path.join(__dirname, 'user_chats.json');
-  const MESSAGES_DB_FILE = path.join(__dirname, 'chat_messages.json');
-  const FRIENDSHIPS_DB_FILE = path.join(__dirname, 'chat_friendships.json');
+  const USERS_DB_FILE = resolveDataFile('users_db.json');
+  const CHATS_DB_FILE = resolveDataFile('user_chats.json');
+  const MESSAGES_DB_FILE = resolveDataFile('chat_messages.json');
+  const FRIENDSHIPS_DB_FILE = resolveDataFile('chat_friendships.json');
 
   const chatFriendshipsStore: Record<string, { active: boolean; toggledBy: string; updatedAt: string }> = {};
 
@@ -1444,6 +1997,7 @@ Suhbatlashish qoidalaringiz:
     const released = releaseMatureDiamondBatches(u.diamonds, u.pendingDiamondBatches, Date.now());
     u.diamonds = released.diamonds;
     u.pendingDiamondBatches = released.pendingDiamondBatches;
+    u.wallet = buildUserWalletSnapshot(u);
     return { user: u, unlockedAmount: released.releasedAmount };
   }
 
@@ -1581,9 +2135,9 @@ Suhbatlashish qoidalaringiz:
   const transactionsStore: any[] = [];
   const withdrawalsStore: any[] = [];
 
-  const TRANSACTIONS_DB_FILE = path.join(__dirname, 'transactions_db.json');
-  const WITHDRAWALS_DB_FILE = path.join(__dirname, 'withdrawals_db.json');
-  const POSTS_DB_FILE = path.join(__dirname, 'posts_db.json');
+  const TRANSACTIONS_DB_FILE = resolveDataFile('transactions_db.json');
+  const WITHDRAWALS_DB_FILE = resolveDataFile('withdrawals_db.json');
+  const POSTS_DB_FILE = resolveDataFile('posts_db.json');
   const postsStore: PostItem[] = [];
 
   function savePostsToDisk() {
@@ -1674,7 +2228,7 @@ Suhbatlashish qoidalaringiz:
     }
   });
 
-  // Periodic background sweep to credit any 24h matured diamond batches into user wallets
+  // Periodic background sweep to credit any 12h matured diamond batches into user wallets
   setInterval(() => {
     let anyChanged = false;
     for (const [uid, u] of usersStore.entries()) {
@@ -1683,15 +2237,19 @@ Suhbatlashish qoidalaringiz:
         anyChanged = true;
         u.updatedAt = new Date().toISOString();
         usersStore.set(uid, u);
-        transactionsStore.unshift({
+        void walletRepository.syncUserWallet(u);
+        const unlockTx = {
           id: 'tx_unlock_' + Date.now() + Math.random().toString(36).substring(2, 5),
           receiver: uid,
           type: 'diamond_unlock',
           diamondAmount: unlockedAmount,
+          uzsAmount: calculateDiamondsToUzs(unlockedAmount),
           status: 'completed',
-          note: `${unlockedAmount} almaz (24 soatlik limit) asosiy hisobga qo'shildi`,
+          note: `${unlockedAmount} almaz (12 soatlik limit) asosiy hisobga qo'shildi`,
           createdAt: new Date().toISOString()
-        });
+        };
+        transactionsStore.unshift(unlockTx);
+        void walletRepository.recordTransaction(unlockTx);
         io.emit('user_updated', u);
       }
     }
@@ -1925,6 +2483,8 @@ Suhbatlashish qoidalaringiz:
         }
       }
 
+      const faceIdAvatar = user.faceId?.capturedPhotoUrl || existing.faceId?.capturedPhotoUrl || '';
+
       if (knownChatId) {
         const botRecord = await registerBotUser(
           Number(knownChatId),
@@ -1946,9 +2506,12 @@ Suhbatlashish qoidalaringiz:
         } else if (!fetchedName && botName) {
           fetchedName = botName;
         }
-        const preferredBotAvatar = pickPreferredAvatar(botRecord.avatar, fetchedAvatar);
-        if (preferredBotAvatar) {
-          fetchedAvatar = preferredBotAvatar;
+        // Only use Telegram photo if no Face ID photo exists AND account is not Telegram-FaceID onboarding
+        if (!faceIdAvatar && !isTelegramAccount) {
+          const preferredBotAvatar = pickPreferredAvatar(botRecord.avatar, fetchedAvatar);
+          if (preferredBotAvatar) {
+            fetchedAvatar = preferredBotAvatar;
+          }
         }
       }
 
@@ -1967,6 +2530,33 @@ Suhbatlashish qoidalaringiz:
         }
       }
 
+      const computeAgeFromBirth = (bStr?: string, fallbackAge?: number): number => {
+        if (!bStr) return Number(fallbackAge || 22);
+        const d = new Date(bStr);
+        if (isNaN(d.getTime())) return Number(fallbackAge || 22);
+        const now = new Date();
+        let a = now.getFullYear() - d.getFullYear();
+        const m = now.getMonth() - d.getMonth();
+        if (m < 0 || (m === 0 && now.getDate() < d.getDate())) a--;
+        return a > 0 ? a : Number(fallbackAge || 22);
+      };
+
+      const isAlreadyCompleted = Boolean(existing?.isProfileCompleted === true);
+      const lockedGender =
+        isAlreadyCompleted && (existing.gender === 'male' || existing.gender === 'female')
+          ? existing.gender
+          : (user.gender || existing.gender || 'female');
+      const lockedBirthDate =
+        isAlreadyCompleted && existing.birthDate
+          ? existing.birthDate
+          : (user.birthDate || existing.birthDate || '2002-05-15');
+      const lockedAge =
+        isAlreadyCompleted && existing.birthDate
+          ? computeAgeFromBirth(existing.birthDate, existing.age)
+          : Number(user.age || existing.age || computeAgeFromBirth(lockedBirthDate, 22));
+      const rawSyncedPhone = user.phone !== undefined ? String(user.phone) : String(existing.phone || '');
+      const formattedSyncedPhone = rawSyncedPhone.trim() ? formatPhoneNumberPretty(rawSyncedPhone) : '';
+
       const currentlyOnline = presenceRegistry.isUidOnline(targetUid);
       const mergedUser = {
         isVerified: false,
@@ -1980,9 +2570,13 @@ Suhbatlashish qoidalaringiz:
         pendingDiamondBatches: [],
         ...existing,
         ...user,
+        gender: lockedGender,
+        birthDate: lockedBirthDate,
+        age: lockedAge,
+        phone: formattedSyncedPhone,
         username: rawUsername,
         name: fetchedName || (!isPlaceholderOrUsername(user.name, incomingTgHandle, incomingPhone) ? user.name : '') || (!isPlaceholderOrUsername(existing.name, incomingTgHandle, incomingPhone) ? existing.name : '') || (isTelegramAccount ? '' : 'Foydalanuvchi'),
-        avatar: user.faceId?.capturedPhotoUrl || existing.faceId?.capturedPhotoUrl || fetchedAvatar || fallbackAvatar,
+        avatar: faceIdAvatar || (isTelegramAccount ? '' : fetchedAvatar) || fallbackAvatar,
         banner: user.banner !== undefined ? user.banner : (existing.banner || ''),
         coins: (existing && existing.coins !== undefined) ? existing.coins : (user.coins !== undefined ? user.coins : 100),
         diamonds: (existing && existing.diamonds !== undefined) ? existing.diamonds : (user.diamonds !== undefined ? user.diamonds : 0),
@@ -2014,7 +2608,20 @@ Suhbatlashish qoidalaringiz:
       }
       const existing = usersStore.get(uid);
       if (existing) {
-        const updated = { ...existing, ...updates, updatedAt: new Date().toISOString() };
+        const sanitizedUpdates = { ...updates };
+        if (existing.isProfileCompleted === true) {
+          if (existing.gender === 'male' || existing.gender === 'female') {
+            sanitizedUpdates.gender = existing.gender;
+          }
+          if (existing.birthDate) {
+            sanitizedUpdates.birthDate = existing.birthDate;
+            sanitizedUpdates.age = existing.age;
+          }
+        }
+        if (sanitizedUpdates.phone) {
+          sanitizedUpdates.phone = formatPhoneNumberPretty(String(sanitizedUpdates.phone));
+        }
+        const updated = { ...existing, ...sanitizedUpdates, updatedAt: new Date().toISOString() };
         if (updates.isOnline === undefined && updates.status === undefined) {
           const online = presenceRegistry.isUidOnline(uid);
           updated.isOnline = online;
@@ -2124,7 +2731,7 @@ Suhbatlashish qoidalaringiz:
     }
   });
 
-  // Claim / check matured 24-hour diamond batches
+  // Claim / check matured 12-hour diamond batches
   app.post('/api/wallet/claim-matured', (req, res) => {
     try {
       const { uid } = req.body;
@@ -2136,25 +2743,159 @@ Suhbatlashish qoidalaringiz:
         user.updatedAt = new Date().toISOString();
         usersStore.set(uid, user);
         saveUsersToDisk();
-        transactionsStore.unshift({
+        void walletRepository.syncUserWallet(user);
+        const unlockTx = {
           id: 'tx_unlock_' + Date.now() + Math.random().toString(36).substring(2, 5),
           receiver: uid,
           type: 'diamond_unlock',
           diamondAmount: unlockedAmount,
+          uzsAmount: calculateDiamondsToUzs(unlockedAmount),
           status: 'completed',
-          note: `${unlockedAmount} almaz (24 soatlik limit) asosiy hisobga qo'shildi`,
+          note: `${unlockedAmount} almaz (12 soatlik limit) asosiy hisobga qo'shildi`,
           createdAt: new Date().toISOString()
-        });
+        };
+        transactionsStore.unshift(unlockTx);
+        void walletRepository.recordTransaction(unlockTx);
         saveTransactionsToDisk();
         io.emit('user_updated', user);
       }
-      res.json({ success: true, user, unlockedAmount });
+      res.json({ success: true, user, wallet: user.wallet, unlockedAmount });
     } catch (err: any) {
       res.status(500).json({ success: false, error: err.message });
     }
   });
 
   // --- Tokenomics Wallet & Gifts Endpoints ---
+  app.get('/api/wallet/:uid', async (req, res) => {
+    try {
+      const { uid } = req.params;
+      const user = usersStore.get(uid);
+      if (!user) {
+        return res.status(404).json({ success: false, error: 'Foydalanuvchi topilmadi' });
+      }
+      const { unlockedAmount } = normalizeAndReleaseUser(user);
+      if (unlockedAmount > 0) {
+        user.updatedAt = new Date().toISOString();
+        usersStore.set(uid, user);
+        saveUsersToDisk();
+      }
+      const wallet = await walletRepository.syncUserWallet(user);
+      const ledger = await walletRepository.getWalletLedger(uid, transactionsStore, withdrawalsStore);
+      res.json({
+        success: true,
+        wallet,
+        user,
+        transactions: ledger.transactions,
+        withdrawals: ledger.withdrawals,
+        storageMode: ledger.storageMode,
+      });
+    } catch (err: any) {
+      res.status(500).json({ success: false, error: err.message });
+    }
+  });
+
+  // Per-minute audio/video call diamond & coin billing
+  app.post('/api/calls/bill-minute', (req, res) => {
+    try {
+      const { callerUid, calleeUid, callType = 'video', minuteIndex = 1 } = req.body || {};
+      if (!callerUid || !calleeUid) {
+        return res.status(400).json({ success: false, error: 'callerUid and calleeUid required' });
+      }
+      const caller = usersStore.get(String(callerUid));
+      const callee = usersStore.get(String(calleeUid));
+      if (!caller || !callee) {
+        return res.status(404).json({ success: false, error: 'Foydalanuvchi topilmadi' });
+      }
+
+      const mode: 'audio' | 'video' = callType === 'audio' ? 'audio' : 'video';
+      const billing = calculateCallMinuteBilling(mode);
+      const isCallerAdmin = isAdminTelegramUser(caller);
+
+      // Male non-admin callers pay coins per connected minute
+      if (caller.gender === 'male' && !isCallerAdmin) {
+        if ((caller.coins || 0) < billing.coinCost) {
+          return res.status(400).json({
+            success: false,
+            error: 'insufficient_coins',
+            message: `${mode === 'audio' ? 'Audio' : 'Video'} qo'ng'iroqni davom ettirish uchun kamida ${billing.coinCost} moneta kerak!`,
+          });
+        }
+        caller.coins = Math.max(0, (caller.coins || 0) - billing.coinCost);
+        caller.updatedAt = new Date().toISOString();
+        normalizeAndReleaseUser(caller);
+        usersStore.set(caller.uid, caller);
+        void walletRepository.syncUserWallet(caller);
+      }
+
+      // Female participants automatically earn diamonds per connected minute
+      let earnedDiamonds = 0;
+      const diamondBeneficiary = callee.gender === 'female' ? callee : (caller.gender === 'female' ? caller : null);
+      if (diamondBeneficiary) {
+        earnedDiamonds = billing.diamondReward;
+        const progressResult = applyDiamondProgress(
+          diamondBeneficiary.diamondProgress || 0,
+          diamondBeneficiary.pendingDiamondBatches || [],
+          earnedDiamonds,
+          Date.now()
+        );
+        diamondBeneficiary.diamondProgress = progressResult.diamondProgress;
+        diamondBeneficiary.pendingDiamondBatches = progressResult.pendingDiamondBatches;
+        diamondBeneficiary.totalEarnedDiamonds = (diamondBeneficiary.totalEarnedDiamonds || 0) + earnedDiamonds;
+        diamondBeneficiary.updatedAt = new Date().toISOString();
+        normalizeAndReleaseUser(diamondBeneficiary);
+        usersStore.set(diamondBeneficiary.uid, diamondBeneficiary);
+        void walletRepository.syncUserWallet(diamondBeneficiary);
+
+        const callTx = {
+          id: 'tx_call_' + Date.now() + Math.random().toString(36).substring(2, 5),
+          sender: caller.uid,
+          receiver: diamondBeneficiary.uid,
+          type: mode === 'audio' ? 'audio_call_minute' : 'video_call_minute',
+          coinAmount: billing.coinCost,
+          diamondAmount: earnedDiamonds,
+          uzsAmount: billing.uzsEquivalent,
+          status: 'completed',
+          note: `${mode === 'audio' ? 'Audio' : 'Video'} qo'ng'iroq (${minuteIndex}-daqiqa): +${earnedDiamonds} olmos (${billing.uzsEquivalent.toLocaleString()} so'm)`,
+          createdAt: new Date().toISOString(),
+        };
+        transactionsStore.unshift(callTx);
+        void walletRepository.recordTransaction(callTx);
+
+        if (progressResult.newlyLockedCount > 0) {
+          const lockTx = {
+            id: 'tx_limit_' + Date.now() + Math.random().toString(36).substring(2, 5),
+            receiver: diamondBeneficiary.uid,
+            type: 'diamond_limit_locked',
+            diamondAmount: progressResult.newlyLockedCount * 100,
+            uzsAmount: calculateDiamondsToUzs(progressResult.newlyLockedCount * 100),
+            status: 'pending',
+            note: '100 ta olmos limiti to\'ldi — 12 soat ichida asosiy hamyonga qo\'shiladi',
+            createdAt: new Date().toISOString(),
+          };
+          transactionsStore.unshift(lockTx);
+          void walletRepository.recordTransaction(lockTx);
+        }
+      }
+
+      saveUsersToDisk();
+      saveTransactionsToDisk();
+      io.emit('user_updated', caller);
+      if (callee.uid !== caller.uid) {
+        io.emit('user_updated', callee);
+      }
+
+      res.json({
+        success: true,
+        billing,
+        earnedDiamonds,
+        caller,
+        callee,
+      });
+    } catch (err: any) {
+      res.status(500).json({ success: false, error: err.message });
+    }
+  });
+
   app.post('/api/wallet/topup', (req, res) => {
     try {
       const { uid, coinAmount, paymentMethod = 'click' } = req.body;
@@ -2167,8 +2908,10 @@ Suhbatlashish qoidalaringiz:
       }
       user.coins = (user.coins || 0) + Number(coinAmount);
       user.updatedAt = new Date().toISOString();
+      normalizeAndReleaseUser(user);
       usersStore.set(uid, user);
       saveUsersToDisk();
+      void walletRepository.syncUserWallet(user);
 
       const tx = {
         id: 'tx_' + Date.now() + Math.random().toString(36).substring(2, 6),
@@ -2181,10 +2924,11 @@ Suhbatlashish qoidalaringiz:
         createdAt: new Date().toISOString()
       };
       transactionsStore.unshift(tx);
+      void walletRepository.recordTransaction(tx);
       saveTransactionsToDisk();
 
       io.emit('user_updated', user);
-      res.json({ success: true, user, transaction: tx });
+      res.json({ success: true, user, wallet: user.wallet, transaction: tx });
     } catch (err: any) {
       res.status(500).json({ error: err.message });
     }
@@ -2196,9 +2940,9 @@ Suhbatlashish qoidalaringiz:
       const user = usersStore.get(uid);
       if (!user) return res.status(404).json({ error: 'Foydalanuvchi topilmadi' });
 
-      const count = Number(diamondAmount);
+      const count = Math.floor(Number(diamondAmount));
       if (isNaN(count) || count < 100) {
-        return res.status(400).json({ error: 'Minimal yechib olish miqdori 100 almaz (100 000 so\'m)' });
+        return res.status(400).json({ error: 'Minimal yechib olish miqdori 100 almaz (10 000 so\'m)' });
       }
       if ((user.diamonds || 0) < count) {
         return res.status(400).json({ error: 'Balansingizda yetarli almaz mavjud emas' });
@@ -2207,13 +2951,16 @@ Suhbatlashish qoidalaringiz:
         return res.status(400).json({ error: '16 xonali Humo/Uzcard karta raqamini kiriting' });
       }
 
+      const uzsAmount = calculateDiamondsToUzs(count);
       user.diamonds = (user.diamonds || 0) - count;
+      user.totalWithdrawnUzs = (user.totalWithdrawnUzs || 0) + uzsAmount;
       user.bankCard = bankCard.trim();
       user.updatedAt = new Date().toISOString();
+      normalizeAndReleaseUser(user);
       usersStore.set(uid, user);
       saveUsersToDisk();
+      void walletRepository.syncUserWallet(user);
 
-      const uzsAmount = count * 1000;
       const wReq = {
         id: 'wd_' + Date.now() + Math.random().toString(36).substring(2, 6),
         userUid: uid,
@@ -2225,6 +2972,7 @@ Suhbatlashish qoidalaringiz:
         createdAt: new Date().toISOString()
       };
       withdrawalsStore.unshift(wReq);
+      void walletRepository.recordWithdrawal(wReq);
       saveWithdrawalsToDisk();
 
       const tx = {
@@ -2238,20 +2986,20 @@ Suhbatlashish qoidalaringiz:
         createdAt: new Date().toISOString()
       };
       transactionsStore.unshift(tx);
+      void walletRepository.recordTransaction(tx);
       saveTransactionsToDisk();
 
       io.emit('user_updated', user);
-      res.json({ success: true, user, withdrawal: wReq });
+      res.json({ success: true, user, wallet: user.wallet, withdrawal: wReq });
     } catch (err: any) {
       res.status(500).json({ error: err.message });
     }
   });
 
-  app.get('/api/wallet/history/:uid', (req, res) => {
+  app.get('/api/wallet/history/:uid', async (req, res) => {
     const { uid } = req.params;
-    const userTxs = transactionsStore.filter(t => t.sender === uid || t.receiver === uid);
-    const userWds = withdrawalsStore.filter(w => w.userUid === uid);
-    res.json({ success: true, transactions: userTxs, withdrawals: userWds });
+    const ledger = await walletRepository.getWalletLedger(uid, transactionsStore, withdrawalsStore);
+    res.json({ success: true, ...ledger });
   });
 
   app.post('/api/gifts/send', (req, res) => {
@@ -2276,9 +3024,15 @@ Suhbatlashish qoidalaringiz:
 
       const diamondEarned = Math.floor(cost * 0.6);
       recipient.diamonds = (recipient.diamonds || 0) + diamondEarned;
+      recipient.totalEarnedDiamonds = (recipient.totalEarnedDiamonds || 0) + diamondEarned;
+      normalizeAndReleaseUser(sender);
+      normalizeAndReleaseUser(recipient);
+      usersStore.set(senderUid, sender);
       usersStore.set(recipientUid, recipient);
 
       saveUsersToDisk();
+      void walletRepository.syncUserWallet(sender);
+      void walletRepository.syncUserWallet(recipient);
 
       const tx = {
         id: 'tx_' + Date.now() + Math.random().toString(36).substring(2, 6),
@@ -2287,11 +3041,13 @@ Suhbatlashish qoidalaringiz:
         type: 'gift',
         coinAmount: cost,
         diamondAmount: diamondEarned,
+        uzsAmount: calculateDiamondsToUzs(diamondEarned),
         status: 'completed',
         note: `Sovg'a: ${giftName} (${cost} moneta)`,
         createdAt: new Date().toISOString()
       };
       transactionsStore.unshift(tx);
+      void walletRepository.recordTransaction(tx);
       saveTransactionsToDisk();
 
       const chatId = [senderUid, recipientUid].sort().join('_');
@@ -2383,12 +3139,16 @@ Suhbatlashish qoidalaringiz:
 
   app.get('/api/posts', (req, res) => {
     const authorUid = req.query.authorUid ? String(req.query.authorUid) : '';
+    const viewerUid = req.query.viewerUid ? String(req.query.viewerUid) : '';
+    const viewerUser = viewerUid ? usersStore.get(viewerUid) || null : null;
+
     const filtered = authorUid
       ? postsStore.filter((p) => p.authorUid === authorUid)
       : postsStore;
     const sorted = [...filtered]
       .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
-      .map(enrichPost);
+      .map(enrichPost)
+      .filter((p) => isPostVisibleToViewer(p, viewerUser));
     res.json({ success: true, posts: sorted });
   });
 
@@ -2513,6 +3273,41 @@ Suhbatlashish qoidalaringiz:
     }
   });
 
+  function cleanupOrphanedLocalMedia(candidateUrls: Array<string | undefined>) {
+    for (const rawUrl of candidateUrls) {
+      const url = String(rawUrl || '').trim();
+      if (!url.startsWith('/api/media/')) continue;
+      const safeName = path.basename(url.slice('/api/media/'.length)).replace(/[^a-zA-Z0-9._-]/g, '');
+      if (!safeName) continue;
+      const canonicalUrl = `/api/media/${safeName}`;
+
+      const stillReferencedByPosts = postsStore.some(
+        (p) => p.mediaUrl === canonicalUrl || p.coverUrl === canonicalUrl
+      );
+      if (stillReferencedByPosts) continue;
+
+      let stillReferencedByUsers = false;
+      for (const u of usersStore.values()) {
+        if (
+          u.avatar === canonicalUrl ||
+          u.banner === canonicalUrl ||
+          u.faceId?.capturedPhotoUrl === canonicalUrl
+        ) {
+          stillReferencedByUsers = true;
+          break;
+        }
+      }
+      if (stillReferencedByUsers) continue;
+
+      const diskPath = path.join(MEDIA_UPLOADS_DIR, safeName);
+      if (fs.existsSync(diskPath)) {
+        try {
+          fs.unlinkSync(diskPath);
+        } catch {}
+      }
+    }
+  }
+
   app.delete('/api/posts/:postId', (req, res) => {
     try {
       const { postId } = req.params;
@@ -2526,6 +3321,8 @@ Suhbatlashish qoidalaringiz:
       }
       postsStore.splice(idx, 1);
       savePostsToDisk();
+
+      cleanupOrphanedLocalMedia([target.mediaUrl, target.coverUrl]);
 
       const author = usersStore.get(target.authorUid);
       if (author) {
@@ -2775,7 +3572,36 @@ Suhbatlashish qoidalaringiz:
   });
 
   app.get('/robots.txt', (_req, res) => {
-    res.type('text/plain').send('User-agent: *\nAllow: /\nSitemap: https://alov.uz/sitemap.xml\n');
+    const robotsPath = path.resolve(__dirname, 'public', 'robots.txt');
+    if (fs.existsSync(robotsPath)) {
+      res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+      return res.sendFile(robotsPath);
+    }
+    res.type('text/plain').send('User-agent: *\nAllow: /\nDisallow: /api/\nSitemap: https://alov.uz/sitemap.xml\n');
+  });
+
+  app.get('/llms.txt', (_req, res) => {
+    const llmsPath = path.resolve(__dirname, 'public', 'llms.txt');
+    if (fs.existsSync(llmsPath)) {
+      res.setHeader('Content-Type', 'text/markdown; charset=utf-8');
+      return res.sendFile(llmsPath);
+    }
+    res.setHeader('Content-Type', 'text/markdown; charset=utf-8');
+    return res.send("# Alov.uz\n\nO'zbekistonning Face ID bilan tasdiqlangan tanishuv va jonli muloqot platformasi.\n");
+  });
+
+  app.get('/.well-known/ard.json', (_req, res) => {
+    const ardPath = path.resolve(__dirname, 'public', '.well-known', 'ard.json');
+    if (fs.existsSync(ardPath)) {
+      res.setHeader('Content-Type', 'application/json; charset=utf-8');
+      return res.sendFile(ardPath);
+    }
+    return res.json({
+      name: 'Alov.uz',
+      description: "O'zbekistonning Face ID bilan tasdiqlangan zamonaviy tanishuv, postlar va jonli efir platformasi.",
+      url: 'https://alov.uz',
+      language: 'uz',
+    });
   });
 
   // Setup Vite in development or static serve in production
@@ -2950,20 +3776,26 @@ Suhbatlashish qoidalaringiz:
           );
           senderUser.diamondProgress = progressResult.diamondProgress;
           senderUser.pendingDiamondBatches = progressResult.pendingDiamondBatches;
+          senderUser.totalEarnedDiamonds = (senderUser.totalEarnedDiamonds || 0) + totalNewDiamonds;
+          normalizeAndReleaseUser(senderUser);
           if (progressResult.newlyLockedCount > 0) {
-            transactionsStore.unshift({
+            const lockTx = {
               id: 'tx_limit_' + Date.now() + Math.random().toString(36).substring(2, 5),
               receiver: senderId,
               type: 'diamond_limit_locked',
               diamondAmount: progressResult.newlyLockedCount * 100,
+              uzsAmount: calculateDiamondsToUzs(progressResult.newlyLockedCount * 100),
               status: 'pending',
-              note: '100 ta olmos limiti to\'ldi — 24 soat ichida asosiy walletga qo\'shiladi',
+              note: '100 ta olmos limiti to\'ldi — 12 soat ichida asosiy hamyonga qo\'shiladi',
               createdAt: new Date().toISOString()
-            });
+            };
+            transactionsStore.unshift(lockTx);
+            void walletRepository.recordTransaction(lockTx);
           }
           usersStore.set(senderId, senderUser);
           saveUsersToDisk();
           saveTransactionsToDisk();
+          void walletRepository.syncUserWallet(senderUser);
           io.to(`user_${senderId}`).emit('user_updated', senderUser);
           io.emit('user_updated', senderUser);
         }
@@ -3032,7 +3864,7 @@ Suhbatlashish qoidalaringiz:
       if ((isKamolaChat || isAlovAiBot) && message.type === 'text') {
         const botUid = isKamolaChat ? 'user_kamola_006' : 'alov_ai_bot';
         const botName = isKamolaChat ? 'Kamola Saidova' : 'Alov AI';
-        const botAvatar = isKamolaChat ? '/assets/aistudio/image_e20a1307.png' : '/assets/aistudio/image_e20a1307.png';
+        const botAvatar = isKamolaChat ? '/assets/aistudio/image_e20a1307.webp' : '/assets/aistudio/image_e20a1307.webp';
 
         try {
           const ai = new GoogleGenAI({ 
@@ -3297,12 +4129,13 @@ Suhbatlashish qoidalaringiz:
       });
     });
 
-    // --- 1-on-1 P2P WebRTC Video Call & Screen Sharing Signaling ---
-    socket.on('call-user', ({ targetUid, targetSocketId, offer, caller }) => {
+    // --- 1-on-1 P2P WebRTC Audio/Video Call & Screen Sharing Signaling ---
+    socket.on('call-user', ({ targetUid, targetSocketId, offer, caller, callMode }) => {
       const payload = {
         offer,
         caller: caller || { uid: presenceRegistry.getSocketInfo(socket.id)?.uid, socketId: socket.id },
-        callerSocketId: socket.id
+        callerSocketId: socket.id,
+        callMode: callMode === 'audio' ? 'audio' : 'video'
       };
       if (targetSocketId) {
         io.to(targetSocketId).emit('incoming-call', payload);

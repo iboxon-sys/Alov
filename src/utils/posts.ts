@@ -113,3 +113,27 @@ export function formatPostTimeUz(isoDate: string, nowMs: number = Date.now()): s
   if (diffDays < 7) return `${diffDays} kun oldin`;
   return new Date(ts).toLocaleDateString('uz-UZ', { day: '2-digit', month: 'short' });
 }
+
+export function isPostVisibleToViewer(
+  post: Pick<PostItem, 'authorUid' | 'authorGender'>,
+  viewer: { uid?: string; id?: string; gender?: string } | null | undefined,
+  authorGenderFallback?: string
+): boolean {
+  if (!post) return false;
+  if (!viewer) return true;
+
+  const viewerUid = String(viewer.uid || viewer.id || '').trim();
+  if (viewerUid && post.authorUid === viewerUid) {
+    return true;
+  }
+
+  const viewerGender = viewer.gender === 'male' || viewer.gender === 'female' ? viewer.gender : '';
+  if (!viewerGender) return true;
+
+  const rawAuthorGender = post.authorGender || authorGenderFallback;
+  const authorGender = rawAuthorGender === 'male' || rawAuthorGender === 'female' ? rawAuthorGender : '';
+  if (!authorGender) return false;
+
+  return viewerGender !== authorGender;
+}
+

@@ -11,6 +11,10 @@ export const getBaseUrl = (): string => {
     if (customBackend && customBackend.trim().startsWith('http')) {
       return customBackend.trim().replace(/\/$/, '');
     }
+    const envBackend = (import.meta as any).env?.VITE_API_URL || (import.meta as any).env?.VITE_BACKEND_URL;
+    if (envBackend && typeof envBackend === 'string' && envBackend.trim().startsWith('http')) {
+      return envBackend.trim().replace(/\/$/, '');
+    }
     return window.location.origin;
   }
   return '';
@@ -23,6 +27,18 @@ export const getApiUrl = (endpoint: string): string => {
   const base = getBaseUrl();
   const cleanEndpoint = endpoint.startsWith('/') ? endpoint : `/${endpoint}`;
   return base ? `${base}${cleanEndpoint}` : cleanEndpoint;
+};
+
+/**
+ * Resolves relative /api/... media and avatar URLs against the active Render backend origin
+ */
+export const resolveApiMediaUrl = (url?: string): string => {
+  const raw = String(url || '').trim();
+  if (!raw) return '';
+  if (raw.startsWith('/api/')) {
+    return getApiUrl(raw);
+  }
+  return raw;
 };
 
 /**

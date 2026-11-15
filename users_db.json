@@ -34,8 +34,8 @@
     },
     "isOnline": true,
     "status": "online",
-    "updatedAt": "2026-11-14T15:39:24.558Z",
-    "lastSeen": "2026-11-14T15:37:40.731Z",
+    "updatedAt": "2026-11-15T11:34:45.281Z",
+    "lastSeen": "2026-11-15T11:57:59.826Z",
     "firstName": "Salikh",
     "birthDate": "2002-05-15",
     "neighborhood": "Mirzo Salimiy",
@@ -46,8 +46,8 @@
     "username": "salikhnewuser",
     "faceId": {
       "verified": true,
-      "detectedGender": "male",
-      "confidence": 99
+      "gender": "male",
+      "capturedAt": "2026-11-15T11:34:44.568Z"
     }
   }
 ]

@@ -24,6 +24,7 @@ import { FaceIdVerificationModal, type FaceIdVerificationResult } from './compon
 import { FollowListModal } from './components/FollowListModal';
 import { PostsFeed } from './components/PostsFeed';
 import { PublicProfileModal } from './components/PublicProfileModal';
+import { SmartPhoneInput } from './components/SmartPhoneInput';
 import { callNotification } from './services/callNotification';
 import { VideoPlayer, VoiceMessage } from './components/ChatMedia';
 import { CandidateSkeleton, ChatSkeleton } from './components/Skeleton';
@@ -59,8 +60,9 @@ import {
 } from './utils/faceId';
 import { isUserOnlineStrict, formatLastSeenUz } from './utils/presence';
 import { resolveExactUserByUid, getInitialAuthDraftState } from './utils/profileLookup';
-import { computeAuthorTotalLikes, type PostItem } from './utils/posts';
+import { computeAuthorTotalLikes, isPostVisibleToViewer, type PostItem } from './utils/posts';
 import { validateUsername, isUsernameUnique, formatUsernameDisplay } from './utils/username';
+import { formatPhoneNumberPretty } from './utils/phone';
 
 function resolveAvatarUrl(rawUrl?: string | null): string {
   const clean = pickPreferredAvatar(rawUrl);
@@ -198,7 +200,7 @@ const ALOV_AI_USER = {
   uid: 'alov_ai_bot',
   id: 'ALOV-AI',
   name: 'Alov AI',
-  avatar: '/assets/aistudio/image_e20a1307.png',
+  avatar: '/assets/aistudio/image_e20a1307.webp',
   bio: 'Sizning samimiy va mehribon virtual suhbatdoshingiz. Sevgi va munosabatlar haqida gaplashamizmi? 😊✨',
   status: 'online',
   isAI: true
@@ -273,14 +275,40 @@ export default function App() {
   const [regRegion, setRegRegion] = useState('Toshkent shahri');
   const [regDistrict, setRegDistrict] = useState('Yunusobod tumani');
   const [regNeighborhood, setRegNeighborhood] = useState('Bodomzor');
-  const [regPhone, setRegPhone] = useState('+99890');
+  const [regPhone, setRegPhone] = useState('+998 ');
   const [regTelegram, setRegTelegram] = useState('');
   const [regInstagram, setRegInstagram] = useState('');
-  const [regBio, setRegBio] = useState('Alov.uz da yangi tanishuvlar va suhbatlar uchun.');
+  const [regBio, setRegBio] = useState('');
   const [regAvatar, setRegAvatar] = useState('');
   const [regBanner, setRegBanner] = useState('');
   const [isUploadingBanner, setIsUploadingBanner] = useState(false);
+  const [isSavingProfile, setIsSavingProfile] = useState(false);
+  const [toastMsg, setToastMsg] = useState('');
+  const toastTimerRef = useRef<number | null>(null);
   const [regLocationVisibility, setRegLocationVisibility] = useState<'everyone' | 'mutual' | 'ghost'>('everyone');
+
+  const showToast = React.useCallback((msg: string) => {
+    setToastMsg(msg);
+    if (toastTimerRef.current) {
+      window.clearTimeout(toastTimerRef.current);
+    }
+    toastTimerRef.current = window.setTimeout(() => {
+      setToastMsg('');
+    }, 3200);
+  }, []);
+
+  const fetchPostsFromServer = React.useCallback(async () => {
+    try {
+      const viewerUid = currentUser?.uid || firebaseUser?.uid || '';
+      const query = viewerUid ? `?viewerUid=${encodeURIComponent(viewerUid)}` : '';
+      const postsData = await safeFetchJson(getApiUrl(`/api/posts${query}`));
+      if (postsData && postsData.success && Array.isArray(postsData.posts)) {
+        setPostsList(postsData.posts);
+      }
+    } catch (err) {
+      console.warn('Could not refresh posts from server:', err);
+    }
+  }, [currentUser?.uid, firebaseUser?.uid]);
 
   // Safety Liability Disclaimer Modal (10s Countdown)
   const [showLiabilityModal, setShowLiabilityModal] = useState(false);
@@ -443,6 +471,7 @@ export default function App() {
           socket.emit('join_chat', chatId);
         }
       }
+      fetchPostsFromServer();
     };
 
     socket.on('connect', registerSocketUser);
@@ -539,6 +568,7 @@ export default function App() {
 
     socket.on('post_created', (post: PostItem) => {
       if (!post?.id) return;
+      if (!isPostVisibleToViewer(post, currentUserRef.current)) return;
       setPostsList(prev => (prev.some(p => p.id === post.id) ? prev : [post, ...prev]));
     });
 
@@ -1233,9 +1263,11 @@ export default function App() {
   useEffect(() => {
     const fetchInitialData = async () => {
       try {
+        const initialViewerUid = currentUser?.uid || firebaseUser?.uid || '';
+        const postsQuery = initialViewerUid ? `?viewerUid=${encodeURIComponent(initialViewerUid)}` : '';
         const [usersData, postsData] = await Promise.all([
           safeFetchJson(getApiUrl('/api/users')),
-          safeFetchJson(getApiUrl('/api/posts')).catch(() => null),
+          safeFetchJson(getApiUrl(`/api/posts${postsQuery}`)).catch(() => null),
         ]);
         if (usersData && usersData.success && Array.isArray(usersData.users)) {
           setUsersList(usersData.users);
@@ -1257,6 +1289,17 @@ export default function App() {
     };
     fetchInitialData();
   }, []);
+
+  // Refresh posts whenever viewer identity/gender changes or navigating to Posts/Profile tabs
+  useEffect(() => {
+    fetchPostsFromServer();
+  }, [currentUser?.uid, currentUser?.gender, fetchPostsFromServer]);
+
+  useEffect(() => {
+    if (activeTab === 'posts' || activeTab === 'profile') {
+      fetchPostsFromServer();
+    }
+  }, [activeTab, fetchPostsFromServer]);
 
 
   // Load active 1-on-1 chats from Render API & localStorage (No Firestore)
@@ -1756,7 +1799,7 @@ export default function App() {
     setIsUploadingBanner(true);
     setErrorMsg('');
     try {
-      const res = await fetch('/api/media/upload-raw', {
+      const res = await fetch(getApiUrl('/api/media/upload-raw'), {
         method: 'POST',
         headers: {
           'Content-Type': file.type || 'image/jpeg',
@@ -1945,6 +1988,7 @@ export default function App() {
     const activeUid = firebaseUser?.uid || currentUser?.uid;
     if (!activeUid) return;
     setErrorMsg('');
+    setIsSavingProfile(true);
 
     try {
       let finalUsername = currentUser?.username || '';
@@ -1961,20 +2005,26 @@ export default function App() {
         finalUsername = uRes.normalized;
       }
 
-      const computedAge = calculateAge(regBirthDate, Number(regAge));
+      const isPrimaryLocked = Boolean(currentUser?.isProfileCompleted === true);
+      const lockedGender = isPrimaryLocked && (currentUser?.gender === 'male' || currentUser?.gender === 'female')
+        ? currentUser.gender
+        : regGender;
+      const lockedBirthDate = isPrimaryLocked && currentUser?.birthDate ? currentUser.birthDate : regBirthDate;
+      const computedAge = calculateAge(lockedBirthDate, Number(currentUser?.age || regAge));
+      const formattedPhone = formatPhoneNumberPretty(regPhone || firebaseUser?.phoneNumber || currentUser?.phone || '');
       const newUserData = {
         ...currentUser,
         id: currentUser?.id || `ALOV-${activeUid.slice(0, 5).toUpperCase()}`,
         uid: activeUid,
         name: regName || firebaseUser?.displayName || currentUser?.name || '',
         username: finalUsername,
-        birthDate: regBirthDate,
+        birthDate: lockedBirthDate,
         age: computedAge,
-        gender: regGender,
+        gender: lockedGender,
         region: regRegion,
         district: regDistrict,
         neighborhood: regNeighborhood,
-        phone: regPhone || firebaseUser?.phoneNumber || currentUser?.phone || '+998901112233',
+        phone: formattedPhone,
         telegram: regTelegram || currentUser?.telegram || '@user_tg',
         instagram: regInstagram || currentUser?.instagram || '@user_insta',
         bio: regBio,
@@ -2011,9 +2061,14 @@ export default function App() {
         return Array.from(userMap.values());
       });
       setShowProfileModal(false);
-      setActiveTab('discover');
+      if (activeTab === 'landing') {
+        setActiveTab('discover');
+      }
+      showToast("Profil ma'lumotlari saqlandi");
     } catch (err: any) {
       setErrorMsg(err.message || "Profilni saqlashda xatolik.");
+    } finally {
+      setIsSavingProfile(false);
     }
   };
 
@@ -2240,8 +2295,13 @@ export default function App() {
 
       const cleanTg = (regTelegram || '').replace(/^(https?:\/\/t\.me\/|@)/i, '').toLowerCase();
       const formattedTg = cleanTg ? `https://t.me/${cleanTg}` : undefined;
-      const verifiedGender = pendingFaceId.detectedGender;
+      const confirmedGender: 'male' | 'female' = regGender === 'male' ? 'male' : 'female';
       const verifiedAvatar = pendingFaceId.capturedPhotoUrl || regAvatar;
+      const syncedFaceId = {
+        ...pendingFaceId,
+        detectedGender: confirmedGender,
+        genderLabelUz: genderToUzLabel(confirmedGender),
+      };
 
       const newUserData = {
         uid: pendingGoogleUser.uid,
@@ -2252,17 +2312,18 @@ export default function App() {
         telegram: formattedTg,
         password: authPassword.trim() || undefined,
         avatar: verifiedAvatar,
-        faceId: pendingFaceId,
+        faceId: syncedFaceId,
         isVerified: true,
         role: isAdminTelegramUser({ telegram: formattedTg }) ? 'admin' : 'user',
         isAdmin: isAdminTelegramUser({ telegram: formattedTg }),
-        age: Number(regAge) || calculateAge(regBirthDate, 22),
+        age: calculateAge(regBirthDate, Number(regAge) || 22),
         birthDate: regBirthDate,
-        gender: verifiedGender,
+        gender: confirmedGender,
         region: regRegion,
         district: regDistrict,
-        phone: regPhone,
-        bio: regBio || 'Alov.uz da yangi tanishuvlar uchun.',
+        neighborhood: regNeighborhood,
+        phone: formatPhoneNumberPretty(regPhone),
+        bio: regBio.trim() || 'Alov.uz da yangi tanishuvlar uchun.',
         status: 'online',
         isProfileCompleted: true,
         isLocationEnabled: isLocationEnabled,
@@ -2388,15 +2449,20 @@ export default function App() {
             existingName: tgWebAppName,
           });
 
+          // Telegram's display name is carried over, while avatar MUST come from Face ID camera
           setRegName(calculatedName);
           setRegAvatar('');
-          setRegPhone(data.user.phone || (/^\+?\d+$/.test(telegramInput.trim()) ? telegramInput.trim() : '+99890'));
+          const rawSeedPhone = data.user.phone || (/^\+?\d+$/.test(telegramInput.trim().replace(/\s+/g, '')) ? telegramInput.trim() : '+998 ');
+          setRegPhone(formatPhoneNumberPretty(rawSeedPhone) || '+998 ');
           const cleanUserTg = telegramInput.replace(/^(https?:\/\/t\.me\/|@)/i, '').toLowerCase();
           setRegTelegram(data.user.telegram || (cleanUserTg && !/^\d+$/.test(cleanUserTg) ? `https://t.me/${cleanUserTg}` : ''));
-          setRegAge(String(data.user.age || 22));
+          setRegBirthDate(data.user.birthDate || '2002-05-15');
+          setRegAge(String(calculateAge(data.user.birthDate || '2002-05-15', Number(data.user.age || 22))));
           setRegGender(data.user.gender || 'female');
           setRegRegion(data.user.region || 'Toshkent shahri');
           setRegDistrict(data.user.district || 'Yunusobod tumani');
+          setRegNeighborhood(data.user.neighborhood || '');
+          setRegBio(data.user.isProfileCompleted ? (data.user.bio || '') : '');
 
           // Enter real Face ID verification immediately after Telegram verification
           setTelegramStep('face_id');
@@ -2430,12 +2496,13 @@ export default function App() {
     setRegAvatar(result.photoUrl || result.photoDataUrl);
 
     if (origin === 'telegram') {
-      // If returning Telegram user already completed profile fields previously, finalize & enter directly
+      // If returning Telegram user already completed profile fields previously, keep locked primary gender/birthDate and enter directly
       if (pendingTgUser?.isProfileCompleted) {
         const updatedUser = {
           ...pendingTgUser,
           avatar: result.photoUrl || result.photoDataUrl,
-          gender: result.detectedGender,
+          gender: pendingTgUser.gender === 'male' || pendingTgUser.gender === 'female' ? pendingTgUser.gender : result.detectedGender,
+          birthDate: pendingTgUser.birthDate,
           faceId: result.faceId,
           isVerified: true,
         };
@@ -2498,8 +2565,13 @@ export default function App() {
 
       const cleanTg = (regTelegram || pendingTgUser.telegram || telegramInput || '').replace(/^(https?:\/\/t\.me\/|@)/i, '').toLowerCase();
       const formattedTg = cleanTg && !/^\d+$/.test(cleanTg) ? `https://t.me/${cleanTg}` : undefined;
-      const verifiedGender = pendingFaceId.detectedGender;
+      const confirmedGender: 'male' | 'female' = regGender === 'male' ? 'male' : 'female';
       const verifiedAvatar = pendingFaceId.capturedPhotoUrl || regAvatar;
+      const syncedFaceId = {
+        ...pendingFaceId,
+        detectedGender: confirmedGender,
+        genderLabelUz: genderToUzLabel(confirmedGender),
+      };
 
       const newUserData = {
         uid: pendingTgUser.uid,
@@ -2510,17 +2582,18 @@ export default function App() {
         telegramChatId: pendingTgUser.telegramChatId,
         password: authPassword.trim() || undefined,
         avatar: verifiedAvatar,
-        faceId: pendingFaceId,
+        faceId: syncedFaceId,
         isVerified: true,
         role: isAdminTelegramUser({ telegram: formattedTg }) ? 'admin' : 'user',
         isAdmin: isAdminTelegramUser({ telegram: formattedTg }),
-        age: Number(regAge) || calculateAge(regBirthDate, 22),
+        age: calculateAge(regBirthDate, Number(regAge) || 22),
         birthDate: regBirthDate,
-        gender: verifiedGender,
+        gender: confirmedGender,
         region: regRegion,
         district: regDistrict,
-        phone: regPhone,
-        bio: regBio || 'Alov.uz da yangi tanishuvlar va suhbatlar uchun.',
+        neighborhood: regNeighborhood,
+        phone: formatPhoneNumberPretty(regPhone),
+        bio: regBio.trim() || 'Alov.uz da yangi tanishuvlar va suhbatlar uchun.',
         status: 'online',
         isProfileCompleted: true,
         isLocationEnabled: isLocationEnabled,
@@ -3095,7 +3168,7 @@ export default function App() {
       {/* Top Header (always pinned cleanly at top, zero overflow on 390px mobile) */}
       <header className="shrink-0 bg-white/95 backdrop-blur-md border-b border-[rgba(166,36,51,0.1)] px-3 sm:px-5 h-14 flex items-center justify-between gap-2 z-40 overflow-hidden">
           <div className="flex items-center gap-1.5 sm:gap-2.5 min-w-0 shrink-0 cursor-pointer" onClick={() => setActiveTab('discover')}>
-            <img src="/assets/aistudio/image_e20a1307.png" alt="Alov.uz Logo" className="w-7 h-7 rounded-xl object-cover border border-[#C93545]/30 shadow-xs shrink-0" />
+            <img src="/assets/aistudio/image_e20a1307.webp" alt="Alov.uz Logo" className="w-7 h-7 rounded-xl object-cover border border-[#C93545]/30 shadow-xs shrink-0" />
             <span className="text-[15px] sm:text-[18px] font-black font-editorial tracking-tight text-[#221719] whitespace-nowrap shrink-0">
               alov<span className="text-[#C93545]">.uz</span>
             </span>
@@ -3435,6 +3508,7 @@ export default function App() {
               }
               onOpenProfile={openUserProfileByUid}
               onOpenAuth={() => openAuthModalClean('login')}
+              onNotify={showToast}
             />
           </div>
         )}
@@ -3564,7 +3638,7 @@ export default function App() {
                     <div className="space-y-1.5 max-h-[150px] overflow-y-auto pb-2" onWheel={(e) => e.stopPropagation()}>
                       {comments.map((c, idx) => (
                         <div key={c.id ? `${c.id}_${idx}` : `comment_${idx}`} className="text-white text-xs flex items-center space-x-1.5">
-                          <span className="font-bold text-rose-300">{c.name}:</span>
+                          <span className="font-bold text-rose-200">{c.name}:</span>
                           <span className="text-slate-100">{c.text}</span>
                         </div>
                       ))}
@@ -4046,14 +4120,16 @@ export default function App() {
             computeAuthorTotalLikes(postsList, currentUser?.uid)
           );
           const openEditProfileModal = () => {
+            setErrorMsg('');
             setRegName(currentUser?.name || '');
             setRegUsername(currentUser?.username || '');
-            setRegAge(String(currentUser?.age || 22));
+            setRegBirthDate(currentUser?.birthDate || '2002-05-15');
+            setRegAge(String(currentUser?.age || calculateAge(currentUser?.birthDate, 22)));
             setRegGender(currentUser?.gender || 'female');
             setRegRegion(currentUser?.region || 'Toshkent shahri');
             setRegDistrict(currentUser?.district || 'Yunusobod tumani');
-            setRegNeighborhood(currentUser?.neighborhood || 'Bodomzor');
-            setRegPhone(currentUser?.phone || '');
+            setRegNeighborhood(currentUser?.neighborhood || '');
+            setRegPhone(formatPhoneNumberPretty(currentUser?.phone || '+998 '));
             setRegTelegram(currentUser?.telegram || '');
             setRegInstagram(currentUser?.instagram || '');
             setRegBio(currentUser?.bio || '');
@@ -4473,6 +4549,7 @@ export default function App() {
                   }
                   onOpenProfile={openUserProfileByUid}
                   onOpenAuth={() => openAuthModalClean('login')}
+                  onNotify={showToast}
                 />
               </div>
             </div>
@@ -4760,11 +4837,11 @@ export default function App() {
             ) : authMode === 'google_setup' ? (
               <div className="space-y-4">
                 <div className="space-y-1 text-center">
-                  <h2 className="text-xl font-editorial font-black text-[#221719] tracking-tight">Profilni yakunlash ✨</h2>
-                  <p className="text-xs text-[#6B5B5E] font-medium">Face ID tasdiqlandi. Endi qolgan ma'lumotlarni to'ldiring:</p>
+                  <h2 className="text-xl font-editorial font-black text-[#221719] tracking-tight">Profilni yakunlash</h2>
+                  <p className="text-xs text-[#6B5B5E] font-medium">Face ID tasdiqlandi. Ma'lumotlaringizni tekshiring va to'ldiring:</p>
                 </div>
 
-                {/* Face ID captured avatar & auto-detected gender banner */}
+                {/* Face ID captured avatar & detected gender banner */}
                 <div className="p-3.5 bg-emerald-50 border border-emerald-200 rounded-2xl flex items-center space-x-3">
                   <div className="w-14 h-14 rounded-full bg-white shadow-sm overflow-hidden shrink-0 border-2 border-emerald-500 flex items-center justify-center">
                     {resolveAvatarUrl(regAvatar) ? (
@@ -4779,9 +4856,9 @@ export default function App() {
                       <span>Face ID Tasdiqlandi</span>
                     </p>
                     <p className="text-xs font-black text-[#221719] mt-0.5">
-                      Jins: {genderToUzLabel(pendingFaceId?.detectedGender || regGender)} ({pendingFaceId?.confidence ?? 95}%)
+                      Jins: {genderToUzLabel(regGender)} ({pendingFaceId?.confidence ?? 95}%)
                     </p>
-                    <p className="text-[10px] text-emerald-700 font-medium">Rasm Face ID dan avtomatik olindi</p>
+                    <p className="text-[10px] text-emerald-700 font-medium">Profil surati Face ID kamerasidan olindi</p>
                   </div>
                 </div>
 
@@ -4791,7 +4868,7 @@ export default function App() {
                   </div>
                 )}
 
-                <form onSubmit={handleCompleteGoogleRegistration} className="space-y-3">
+                <form onSubmit={handleCompleteGoogleRegistration} className="space-y-3" data-testid="google-setup-form">
                   <div>
                     <label className="block text-[11px] font-bold text-[#221719] mb-1">Ism va Familiya</label>
                     <input 
@@ -4826,55 +4903,133 @@ export default function App() {
                     </div>
                   </div>
 
-                  <div className="grid grid-cols-2 gap-2">
+                  {/* Gender selector (editable here in case Face ID misclassified) */}
+                  <div>
+                    <div className="flex items-center justify-between mb-1">
+                      <label className="block text-[11px] font-bold text-[#221719]">Jinsingiz (Birlamchi)</label>
+                      <span className="text-[10px] text-[#6B5B5E]">Xato bo'lsa to'g'rilang</span>
+                    </div>
+                    <div className="grid grid-cols-2 gap-2">
+                      <button
+                        type="button"
+                        data-testid="setup-gender-female"
+                        onClick={() => setRegGender('female')}
+                        className={`py-2.5 px-3 rounded-xl text-xs font-bold border transition cursor-pointer ${
+                          regGender === 'female'
+                            ? 'bg-[#C93545] text-white border-[#C93545] shadow-xs'
+                            : 'bg-white text-[#36272A] border-[rgba(166,36,51,0.18)] hover:border-[#C93545]'
+                        }`}
+                      >
+                        Ayol / Qiz
+                      </button>
+                      <button
+                        type="button"
+                        data-testid="setup-gender-male"
+                        onClick={() => setRegGender('male')}
+                        className={`py-2.5 px-3 rounded-xl text-xs font-bold border transition cursor-pointer ${
+                          regGender === 'male'
+                            ? 'bg-[#221719] text-white border-[#221719] shadow-xs'
+                            : 'bg-white text-[#36272A] border-[rgba(166,36,51,0.18)] hover:border-[#221719]'
+                        }`}
+                      >
+                        Erkak / Yigit
+                      </button>
+                    </div>
+                  </div>
+
+                  <div>
+                    <div className="flex items-center justify-between mb-1">
+                      <label className="block text-[11px] font-bold text-[#221719]">Tug'ilgan sana / yili (Birlamchi)</label>
+                      <span className="text-[11px] font-bold text-[#A62433] tabular-nums">
+                        {calculateAge(regBirthDate, Number(regAge))} yosh
+                      </span>
+                    </div>
+                    <input 
+                      type="date" 
+                      data-testid="setup-birthdate-input"
+                      value={regBirthDate}
+                      max={new Date().toISOString().split('T')[0]}
+                      onChange={(e) => {
+                        const bDate = e.target.value;
+                        setRegBirthDate(bDate);
+                        setRegAge(String(calculateAge(bDate)));
+                      }}
+                      required
+                      className="w-full px-3.5 py-2.5 rounded-xl bg-white border border-[rgba(166,36,51,0.15)] text-xs font-semibold text-[#221719] focus:border-[#C93545] outline-none"
+                    />
+                  </div>
+
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
                     <div>
-                      <label className="block text-[11px] font-bold text-[#221719] mb-1">Tug'ilgan sana</label>
-                      <input 
-                        type="date" 
-                        value={regBirthDate}
+                      <label className="block text-[11px] font-bold text-[#221719] mb-1">Viloyat</label>
+                      <select 
+                        value={regRegion}
                         onChange={(e) => {
-                          const bDate = e.target.value;
-                          setRegBirthDate(bDate);
-                          setRegAge(String(calculateAge(bDate)));
+                          const reg = e.target.value;
+                          setRegRegion(reg);
+                          const dists = UZ_LOCATIONS[reg] || [];
+                          if (dists.length > 0) setRegDistrict(dists[0]);
                         }}
+                        className="w-full px-3 py-2.5 rounded-xl bg-white border border-[rgba(166,36,51,0.15)] text-xs font-semibold text-[#221719] focus:border-[#C93545] outline-none"
+                      >
+                        {Object.keys(UZ_LOCATIONS).map((reg) => (
+                          <option key={reg} value={reg}>{reg}</option>
+                        ))}
+                      </select>
+                    </div>
+                    <div>
+                      <label className="block text-[11px] font-bold text-[#221719] mb-1">Tuman / Shahar</label>
+                      <select 
+                        value={regDistrict}
+                        onChange={(e) => setRegDistrict(e.target.value)}
+                        className="w-full px-3 py-2.5 rounded-xl bg-white border border-[rgba(166,36,51,0.15)] text-xs font-semibold text-[#221719] focus:border-[#C93545] outline-none"
+                      >
+                        {UZ_LOCATIONS[regRegion]?.map((dist) => (
+                          <option key={dist} value={dist}>{dist}</option>
+                        ))}
+                      </select>
+                    </div>
+                    <div>
+                      <label className="block text-[11px] font-bold text-[#221719] mb-1">Mahalla / Manzil</label>
+                      <input
+                        type="text"
+                        value={regNeighborhood}
+                        onChange={(e) => setRegNeighborhood(e.target.value)}
+                        placeholder="Mahalla"
                         className="w-full px-3 py-2.5 rounded-xl bg-white border border-[rgba(166,36,51,0.15)] text-xs font-semibold text-[#221719] focus:border-[#C93545] outline-none"
                       />
                     </div>
-                    <div>
-                      <label className="block text-[11px] font-bold text-[#221719] mb-1">Jins (Face ID)</label>
-                      <div className="w-full px-3 py-2.5 rounded-xl bg-emerald-50 border border-emerald-200 text-xs font-bold text-emerald-900 flex items-center justify-between">
-                        <span>{genderToUzLabel(pendingFaceId?.detectedGender || regGender)}</span>
-                        <Lock className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
-                      </div>
-                    </div>
                   </div>
 
                   <div>
-                    <label className="block text-[11px] font-bold text-[#221719] mb-1">Viloyat</label>
-                    <select 
-                      value={regRegion}
-                      onChange={(e) => {
-                        const reg = e.target.value;
-                        setRegRegion(reg);
-                        const dists = UZ_LOCATIONS[reg] || [];
-                        if (dists.length > 0) setRegDistrict(dists[0]);
-                      }}
-                      className="w-full px-3.5 py-2.5 rounded-xl bg-white border border-[rgba(166,36,51,0.15)] text-xs font-semibold text-[#221719] focus:border-[#C93545] outline-none"
-                    >
-                      {Object.keys(UZ_LOCATIONS).map((reg) => (
-                        <option key={reg} value={reg}>{reg}</option>
-                      ))}
-                    </select>
+                    <label className="block text-[11px] font-bold text-[#221719] mb-1">Telefon raqam</label>
+                    <SmartPhoneInput
+                      value={regPhone}
+                      onChange={setRegPhone}
+                      testId="setup-phone-input"
+                    />
                   </div>
 
                   <div>
-                    <label className="block text-[11px] font-bold text-[#221719] mb-1">Telegram (Havola / Username)</label>
+                    <label className="block text-[11px] font-bold text-[#221719] mb-1">Telegram (ixtiyoriy)</label>
                     <input 
                       type="text" 
                       value={regTelegram}
                       onChange={(e) => setRegTelegram(e.target.value)}
                       className="w-full px-3.5 py-2.5 rounded-xl bg-white border border-[rgba(166,36,51,0.15)] text-xs font-semibold text-[#221719] focus:border-[#C93545] outline-none"
-                      placeholder="https://t.me/username yoki @username"
+                      placeholder="@username"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-[11px] font-bold text-[#221719] mb-1">O'zingiz haqingizda (Bio)</label>
+                    <textarea 
+                      value={regBio}
+                      onChange={(e) => setRegBio(e.target.value)}
+                      rows={2}
+                      data-testid="setup-bio-input"
+                      className="w-full px-3.5 py-2 rounded-xl bg-white border border-[rgba(166,36,51,0.15)] text-xs font-semibold text-[#221719] focus:border-[#C93545] outline-none resize-none"
+                      placeholder="Qiziqishlaringiz, fe'l-atvoringiz va qanday inson izlayotganingiz..."
                     />
                   </div>
 
@@ -4890,23 +5045,12 @@ export default function App() {
                     />
                   </div>
 
-                  <div>
-                    <label className="block text-[11px] font-bold text-[#221719] mb-1">Bio / O'zingiz haqingizda</label>
-                    <textarea 
-                      value={regBio}
-                      onChange={(e) => setRegBio(e.target.value)}
-                      rows={2}
-                      className="w-full px-3.5 py-2 rounded-xl bg-white border border-[rgba(166,36,51,0.15)] text-xs font-semibold text-[#221719] focus:border-[#C93545] outline-none resize-none"
-                      placeholder="Qanday insonlarni qidiryapsiz..."
-                    />
-                  </div>
-
                   <button 
                     type="submit"
                     disabled={isLoggingIn}
                     className="w-full py-3 px-4 rounded-2xl bg-[#C93545] text-white font-bold text-sm shadow-md hover:bg-[#A62433] transition disabled:opacity-60"
                   >
-                    {isLoggingIn ? "Saqlanmoqda..." : "Profilni yaratish va boshlash ✨"}
+                    {isLoggingIn ? "Saqlanmoqda..." : "Profilni yaratish va boshlash"}
                   </button>
                 </form>
               </div>
@@ -5057,8 +5201,8 @@ export default function App() {
             ) : telegramStep === 'profile_setup' ? (
               <div className="space-y-4">
                 <div className="space-y-1 text-center">
-                  <h2 className="text-xl font-editorial font-black text-[#221719] tracking-tight">Profilni yakunlash ✨</h2>
-                  <p className="text-xs text-[#6B5B5E] font-medium">Face ID tasdiqlandi. Endi qolgan ma'lumotlaringizni kiriting.</p>
+                  <h2 className="text-xl font-editorial font-black text-[#221719] tracking-tight">Profilni yakunlash</h2>
+                  <p className="text-xs text-[#6B5B5E] font-medium">Face ID surati saqlandi. Ismingiz Telegramdan olindi, qolgan ma'lumotlarni to'ldiring.</p>
                 </div>
 
                 {errorMsg && (
@@ -5098,11 +5242,11 @@ export default function App() {
                         <div className="min-w-0 flex-1">
                           <p className="text-[10px] text-emerald-700 font-bold uppercase tracking-wider flex items-center gap-1">
                             <ShieldCheck className="w-3.5 h-3.5" />
-                            <span>Face ID Tasdiqlangan Profil</span>
+                            <span>Face ID Tasdiqlangan Surat</span>
                           </p>
                           <p className="text-sm font-black text-[#221719] truncate">{setupDisplayName}</p>
                           <p className="text-[10.5px] font-bold text-emerald-800">
-                            Aniqlangan jins: {genderToUzLabel(pendingFaceId?.detectedGender || regGender)} ({pendingFaceId?.confidence ?? 95}%)
+                            Jins: {genderToUzLabel(regGender)} ({pendingFaceId?.confidence ?? 95}%)
                           </p>
                         </div>
                       </>
@@ -5110,11 +5254,10 @@ export default function App() {
                   })()}
                 </div>
 
-                <form onSubmit={handleCompleteTelegramRegistration} className="space-y-4">
+                <form onSubmit={handleCompleteTelegramRegistration} className="space-y-3" data-testid="telegram-setup-form">
                   <div>
-                    <label className="block text-[11px] font-bold text-slate-700 mb-1 flex items-center justify-between">
-                      <span>Ismingiz</span>
-                      <span className="text-[10px] text-slate-400 font-medium">* Familiya ixtiyoriy</span>
+                    <label className="block text-[11px] font-bold text-[#221719] mb-1">
+                      Ism va Familiya (Telegramdan olindi)
                     </label>
                     <input 
                       type="text" 
@@ -5122,12 +5265,12 @@ export default function App() {
                       onChange={(e) => setRegName(e.target.value)}
                       required
                       className="w-full px-3.5 py-2.5 rounded-xl bg-white border border-[rgba(166,36,51,0.15)] text-xs font-semibold text-[#221719] focus:border-[#C93545] outline-none transition-all shadow-xs"
-                      placeholder="Ismingiz (masalan: Malika)..."
+                      placeholder="Ismingiz..."
                     />
                   </div>
                   <div>
                     <div className="flex items-center justify-between mb-1">
-                      <label className="block text-[11px] font-bold text-slate-700">
+                      <label className="block text-[11px] font-bold text-[#221719]">
                         Foydalanuvchi nomi (@username)
                       </label>
                       <span className="text-[10px] text-[#A62433] font-bold">Probel mumkin emas</span>
@@ -5146,16 +5289,73 @@ export default function App() {
                       />
                     </div>
                   </div>
-                  <div className="grid grid-cols-2 gap-3">
+
+                  {/* Gender correction selector after Face ID */}
+                  <div>
+                    <div className="flex items-center justify-between mb-1">
+                      <label className="block text-[11px] font-bold text-[#221719]">Jinsingiz (Birlamchi)</label>
+                      <span className="text-[10px] text-[#6B5B5E]">Face ID xato tanlagan bo'lsa o'zgartiring</span>
+                    </div>
+                    <div className="grid grid-cols-2 gap-2">
+                      <button
+                        type="button"
+                        data-testid="tg-setup-gender-female"
+                        onClick={() => setRegGender('female')}
+                        className={`py-2.5 px-3 rounded-xl text-xs font-bold border transition cursor-pointer ${
+                          regGender === 'female'
+                            ? 'bg-[#C93545] text-white border-[#C93545] shadow-xs'
+                            : 'bg-white text-[#36272A] border-[#E5D9D6] hover:border-[#C93545]'
+                        }`}
+                      >
+                        Ayol / Qiz
+                      </button>
+                      <button
+                        type="button"
+                        data-testid="tg-setup-gender-male"
+                        onClick={() => setRegGender('male')}
+                        className={`py-2.5 px-3 rounded-xl text-xs font-bold border transition cursor-pointer ${
+                          regGender === 'male'
+                            ? 'bg-[#221719] text-white border-[#221719] shadow-xs'
+                            : 'bg-white text-[#36272A] border-[#E5D9D6] hover:border-[#221719]'
+                        }`}
+                      >
+                        Erkak / Yigit
+                      </button>
+                    </div>
+                  </div>
+
+                  <div>
+                    <div className="flex items-center justify-between mb-1">
+                      <label className="block text-[11px] font-bold text-[#221719]">Tug'ilgan sana / yili (Birlamchi)</label>
+                      <span className="text-[11px] font-bold text-[#A62433] tabular-nums">
+                        {calculateAge(regBirthDate, Number(regAge))} yosh
+                      </span>
+                    </div>
+                    <input
+                      type="date"
+                      data-testid="tg-setup-birthdate-input"
+                      value={regBirthDate}
+                      max={new Date().toISOString().split('T')[0]}
+                      onChange={(e) => {
+                        const bDate = e.target.value;
+                        setRegBirthDate(bDate);
+                        setRegAge(String(calculateAge(bDate)));
+                      }}
+                      required
+                      className="w-full px-3.5 py-2.5 rounded-xl bg-white border border-[rgba(166,36,51,0.15)] text-xs font-semibold text-[#221719] focus:border-[#C93545] outline-none"
+                    />
+                  </div>
+
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
                     <div>
-                      <label className="block text-[11px] font-bold text-slate-700 mb-1">Viloyat</label>
+                      <label className="block text-[11px] font-bold text-[#221719] mb-1">Viloyat</label>
                       <select 
                         value={regRegion}
                         onChange={(e) => {
                           setRegRegion(e.target.value);
-                          setRegDistrict(UZ_LOCATIONS[e.target.value][0]);
+                          setRegDistrict(UZ_LOCATIONS[e.target.value]?.[0] || '');
                         }}
-                        className="w-full px-3 py-2.5 rounded-xl bg-slate-50 border border-slate-200 text-xs font-semibold text-slate-900 focus:border-[#E8474A] outline-none"
+                        className="w-full px-3 py-2.5 rounded-xl bg-white border border-[rgba(166,36,51,0.15)] text-xs font-semibold text-[#221719] focus:border-[#C93545] outline-none"
                       >
                         {Object.keys(UZ_LOCATIONS).map((reg) => (
                           <option key={`reg_setup_${reg}`} value={reg}>{reg}</option>
@@ -5163,21 +5363,52 @@ export default function App() {
                       </select>
                     </div>
                     <div>
-                      <label className="block text-[11px] font-bold text-slate-700 mb-1">Tuman</label>
+                      <label className="block text-[11px] font-bold text-[#221719] mb-1">Tuman / Shahar</label>
                       <select 
                         value={regDistrict}
                         onChange={(e) => setRegDistrict(e.target.value)}
-                        className="w-full px-3 py-2.5 rounded-xl bg-slate-50 border border-slate-200 text-xs font-semibold text-slate-900 focus:border-[#E8474A] outline-none"
+                        className="w-full px-3 py-2.5 rounded-xl bg-white border border-[rgba(166,36,51,0.15)] text-xs font-semibold text-[#221719] focus:border-[#C93545] outline-none"
                       >
                         {UZ_LOCATIONS[regRegion]?.map((dist) => (
                           <option key={`dist_setup_${dist}`} value={dist}>{dist}</option>
                         ))}
                       </select>
                     </div>
+                    <div>
+                      <label className="block text-[11px] font-bold text-[#221719] mb-1">Mahalla</label>
+                      <input
+                        type="text"
+                        value={regNeighborhood}
+                        onChange={(e) => setRegNeighborhood(e.target.value)}
+                        placeholder="Mahalla"
+                        className="w-full px-3 py-2.5 rounded-xl bg-white border border-[rgba(166,36,51,0.15)] text-xs font-semibold text-[#221719] focus:border-[#C93545] outline-none"
+                      />
+                    </div>
                   </div>
 
                   <div>
-                    <label className="block text-[11px] font-bold text-slate-700 mb-1.5 flex items-center justify-between">
+                    <label className="block text-[11px] font-bold text-[#221719] mb-1">Telefon raqam</label>
+                    <SmartPhoneInput
+                      value={regPhone}
+                      onChange={setRegPhone}
+                      testId="tg-setup-phone-input"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-[11px] font-bold text-[#221719] mb-1">O'zingiz haqingizda (Bio)</label>
+                    <textarea
+                      value={regBio}
+                      onChange={(e) => setRegBio(e.target.value)}
+                      rows={2}
+                      data-testid="tg-setup-bio-input"
+                      placeholder="O'zingiz va qiziqishlaringiz haqida yozing..."
+                      className="w-full px-3.5 py-2 rounded-xl bg-white border border-[rgba(166,36,51,0.15)] text-xs font-semibold text-[#221719] focus:border-[#C93545] outline-none resize-none"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-[11px] font-bold text-[#221719] mb-1 flex items-center justify-between">
                       <span>Akkaunt uchun Parol</span>
                       <span className="text-[10px] text-rose-500 font-medium">* Majburiy</span>
                     </label>
@@ -5186,11 +5417,10 @@ export default function App() {
                       value={authPassword}
                       onChange={(e) => setAuthPassword(e.target.value)}
                       required
-                      autoFocus
-                      className="w-full px-4 py-3 rounded-2xl bg-slate-50 border border-slate-200 text-sm font-semibold text-slate-900 focus:border-[#E8474A] focus:bg-white outline-none transition-all shadow-sm"
+                      className="w-full px-3.5 py-2.5 rounded-xl bg-white border border-[rgba(166,36,51,0.15)] text-xs font-semibold text-[#221719] focus:border-[#C93545] outline-none transition-all shadow-xs"
                       placeholder="••••••••"
                     />
-                    <p className="mt-2 text-[10px] text-slate-400 leading-relaxed px-1">
+                    <p className="mt-1.5 text-[10px] text-slate-400 leading-relaxed px-1">
                       Kelajakda boshqa qurilmalardan kirish uchun ushbu paroldan foydalanasiz.
                     </p>
                   </div>
@@ -5198,7 +5428,7 @@ export default function App() {
                   <button 
                     type="submit"
                     disabled={isLoggingIn}
-                    className="w-full py-4 px-4 rounded-2xl bg-[#E8474A] text-white font-bold text-sm shadow-lg shadow-rose-500/20 hover:bg-[#cb2e31] transition-all active:scale-[0.98] disabled:opacity-60 flex items-center justify-center space-x-2"
+                    className="w-full py-3.5 px-4 rounded-2xl bg-[#C93545] text-white font-bold text-sm shadow-lg shadow-rose-500/20 hover:bg-[#A62433] transition-all active:scale-[0.98] disabled:opacity-60 flex items-center justify-center space-x-2"
                   >
                     {isLoggingIn ? (
                       <>
@@ -5206,7 +5436,7 @@ export default function App() {
                         <span>Saqlanmoqda...</span>
                       </>
                     ) : (
-                      <span>Platformaga kirish ✨</span>
+                      <span>Platformaga kirish</span>
                     )}
                   </button>
                 </form>
@@ -5358,321 +5588,403 @@ export default function App() {
 
       {/* --- PROFILE QUESTIONNAIRE / EDIT MODAL --- */}
       {showProfileModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-md animate-fadeIn">
-          <div className="bg-white rounded-[32px] max-w-md w-full p-6 sm:p-7 space-y-5 max-h-[88vh] overflow-y-auto shadow-2xl border border-gray-200 relative text-slate-900">
-            
-            {/* Minimalist Close / Back Button */}
-            <button 
-              type="button" 
-              onClick={() => setShowProfileModal(false)} 
-              className="absolute top-5 right-5 p-2 px-3 rounded-full bg-slate-100 hover:bg-slate-200 text-slate-700 flex items-center space-x-1.5 text-xs font-bold transition duration-200 hover:scale-105 active:scale-95 shadow-xs"
-            >
-              <X className="w-3.5 h-3.5" />
-              <span>Yopish</span>
-            </button>
+        <div
+          className="fixed inset-0 z-[130] flex items-end sm:items-center justify-center p-0 sm:p-4 bg-black/55 backdrop-blur-sm animate-fadeIn"
+          onClick={() => setShowProfileModal(false)}
+          data-testid="edit-profile-modal-backdrop"
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            data-testid="edit-profile-modal"
+            className="bg-[#FDFBF9] rounded-t-[28px] sm:rounded-[28px] max-w-2xl w-full max-h-[92vh] flex flex-col overflow-hidden shadow-2xl border border-[rgba(166,36,51,0.12)] text-[#221719]"
+          >
+            {/* Mobile Drag Handle */}
+            <div className="w-10 h-1 rounded-full bg-[#D9C8C4] mx-auto mt-2.5 mb-0.5 sm:hidden shrink-0" />
 
-            <div className="space-y-1 pr-14">
-              <h2 className="text-2xl font-black tracking-tight text-slate-900 flex items-center space-x-2">
-                <span>Anketani to'ldirish</span>
-                <Sparkles className="w-5 h-5 text-rose-500 animate-pulse" />
-              </h2>
-              <p className="text-xs text-slate-600 font-medium">Shaxsiy ma'lumotlar va lokatsiya sozlamalarini yangilang</p>
-            </div>
-
-            {/* Error Message Banner */}
-            {errorMsg && (
-              <div className="p-3.5 bg-rose-50 border border-rose-200 rounded-2xl text-[#E8474A] text-xs font-semibold flex items-center space-x-2 animate-shake">
-                <AlertTriangle className="w-4 h-4 shrink-0" />
-                <span>{errorMsg}</span>
-              </div>
-            )}
-
-            <form onSubmit={handleSaveProfile} className="space-y-4">
-              {/* Profile Image & Upload Button */}
-              <div className="flex flex-col items-center space-y-3 py-1">
-                <div className="relative group">
-                  <div className="absolute -inset-1 bg-gradient-to-tr from-rose-500 via-pink-500 to-amber-500 rounded-full blur-xs opacity-80 group-hover:opacity-100 transition duration-300"></div>
-                  <div className="relative w-24 h-24 rounded-full overflow-hidden border-2 border-white shadow-xl bg-slate-100 flex items-center justify-center">
-                    {resolveAvatarUrl(regAvatar) ? (
-                      <img
-                        src={resolveAvatarUrl(regAvatar)}
-                        alt="Avatar Preview"
-                        className="w-full h-full object-cover"
-                        onError={(e: any) => {
-                          e.currentTarget.style.display = 'none';
-                        }}
-                      />
-                    ) : (
-                      <span className="text-2xl font-black text-rose-500">
-                        {(regName?.trim().charAt(0) || 'A').toUpperCase()}
-                      </span>
-                    )}
-                  </div>
-                </div>
-                <label className="cursor-pointer inline-flex items-center space-x-2 bg-gradient-to-r from-red-500 via-pink-500 to-rose-600 hover:from-red-600 hover:to-pink-600 text-white font-bold py-2.5 px-5 rounded-full text-xs shadow-md transition duration-200 hover:scale-105 active:scale-95">
-                  <Upload className="w-4 h-4" />
-                  <span>Qurilmadan rasm yuklash</span>
-                  <input type="file" accept="image/*" onChange={handleImageUpload} className="hidden" />
-                </label>
-              </div>
-
-              {/* Cover Banner Upload & Preview */}
-              <div className="p-3.5 rounded-2xl bg-[#FAF4F2] border border-[rgba(166,36,51,0.12)] space-y-2.5">
-                <div className="flex items-center justify-between gap-2">
-                  <span className="text-xs font-bold text-[#221719] flex items-center gap-1.5">
-                    <ImageIcon className="w-4 h-4 text-[#C93545]" />
-                    <span>Profil Banneri (Orqa fon)</span>
-                  </span>
-                  <div className="flex items-center gap-1.5">
-                    {regBanner && (
-                      <button
-                        type="button"
-                        onClick={() => setRegBanner('')}
-                        className="px-2.5 py-1 rounded-full bg-white text-[10px] font-bold text-rose-700 border border-rose-200 hover:bg-rose-50 transition"
-                      >
-                        Olib tashlash
-                      </button>
-                    )}
-                    <label className="cursor-pointer px-3 py-1 rounded-full bg-[#C93545] hover:bg-[#A62433] text-white text-[10px] font-bold transition">
-                      {isUploadingBanner ? 'Yuklanmoqda...' : 'Banner yuklash'}
-                      <input
-                        type="file"
-                        accept="image/*"
-                        disabled={isUploadingBanner}
-                        onChange={(e) => handleBannerFileChange(e, false)}
-                        className="hidden"
-                      />
-                    </label>
-                  </div>
-                </div>
-                <div className="h-24 rounded-xl overflow-hidden bg-gradient-to-r from-[#FBE7EB] via-[#F7DDD6] to-[#EED5DC] border border-white shadow-inner flex items-center justify-center">
-                  {resolveAvatarUrl(regBanner) ? (
-                    <img
-                      src={resolveAvatarUrl(regBanner)}
-                      alt="Banner ko'rinishi"
-                      className="w-full h-full object-cover"
-                    />
-                  ) : (
-                    <span className="text-[11px] font-semibold text-[#7A686C]">Hali banner yuklanmagan</span>
-                  )}
-                </div>
-              </div>
-
-              {/* Jonli lokatsiyani yoqish (GPS) Card */}
-              <div className="p-4 rounded-2xl bg-white border border-gray-200 shadow-xs flex items-center justify-between transition-all hover:border-red-300">
-                <div className="space-y-0.5 pr-2">
-                  <div className="flex items-center space-x-1.5">
-                    <MapPin className="w-4 h-4 text-rose-500 animate-pulse" />
-                    <span className="text-xs font-bold text-slate-900">Jonli lokatsiyani yoqish (GPS)</span>
-                  </div>
-                  <p className="text-[10px] text-slate-500 font-medium">Atrofdagilar sizni xaritada ko'rishi uchun</p>
-                </div>
-                <button 
-                  type="button"
-                  onClick={() => handleToggleLocation(!isLocationEnabled)}
-                  className={`w-12 h-6.5 rounded-full transition-colors duration-300 p-0.5 flex items-center shadow-inner ${isLocationEnabled ? 'bg-gradient-to-r from-rose-500 to-pink-500 justify-end' : 'bg-slate-300 justify-start'}`}
-                >
-                  <span className="w-5.5 h-5.5 rounded-full bg-white shadow-md transform transition-transform duration-200" />
-                </button>
-              </div>
-
-              {/* Lokatsiya Maxfiyligi (Privacy Guard) Card */}
-              <div className="p-4 rounded-2xl bg-white border border-gray-200 shadow-xs space-y-2 hover:border-red-300 transition-all">
-                <label className="block text-xs font-bold text-slate-900 flex items-center space-x-1.5">
-                  <Shield className="w-4 h-4 text-rose-500" />
-                  <span>Lokatsiya Maxfiyligi (Privacy Guard) 🔒</span>
-                </label>
-                <div className="relative">
-                  <select 
-                    value={regLocationVisibility}
-                    onChange={(e) => handleLocationVisibilityChange(e.target.value as any)}
-                    className="w-full px-3.5 py-2.5 rounded-xl bg-white border border-gray-300 text-xs font-semibold text-gray-900 focus:border-red-500 focus:ring-1 focus:ring-red-500 transition-all appearance-none cursor-pointer pr-8 shadow-xs"
-                  >
-                    <option value="mutual" className="text-gray-900 bg-white font-medium">Faqat obunachilarim / tanishlarimga 🔒 (Tavsiya etiladi)</option>
-                    <option value="everyone" className="text-gray-900 bg-white font-medium">Barchaga ko'rinsin 🌍</option>
-                    <option value="ghost" className="text-gray-900 bg-white font-medium">Hech kimga ko'rsatmaslik 👻 (Ghost Mode)</option>
-                  </select>
-                  <ChevronRight className="w-4 h-4 text-gray-400 absolute right-2.5 top-3 pointer-events-none rotate-90" />
-                </div>
-                <p className="text-[10px] text-slate-500 leading-normal">
-                  Qizlar va barcha foydalanuvchilar xavfsizligi uchun marshrut faqat ruxsat berilgan tanishlarga ko'rinadi.
+            {/* Sticky Modal Header */}
+            <div className="shrink-0 bg-white border-b border-[#F2E8E6] px-5 sm:px-7 py-4 flex items-center justify-between gap-4">
+              <div className="min-w-0">
+                <h2 className="font-editorial text-xl sm:text-2xl font-bold tracking-tight text-[#221719] leading-tight">
+                  {currentUser?.isProfileCompleted ? 'Profilni tahrirlash' : "Anketani to'ldirish"}
+                </h2>
+                <p className="text-xs text-[#6B5B5E] mt-0.5">
+                  Shaxsiy ma'lumotlar, media va maxfiylik sozlamalari
                 </p>
               </div>
+              <button
+                type="button"
+                onClick={() => setShowProfileModal(false)}
+                aria-label="Oynani yopish"
+                data-testid="edit-profile-close-btn"
+                className="w-10 h-10 rounded-full bg-[#FAF4F2] hover:bg-[#F2E8E6] text-[#57484B] flex items-center justify-center transition-colors shrink-0 cursor-pointer"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
 
-              {/* Input Fields in Crisp Light Mode */}
-              <div className="space-y-3">
-                <div>
-                  <label className="block text-[11px] font-bold text-slate-700 mb-1">Ism va Familiya</label>
-                  <input 
-                    type="text" 
-                    value={regName}
-                    onChange={(e) => setRegName(e.target.value)}
-                    className="w-full px-4 py-3 rounded-xl bg-white border border-gray-300 text-xs font-semibold text-gray-900 focus:border-red-500 focus:ring-1 focus:ring-red-500 transition-all outline-none placeholder:text-gray-400"
-                    placeholder="Ismingiz..."
-                  />
+            {/* Form Wrapping Scrollable Body & Sticky Footer */}
+            <form onSubmit={handleSaveProfile} className="flex flex-col flex-1 min-h-0 overflow-hidden">
+              <div className="flex-1 overflow-y-auto px-5 sm:px-7 py-5 space-y-6">
+                {errorMsg && (
+                  <div className="p-3.5 bg-rose-50 border border-rose-200 rounded-2xl text-[#A62433] text-xs font-semibold flex items-center gap-2">
+                    <AlertTriangle className="w-4 h-4 shrink-0" />
+                    <span>{errorMsg}</span>
+                  </div>
+                )}
+
+                {/* Section 1: Profil surati va banner */}
+                <div className="space-y-3">
+                  <h3 className="text-[11px] font-bold uppercase tracking-[0.12em] text-[#8E7C80]">
+                    Profil surati va muqova
+                  </h3>
+                  <div className="flex flex-col sm:flex-row items-center sm:items-stretch gap-4">
+                    {/* Avatar Column */}
+                    <div className="flex sm:flex-col items-center justify-center gap-3 sm:gap-2.5 shrink-0 sm:w-36 bg-white rounded-2xl border border-[#EFE5E2] p-3.5 w-full">
+                      <div className="w-20 h-20 rounded-full overflow-hidden border-2 border-white shadow-md bg-[#FAF4F2] flex items-center justify-center shrink-0">
+                        {resolveAvatarUrl(regAvatar) ? (
+                          <img
+                            src={resolveAvatarUrl(regAvatar)}
+                            alt="Profil rasmi"
+                            className="w-full h-full object-cover"
+                            onError={(e: any) => {
+                              e.currentTarget.style.display = 'none';
+                            }}
+                          />
+                        ) : (
+                          <span className="text-2xl font-editorial font-bold text-[#C93545]">
+                            {(regName?.trim().charAt(0) || 'A').toUpperCase()}
+                          </span>
+                        )}
+                      </div>
+                      <label className="cursor-pointer inline-flex items-center justify-center gap-1.5 px-3.5 py-2 min-h-[36px] rounded-xl bg-[#FAF4F2] hover:bg-[#F3E5E1] border border-[rgba(166,36,51,0.14)] text-[#221719] text-xs font-bold transition whitespace-nowrap">
+                        <Camera className="w-3.5 h-3.5 text-[#C93545]" />
+                        <span>Rasm yuklash</span>
+                        <input type="file" accept="image/*" onChange={handleImageUpload} className="hidden" />
+                      </label>
+                    </div>
+
+                    {/* Cover Banner Column */}
+                    <div className="flex-1 w-full bg-white rounded-2xl border border-[#EFE5E2] p-3.5 flex flex-col justify-between gap-2.5">
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="text-xs font-bold text-[#221719] flex items-center gap-1.5">
+                          <ImageIcon className="w-3.5 h-3.5 text-[#C93545]" />
+                          <span>Profil banneri</span>
+                        </span>
+                        <div className="flex items-center gap-2">
+                          {regBanner && (
+                            <button
+                              type="button"
+                              onClick={() => setRegBanner('')}
+                              className="px-2.5 py-1 rounded-lg bg-[#FAF4F2] hover:bg-rose-50 text-[11px] font-bold text-[#A62433] border border-[#F2D5D9] transition cursor-pointer"
+                            >
+                              Olib tashlash
+                            </button>
+                          )}
+                          <label className="cursor-pointer px-3 py-1 rounded-lg bg-[#C93545] hover:bg-[#A62433] text-white text-[11px] font-bold transition">
+                            {isUploadingBanner ? 'Yuklanmoqda...' : 'Banner yuklash'}
+                            <input
+                              type="file"
+                              accept="image/*"
+                              disabled={isUploadingBanner}
+                              onChange={(e) => handleBannerFileChange(e, false)}
+                              className="hidden"
+                            />
+                          </label>
+                        </div>
+                      </div>
+                      <div className="h-24 sm:h-28 rounded-xl overflow-hidden bg-gradient-to-r from-[#FBE7EB] via-[#F7DDD6] to-[#EED5DC] border border-[#F2E8E6] flex items-center justify-center">
+                        {resolveAvatarUrl(regBanner) ? (
+                          <img
+                            src={resolveAvatarUrl(regBanner)}
+                            alt="Banner ko'rinishi"
+                            className="w-full h-full object-cover"
+                          />
+                        ) : (
+                          <span className="text-xs font-medium text-[#7A686C]">Hali banner tanlanmagan</span>
+                        )}
+                      </div>
+                    </div>
+                  </div>
                 </div>
 
-                <div>
-                  <div className="flex items-center justify-between mb-1">
-                    <label className="block text-[11px] font-bold text-slate-700">
-                      Foydalanuvchi nomi (@username) *
+                {/* Section 2: Asosiy ma'lumotlar */}
+                <div className="border-t border-[#EFE5E2] pt-5 space-y-3.5">
+                  <h3 className="text-[11px] font-bold uppercase tracking-[0.12em] text-[#8E7C80]">
+                    Asosiy ma'lumotlar
+                  </h3>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3.5">
+                    <div>
+                      <label htmlFor="edit-profile-name" className="block text-xs font-bold text-[#36272A] mb-1.5">
+                        Ism va familiya
+                      </label>
+                      <input
+                        id="edit-profile-name"
+                        type="text"
+                        value={regName}
+                        onChange={(e) => setRegName(e.target.value)}
+                        className="w-full px-3.5 py-2.5 min-h-[44px] rounded-xl bg-white border border-[#E5D9D6] text-xs font-semibold text-[#221719] focus:border-[#C93545] focus:ring-1 focus:ring-[#C93545] transition-all outline-none placeholder:text-[#9D8C90]"
+                        placeholder="Ismingiz..."
+                      />
+                    </div>
+
+                    <div>
+                      <div className="flex items-center justify-between gap-2 mb-1.5">
+                        <label htmlFor="edit-profile-username" className="text-xs font-bold text-[#36272A]">
+                          Foydalanuvchi nomi
+                        </label>
+                        <span className="text-[10px] font-semibold text-[#A62433]">Probel mumkin emas</span>
+                      </div>
+                      <div className="relative">
+                        <span className="absolute left-3.5 top-1/2 -translate-y-1/2 text-xs font-mono font-bold text-[#8E7C80]">@</span>
+                        <input
+                          id="edit-profile-username"
+                          type="text"
+                          value={regUsername}
+                          onChange={(e) => {
+                            const clean = e.target.value.replace(/\s+/g, '').replace(/^@+/, '');
+                            setRegUsername(clean);
+                          }}
+                          className="w-full pl-8 pr-3.5 py-2.5 min-h-[44px] rounded-xl bg-white border border-[#E5D9D6] text-xs font-mono font-bold text-[#221719] focus:border-[#C93545] focus:ring-1 focus:ring-[#C93545] transition-all outline-none placeholder:text-[#9D8C90]"
+                          placeholder="alisher_01"
+                        />
+                      </div>
+                      <p className="text-[10.5px] text-[#7A686C] mt-1">
+                        3-20 belgi, lotin harflari va raqamlar, noyob bo'lishi shart.
+                      </p>
+                    </div>
+
+                    <div>
+                      <div className="flex items-center justify-between gap-2 mb-1.5">
+                        <label htmlFor="edit-profile-birthdate" className="text-xs font-bold text-[#36272A] flex items-center gap-1">
+                          <span>Tug'ilgan sana</span>
+                          {currentUser?.isProfileCompleted && <Lock className="w-3 h-3 text-[#8E7C80]" />}
+                        </label>
+                        <span className="text-[11px] font-bold text-[#A62433] tabular-nums">
+                          {calculateAge(regBirthDate, Number(regAge))} yosh
+                        </span>
+                      </div>
+                      <input
+                        id="edit-profile-birthdate"
+                        type="date"
+                        value={regBirthDate}
+                        disabled={Boolean(currentUser?.isProfileCompleted)}
+                        onChange={(e) => {
+                          const bDate = e.target.value;
+                          setRegBirthDate(bDate);
+                          const computedAge = calculateAge(bDate);
+                          setRegAge(String(computedAge));
+                        }}
+                        max={new Date().toISOString().split('T')[0]}
+                        className="w-full px-3.5 py-2.5 min-h-[44px] rounded-xl bg-white border border-[#E5D9D6] text-xs font-semibold text-[#221719] focus:border-[#C93545] focus:ring-1 focus:ring-[#C93545] transition-all outline-none cursor-pointer disabled:bg-[#FAF4F2] disabled:text-[#6B5B5E] disabled:cursor-not-allowed"
+                      />
+                      {currentUser?.isProfileCompleted && (
+                        <p className="text-[10.5px] text-[#7A686C] mt-1">Birlamchi tug'ilgan yil o'zgartirilmaydi.</p>
+                      )}
+                    </div>
+
+                    <div>
+                      <div className="flex items-center justify-between gap-2 mb-1.5">
+                        <label htmlFor="edit-profile-gender" className="text-xs font-bold text-[#36272A] flex items-center gap-1">
+                          <span>Jins</span>
+                          {currentUser?.isProfileCompleted && <Lock className="w-3 h-3 text-[#8E7C80]" />}
+                        </label>
+                        {currentUser?.isProfileCompleted && (
+                          <span className="text-[10.5px] text-emerald-700 font-bold">Birlamchi (o'zgarmas)</span>
+                        )}
+                      </div>
+                      <select
+                        id="edit-profile-gender"
+                        value={regGender}
+                        onChange={(e) => setRegGender(e.target.value as any)}
+                        disabled={Boolean(currentUser?.isProfileCompleted)}
+                        className="w-full px-3.5 py-2.5 min-h-[44px] rounded-xl bg-white border border-[#E5D9D6] text-xs font-semibold text-[#221719] focus:border-[#C93545] focus:ring-1 focus:ring-[#C93545] transition-all outline-none disabled:bg-[#FAF4F2] disabled:text-[#6B5B5E] disabled:cursor-not-allowed"
+                      >
+                        <option value="female">Ayol / Qiz</option>
+                        <option value="male">Erkak / Yigit</option>
+                      </select>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Section 3: Hudud va lokatsiya maxfiyligi */}
+                <div className="border-t border-[#EFE5E2] pt-5 space-y-3.5">
+                  <h3 className="text-[11px] font-bold uppercase tracking-[0.12em] text-[#8E7C80]">
+                    Hudud va lokatsiya maxfiyligi
+                  </h3>
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                    <div>
+                      <label htmlFor="edit-profile-region" className="block text-xs font-bold text-[#36272A] mb-1.5">
+                        Viloyat
+                      </label>
+                      <select
+                        id="edit-profile-region"
+                        value={regRegion}
+                        onChange={(e) => {
+                          const reg = e.target.value;
+                          setRegRegion(reg);
+                          setRegDistrict(UZ_LOCATIONS[reg]?.[0] || '');
+                        }}
+                        className="w-full px-3.5 py-2.5 min-h-[44px] rounded-xl bg-white border border-[#E5D9D6] text-xs font-semibold text-[#221719] focus:border-[#C93545] focus:ring-1 focus:ring-[#C93545] transition-all outline-none"
+                      >
+                        {Object.keys(UZ_LOCATIONS).map((reg, idx) => (
+                          <option key={`prof_reg_${reg}_${idx}`} value={reg}>{reg}</option>
+                        ))}
+                      </select>
+                    </div>
+
+                    <div>
+                      <label htmlFor="edit-profile-district" className="block text-xs font-bold text-[#36272A] mb-1.5">
+                        Tuman / Shahar
+                      </label>
+                      <select
+                        id="edit-profile-district"
+                        value={regDistrict}
+                        onChange={(e) => setRegDistrict(e.target.value)}
+                        className="w-full px-3.5 py-2.5 min-h-[44px] rounded-xl bg-white border border-[#E5D9D6] text-xs font-semibold text-[#221719] focus:border-[#C93545] focus:ring-1 focus:ring-[#C93545] transition-all outline-none"
+                      >
+                        {UZ_LOCATIONS[regRegion]?.map((dist, idx) => (
+                          <option key={`prof_dist_${dist}_${idx}`} value={dist}>{dist}</option>
+                        ))}
+                      </select>
+                    </div>
+
+                    <div>
+                      <label htmlFor="edit-profile-neighborhood" className="block text-xs font-bold text-[#36272A] mb-1.5">
+                        Mahalla / Ko'cha
+                      </label>
+                      <input
+                        id="edit-profile-neighborhood"
+                        type="text"
+                        placeholder="Mahalla"
+                        value={regNeighborhood}
+                        onChange={(e) => setRegNeighborhood(e.target.value)}
+                        className="w-full px-3.5 py-2.5 min-h-[44px] rounded-xl bg-white border border-[#E5D9D6] text-xs font-semibold text-[#221719] focus:border-[#C93545] focus:ring-1 focus:ring-[#C93545] transition-all outline-none placeholder:text-[#9D8C90]"
+                      />
+                    </div>
+                  </div>
+
+                  {/* Clean Combined Location & Privacy Control */}
+                  <div className="bg-white rounded-2xl border border-[#EFE5E2] divide-y divide-[#F2E8E6]">
+                    <div className="p-3.5 sm:px-4 flex items-center justify-between gap-3">
+                      <div className="min-w-0">
+                        <p className="text-xs font-bold text-[#221719] flex items-center gap-1.5">
+                          <MapPin className="w-3.5 h-3.5 text-[#C93545] shrink-0" />
+                          <span>Jonli GPS lokatsiya</span>
+                        </p>
+                        <p className="text-[11px] text-[#6B5B5E] mt-0.5">
+                          Yaqin atrofdagi foydalanuvchilarga xaritada ko'rinish
+                        </p>
+                      </div>
+                      <button
+                        type="button"
+                        role="switch"
+                        aria-checked={isLocationEnabled}
+                        aria-label="Jonli GPS lokatsiyani yoqish"
+                        onClick={() => handleToggleLocation(!isLocationEnabled)}
+                        className={`w-12 h-7 rounded-full transition-colors duration-200 p-1 flex items-center shrink-0 cursor-pointer ${
+                          isLocationEnabled ? 'bg-[#C93545] justify-end' : 'bg-[#D9CECB] justify-start'
+                        }`}
+                      >
+                        <span className="w-5 h-5 rounded-full bg-white shadow-xs" />
+                      </button>
+                    </div>
+
+                    <div className="p-3.5 sm:px-4 space-y-1.5">
+                      <label htmlFor="edit-profile-privacy" className="text-xs font-bold text-[#221719] flex items-center gap-1.5">
+                        <Shield className="w-3.5 h-3.5 text-[#C93545] shrink-0" />
+                        <span>Lokatsiya maxfiyligi</span>
+                      </label>
+                      <select
+                        id="edit-profile-privacy"
+                        value={regLocationVisibility}
+                        onChange={(e) => handleLocationVisibilityChange(e.target.value as any)}
+                        className="w-full px-3.5 py-2.5 min-h-[42px] rounded-xl bg-[#FAF4F2] border border-[#E5D9D6] text-xs font-semibold text-[#221719] focus:border-[#C93545] outline-none cursor-pointer"
+                      >
+                        <option value="mutual">Faqat obunachilarim va tanishlarimga (Tavsiya etiladi)</option>
+                        <option value="everyone">Barchaga ko'rinsin</option>
+                        <option value="ghost">Hech kimga ko'rsatmaslik (Yashirin rejim)</option>
+                      </select>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Section 4: Aloqa va bio */}
+                <div className="border-t border-[#EFE5E2] pt-5 space-y-3.5">
+                  <h3 className="text-[11px] font-bold uppercase tracking-[0.12em] text-[#8E7C80]">
+                    Aloqa va o'zingiz haqingizda
+                  </h3>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                    <div className="sm:col-span-2">
+                      <label htmlFor="edit-profile-phone" className="block text-xs font-bold text-[#36272A] mb-1.5">
+                        Telefon raqam
+                      </label>
+                      <SmartPhoneInput
+                        id="edit-profile-phone"
+                        value={regPhone}
+                        onChange={setRegPhone}
+                        testId="edit-profile-phone-input"
+                      />
+                    </div>
+                    <div>
+                      <label htmlFor="edit-profile-telegram" className="block text-xs font-bold text-[#36272A] mb-1.5">
+                        Telegram
+                      </label>
+                      <input
+                        id="edit-profile-telegram"
+                        type="text"
+                        placeholder="@username"
+                        value={regTelegram}
+                        onChange={(e) => setRegTelegram(e.target.value)}
+                        className="w-full px-3.5 py-2.5 min-h-[44px] rounded-xl bg-white border border-[#E5D9D6] text-xs font-semibold text-[#221719] focus:border-[#C93545] focus:ring-1 focus:ring-[#C93545] transition-all outline-none placeholder:text-[#9D8C90]"
+                      />
+                    </div>
+                    <div>
+                      <label htmlFor="edit-profile-instagram" className="block text-xs font-bold text-[#36272A] mb-1.5">
+                        Instagram
+                      </label>
+                      <input
+                        id="edit-profile-instagram"
+                        type="text"
+                        placeholder="@handle"
+                        value={regInstagram}
+                        onChange={(e) => setRegInstagram(e.target.value)}
+                        className="w-full px-3.5 py-2.5 min-h-[44px] rounded-xl bg-white border border-[#E5D9D6] text-xs font-semibold text-[#221719] focus:border-[#C93545] focus:ring-1 focus:ring-[#C93545] transition-all outline-none placeholder:text-[#9D8C90]"
+                      />
+                    </div>
+                  </div>
+
+                  <div>
+                    <label htmlFor="edit-profile-bio" className="block text-xs font-bold text-[#36272A] mb-1.5">
+                      O'zingiz haqingizda (Bio)
                     </label>
-                    <span className="text-[10px] text-[#A62433] font-bold">Bo'sh joy (probel) mumkin emas</span>
-                  </div>
-                  <div className="relative">
-                    <span className="absolute left-3.5 top-1/2 -translate-y-1/2 text-xs font-mono font-bold text-slate-400">@</span>
-                    <input 
-                      type="text" 
-                      value={regUsername}
-                      onChange={(e) => {
-                        const clean = e.target.value.replace(/\s+/g, '').replace(/^@+/, '');
-                        setRegUsername(clean);
-                      }}
-                      className="w-full pl-8 pr-4 py-3 rounded-xl bg-white border border-gray-300 text-xs font-mono font-bold text-gray-900 focus:border-red-500 focus:ring-1 focus:ring-red-500 transition-all outline-none placeholder:text-gray-400"
-                      placeholder="username (masalan: alisher_01)"
+                    <textarea
+                      id="edit-profile-bio"
+                      rows={3}
+                      value={regBio}
+                      onChange={(e) => setRegBio(e.target.value)}
+                      placeholder="Qiziqishlaringiz va o'zingiz haqingizda qisqacha yozing..."
+                      className="w-full px-3.5 py-2.5 rounded-xl bg-white border border-[#E5D9D6] text-xs font-medium text-[#221719] focus:border-[#C93545] focus:ring-1 focus:ring-[#C93545] transition-all outline-none placeholder:text-[#9D8C90] resize-none leading-relaxed"
                     />
                   </div>
-                  <p className="text-[10px] text-slate-500 mt-1">
-                    3-20 belgi, lotin harflari va raqamlar. Har bir foydalanuvchida yagona bo'lishi shart.
-                  </p>
-                </div>
-
-                <div>
-                  <label className="block text-[11px] font-bold text-slate-700 mb-1">Tug'ilgan sana (Kalendardan tanlang) 📅</label>
-                  <input 
-                    type="date" 
-                    value={regBirthDate}
-                    onChange={(e) => {
-                      const bDate = e.target.value;
-                      setRegBirthDate(bDate);
-                      const computedAge = calculateAge(bDate);
-                      setRegAge(String(computedAge));
-                    }}
-                    max={new Date().toISOString().split('T')[0]}
-                    className="w-full px-4 py-3 rounded-xl bg-white border border-gray-300 text-xs font-semibold text-gray-900 focus:border-red-500 focus:ring-1 focus:ring-red-500 transition-all outline-none cursor-pointer"
-                  />
-                  <p className="text-[10px] text-slate-500 mt-1 font-medium">
-                    Hozirgi yoshingiz: <span className="font-bold text-[#E8474A]">{calculateAge(regBirthDate, Number(regAge))} yoshda</span> (har yili avtomatik 1 yoshga ulg'ayadi)
-                  </p>
-                </div>
-
-                <div>
-                  <label className="block text-[11px] font-bold text-slate-700 mb-1 flex items-center justify-between">
-                    <span>Jins</span>
-                    {currentUser?.faceId?.verified && !isAdminTelegramUser(currentUser) && (
-                      <span className="text-[10px] text-emerald-600 font-bold">Face ID tasdiqlagan 🔒</span>
-                    )}
-                  </label>
-                  <select 
-                    value={regGender}
-                    onChange={(e) => setRegGender(e.target.value as any)}
-                    disabled={Boolean(currentUser?.faceId?.verified && !isAdminTelegramUser(currentUser))}
-                    className="w-full px-3.5 py-3 rounded-xl bg-white border border-gray-300 text-xs font-semibold text-gray-900 focus:border-red-500 focus:ring-1 focus:ring-red-500 transition-all outline-none disabled:bg-emerald-50/70 disabled:text-emerald-950"
-                  >
-                    <option value="female" className="text-gray-900 bg-white font-medium">Ayol / Qiz</option>
-                    <option value="male" className="text-gray-900 bg-white font-medium">Erkak / Yigit</option>
-                  </select>
-                </div>
-
-                <div>
-                  <label className="block text-[11px] font-bold text-slate-700 mb-1">Viloyat</label>
-                  <select 
-                    value={regRegion}
-                    onChange={(e) => { 
-                      const reg = e.target.value;
-                      setRegRegion(reg);
-                      setRegDistrict(UZ_LOCATIONS[reg]?.[0] || '');
-                    }}
-                    className="w-full px-4 py-3 rounded-xl bg-white border border-gray-300 text-xs font-semibold text-gray-900 focus:border-red-500 focus:ring-1 focus:ring-red-500 transition-all outline-none"
-                  >
-                    {Object.keys(UZ_LOCATIONS).map((reg, idx) => (
-                      <option key={`prof_reg_${reg}_${idx}`} value={reg} className="text-gray-900 bg-white font-medium">{reg}</option>
-                    ))}
-                  </select>
-                </div>
-
-                <div className="grid grid-cols-2 gap-2.5">
-                  <div>
-                    <label className="block text-[11px] font-bold text-slate-700 mb-1">Tuman / Shahar</label>
-                    <select 
-                      value={regDistrict}
-                      onChange={(e) => setRegDistrict(e.target.value)}
-                      className="w-full px-3.5 py-3 rounded-xl bg-white border border-gray-300 text-xs font-semibold text-gray-900 focus:border-red-500 focus:ring-1 focus:ring-red-500 transition-all outline-none"
-                    >
-                      {UZ_LOCATIONS[regRegion]?.map((dist, idx) => (
-                        <option key={`prof_dist_${dist}_${idx}`} value={dist} className="text-gray-900 bg-white font-medium">{dist}</option>
-                      ))}
-                    </select>
-                  </div>
-                  <div>
-                    <label className="block text-[11px] font-bold text-slate-700 mb-1">Mahalla / Ko'cha</label>
-                    <input 
-                      type="text" 
-                      placeholder="Mahalla"
-                      value={regNeighborhood}
-                      onChange={(e) => setRegNeighborhood(e.target.value)}
-                      className="w-full px-4 py-3 rounded-xl bg-white border border-gray-300 text-xs font-semibold text-gray-900 focus:border-red-500 focus:ring-1 focus:ring-red-500 transition-all outline-none placeholder:text-gray-400"
-                    />
-                  </div>
-                </div>
-
-                <div>
-                  <label className="block text-[11px] font-bold text-slate-700 mb-1">Telefon Raqam</label>
-                  <input 
-                    type="text" 
-                    value={regPhone}
-                    onChange={(e) => setRegPhone(e.target.value)}
-                    className="w-full px-4 py-3 rounded-xl bg-white border border-gray-300 text-xs font-semibold text-gray-900 focus:border-red-500 focus:ring-1 focus:ring-red-500 transition-all outline-none"
-                  />
-                </div>
-
-                <div className="grid grid-cols-2 gap-2.5">
-                  <div>
-                    <label className="block text-[11px] font-bold text-slate-700 mb-1">Telegram</label>
-                    <input 
-                      type="text" 
-                      placeholder="@username"
-                      value={regTelegram}
-                      onChange={(e) => setRegTelegram(e.target.value)}
-                      className="w-full px-4 py-3 rounded-xl bg-white border border-gray-300 text-xs font-semibold text-gray-900 focus:border-red-500 focus:ring-1 focus:ring-red-500 transition-all outline-none placeholder:text-gray-400"
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-[11px] font-bold text-slate-700 mb-1">Instagram</label>
-                    <input 
-                      type="text" 
-                      placeholder="@handle"
-                      value={regInstagram}
-                      onChange={(e) => setRegInstagram(e.target.value)}
-                      className="w-full px-4 py-3 rounded-xl bg-white border border-gray-300 text-xs font-semibold text-gray-900 focus:border-red-500 focus:ring-1 focus:ring-red-500 transition-all outline-none placeholder:text-gray-400"
-                    />
-                  </div>
-                </div>
-
-                <div>
-                  <label className="block text-[11px] font-bold text-slate-700 mb-1">O'zingiz haqingizda (Bio)</label>
-                  <textarea 
-                    rows={2}
-                    value={regBio}
-                    onChange={(e) => setRegBio(e.target.value)}
-                    className="w-full px-4 py-3 rounded-xl bg-white border border-gray-300 text-xs font-semibold text-gray-900 focus:border-red-500 focus:ring-1 focus:ring-red-500 transition-all outline-none placeholder:text-gray-400"
-                  />
                 </div>
               </div>
 
-              <div className="flex space-x-3 pt-2">
-                <button 
+              {/* Sticky Modal Footer */}
+              <div className="shrink-0 bg-white border-t border-[#F2E8E6] px-5 sm:px-7 py-4 flex items-center justify-end gap-3">
+                <button
                   type="button"
                   onClick={() => setShowProfileModal(false)}
-                  className="px-5 py-3.5 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold text-xs transition duration-200 hover:scale-[1.02] active:scale-95"
+                  className="px-5 min-h-[44px] rounded-xl bg-[#FAF4F2] hover:bg-[#F2E8E6] text-[#57484B] font-bold text-xs transition cursor-pointer"
                 >
-                  Orqaga
+                  Bekor qilish
                 </button>
-                <button 
+                <button
                   type="submit"
-                  className="flex-1 py-3.5 rounded-xl bg-gradient-to-r from-red-500 via-pink-500 to-rose-600 hover:from-red-600 hover:to-pink-600 text-white font-bold text-xs shadow-lg shadow-pink-500/25 transition duration-200 hover:scale-[1.02] active:scale-95"
+                  disabled={isSavingProfile || isUploadingBanner}
+                  data-testid="edit-profile-submit-btn"
+                  className="px-7 min-h-[44px] rounded-xl bg-gradient-to-r from-[#C93545] to-[#A62433] hover:opacity-95 text-white font-bold text-xs shadow-md transition disabled:opacity-50 cursor-pointer"
                 >
-                  Saqlash va Boshlash ✨
+                  {isSavingProfile ? 'Saqlanmoqda...' : 'Saqlash'}
                 </button>
               </div>
             </form>
@@ -6273,6 +6585,18 @@ export default function App() {
             }
           }}
         />
+      )}
+
+      {/* --- NON-INTRUSIVE TOAST NOTIFICATION --- */}
+      {toastMsg && (
+        <div
+          role="status"
+          aria-live="polite"
+          className="fixed bottom-24 left-1/2 -translate-x-1/2 z-[180] px-4 py-2.5 rounded-full bg-[#221719] text-white text-xs font-bold shadow-xl border border-white/15 flex items-center gap-2 pointer-events-none"
+        >
+          <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
+          <span>{toastMsg}</span>
+        </div>
       )}
 
     </div>

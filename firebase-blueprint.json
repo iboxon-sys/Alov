@@ -37,6 +37,20 @@
             "lat": { "type": "number" },
             "lng": { "type": "number" }
           }
+        },
+        "wallet": {
+          "type": "object",
+          "properties": {
+            "balanceDiamonds": { "type": "number" },
+            "pendingDiamonds": { "type": "number" },
+            "diamondProgress": { "type": "number" },
+            "balanceUzs": { "type": "number" },
+            "pendingUzs": { "type": "number" },
+            "totalEarnedDiamonds": { "type": "number" },
+            "totalWithdrawnUzs": { "type": "number" },
+            "exchangeRateUzs": { "type": "number" },
+            "unlockWindowHours": { "type": "number" }
+          }
         }
       },
       "required": ["uid", "id", "name"]

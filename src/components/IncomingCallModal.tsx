@@ -9,15 +9,18 @@ interface IncomingCallModalProps {
     name: string;
     avatar?: string;
   };
+  callMode?: 'audio' | 'video';
   onAccept: () => void;
   onReject: () => void;
 }
 
 export const IncomingCallModal: React.FC<IncomingCallModalProps> = ({
   caller,
+  callMode = 'video',
   onAccept,
   onReject
 }) => {
+  const isAudioOnly = callMode === 'audio';
   useEffect(() => {
     callNotification.startRingtone();
     callNotification.showCallNotification(caller.name, caller.avatar, caller.uid);
@@ -55,19 +58,19 @@ export const IncomingCallModal: React.FC<IncomingCallModalProps> = ({
           <div className="flex items-center space-x-3 min-w-0 pr-2">
             <div className="relative shrink-0">
               <img 
-                src={caller.avatar || '/assets/aistudio/image_e20a1307.png'} 
+                src={caller.avatar || '/assets/aistudio/image_e20a1307.webp'} 
                 alt={caller.name} 
                 className="w-12 h-12 rounded-full object-cover border-2 border-emerald-400"
               />
               <span className="absolute -bottom-0.5 -right-0.5 w-4 h-4 rounded-full bg-emerald-500 border-2 border-slate-900 flex items-center justify-center">
-                <Video className="w-2.5 h-2.5 text-white animate-pulse" />
+                {isAudioOnly ? <Phone className="w-2.5 h-2.5 text-white animate-pulse" /> : <Video className="w-2.5 h-2.5 text-white animate-pulse" />}
               </span>
             </div>
             <div className="min-w-0">
               <h4 className="font-extrabold text-sm text-white truncate">{caller.name}</h4>
               <p className="text-[11px] text-emerald-400 font-semibold animate-pulse flex items-center space-x-1">
                 <Volume2 className="w-3 h-3" />
-                <span>Kiruvchi video qo'ng'iroq...</span>
+                <span>{isAudioOnly ? "Kiruvchi audio qo'ng'iroq..." : "Kiruvchi video qo'ng'iroq..."}</span>
               </p>
             </div>
           </div>
@@ -103,8 +106,8 @@ export const IncomingCallModal: React.FC<IncomingCallModalProps> = ({
 
           {/* Top small app badge */}
           <div className="flex items-center space-x-1.5 bg-white/10 px-3 py-1 rounded-full text-[10px] text-emerald-300 font-bold uppercase tracking-wider mb-6">
-            <Video className="w-3 h-3 text-emerald-400 animate-pulse" />
-            <span>Alov.uz Video Qo'ng'iroq</span>
+            {isAudioOnly ? <Phone className="w-3 h-3 text-emerald-400 animate-pulse" /> : <Video className="w-3 h-3 text-emerald-400 animate-pulse" />}
+            <span>{isAudioOnly ? "Alov.uz Audio Qo'ng'iroq" : "Alov.uz Video Qo'ng'iroq"}</span>
           </div>
 
           {/* Avatar with pulsing wave rings */}
@@ -113,7 +116,7 @@ export const IncomingCallModal: React.FC<IncomingCallModalProps> = ({
             <div className="absolute -inset-6 rounded-full border border-emerald-500/20 animate-pulse" />
             <div className="relative w-28 h-28 rounded-full overflow-hidden border-4 border-emerald-400/80 shadow-[0_0_35px_rgba(16,185,129,0.5)]">
               <img 
-                src={caller.avatar || '/assets/aistudio/image_e20a1307.png'} 
+                src={caller.avatar || '/assets/aistudio/image_e20a1307.webp'} 
                 alt={caller.name} 
                 className="w-full h-full object-cover"
               />
@@ -127,7 +130,7 @@ export const IncomingCallModal: React.FC<IncomingCallModalProps> = ({
           <div className="mt-4 mb-8 space-y-1">
             <h3 className="text-xl font-extrabold text-white tracking-tight">{caller.name}</h3>
             <p className="text-xs text-emerald-400 font-medium animate-pulse flex items-center justify-center space-x-1">
-              <span>Kiruvchi video qo'ng'iroq...</span>
+              <span>{isAudioOnly ? "Kiruvchi audio qo'ng'iroq..." : "Kiruvchi video qo'ng'iroq..."}</span>
             </p>
           </div>
 
@@ -143,7 +146,7 @@ export const IncomingCallModal: React.FC<IncomingCallModalProps> = ({
               >
                 <PhoneOff className="w-7 h-7" />
               </button>
-              <span className="text-xs text-rose-300 font-bold">Rad etish</span>
+              <span className="text-xs text-rose-200 font-bold">Rad etish</span>
             </div>
 
             {/* Accept Button (Green) */}

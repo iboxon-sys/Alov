@@ -11,6 +11,7 @@ export interface OneOnOneCallModalProps {
     uid: string;
     name: string;
     avatar?: string;
+    gender?: string;
   };
   remoteUser: {
     uid: string;
@@ -18,10 +19,13 @@ export interface OneOnOneCallModalProps {
     name: string;
     avatar?: string;
     status?: string;
+    gender?: string;
   };
+  callMode?: 'audio' | 'video';
   isIncoming?: boolean;
   incomingOffer?: any;
   onClose: () => void;
+  onBillingAlert?: (msg: string) => void;
 }
 
 const ICE_SERVERS: RTCConfiguration = {
@@ -84,18 +88,23 @@ export const OneOnOneCallModal: React.FC<OneOnOneCallModalProps> = ({
   socket,
   currentUser,
   remoteUser,
+  callMode = 'video',
   isIncoming = false,
   incomingOffer = null,
-  onClose
+  onClose,
+  onBillingAlert
 }) => {
+  const isAudioOnly = callMode === 'audio';
   // Call status
   const [callStatus, setCallStatus] = useState<'calling' | 'connected' | 'ended'>('calling');
   const [isMicEnabled, setIsMicEnabled] = useState(true);
-  const [isCameraEnabled, setIsCameraEnabled] = useState(true);
+  const [isCameraEnabled, setIsCameraEnabled] = useState(!isAudioOnly);
   const [isScreenSharing, setIsScreenSharing] = useState(false);
   const [remoteIsScreenSharing, setRemoteIsScreenSharing] = useState(false);
   const [permissionWarning, setPermissionWarning] = useState<string | null>(null);
   const [duration, setDuration] = useState(0);
+  const [earnedSessionDiamonds, setEarnedSessionDiamonds] = useState(0);
+  const lastBilledMinuteRef = useRef(0);
 
   // References
   const localVideoRef = useRef<HTMLVideoElement | null>(null);
@@ -116,21 +125,33 @@ export const OneOnOneCallModal: React.FC<OneOnOneCallModalProps> = ({
       let stream: MediaStream | null = null;
 
       try {
-        // Tier 1: Try Camera + Mic
-        stream = await navigator.mediaDevices.getUserMedia({
-          video: {
-            width: { ideal: 1920, max: 1920 },
-            height: { ideal: 1080, max: 1080 },
-            frameRate: { ideal: 30, max: 30 },
-            facingMode: 'user'
-          },
-          audio: {
-            echoCancellation: true,
-            noiseSuppression: true,
-            autoGainControl: true,
-            sampleRate: 48000
-          }
-        });
+        // Tier 1: Try Camera + Mic (or Audio-only when callMode === 'audio')
+        stream = await navigator.mediaDevices.getUserMedia(
+          isAudioOnly
+            ? {
+                video: false,
+                audio: {
+                  echoCancellation: true,
+                  noiseSuppression: true,
+                  autoGainControl: true,
+                  sampleRate: 48000,
+                },
+              }
+            : {
+                video: {
+                  width: { ideal: 1920, max: 1920 },
+                  height: { ideal: 1080, max: 1080 },
+                  frameRate: { ideal: 30, max: 30 },
+                  facingMode: 'user',
+                },
+                audio: {
+                  echoCancellation: true,
+                  noiseSuppression: true,
+                  autoGainControl: true,
+                  sampleRate: 48000,
+                },
+              }
+        );
       } catch (camErr: any) {
         console.warn("Camera/Mic initial access warning:", camErr?.message || camErr);
         // Tier 2: Try Audio only if camera is blocked or not available
@@ -239,7 +260,8 @@ export const OneOnOneCallModal: React.FC<OneOnOneCallModalProps> = ({
           socket?.emit('call-user', {
             targetUid,
             offer,
-            caller: currentUser
+            caller: currentUser,
+            callMode
           });
         }
       } catch (err: any) {
@@ -308,7 +330,7 @@ export const OneOnOneCallModal: React.FC<OneOnOneCallModalProps> = ({
     };
   }, []);
 
-  // Duration timer when connected
+  // Duration timer when connected + automatic per-minute coin/diamond billing
   useEffect(() => {
     if (callStatus === 'connected') {
       timerRef.current = setInterval(() => {
@@ -319,6 +341,36 @@ export const OneOnOneCallModal: React.FC<OneOnOneCallModalProps> = ({
       if (timerRef.current) clearInterval(timerRef.current);
     };
   }, [callStatus]);
+
+  useEffect(() => {
+    if (callStatus !== 'connected' || duration <= 0) return;
+    const completedMinutes = Math.floor(duration / 60);
+    if (completedMinutes > lastBilledMinuteRef.current && !isIncoming) {
+      lastBilledMinuteRef.current = completedMinutes;
+      fetch('/api/calls/bill-minute', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          callerUid: currentUser.uid,
+          calleeUid: targetUid,
+          callType: isAudioOnly ? 'audio' : 'video',
+          minuteIndex: completedMinutes,
+        }),
+      })
+        .then(async (res) => {
+          const data = await res.json();
+          if (!res.ok) {
+            onBillingAlert?.(data.message || "Balansda yetarli moneta qolmadi — qo'ng'iroq yakunlandi.");
+            handleHangup(true);
+            return;
+          }
+          if (data?.earnedDiamonds > 0) {
+            setEarnedSessionDiamonds((prev) => prev + Number(data.earnedDiamonds));
+          }
+        })
+        .catch(() => {});
+    }
+  }, [duration, callStatus, isIncoming, isAudioOnly, currentUser.uid, targetUid]);
 
   // Clean all tracks and connections
   const cleanup = () => {
@@ -542,7 +594,7 @@ export const OneOnOneCallModal: React.FC<OneOnOneCallModalProps> = ({
               <div className="relative">
                 <div className="w-28 h-28 rounded-full overflow-hidden border-4 border-rose-500/80 shadow-[0_0_40px_rgba(244,63,94,0.6)] animate-pulse">
                   <img 
-                    src={remoteUser.avatar || '/assets/aistudio/image_e20a1307.png'} 
+                    src={remoteUser.avatar || '/assets/aistudio/image_e20a1307.webp'} 
                     alt={remoteUser.name} 
                     className="w-full h-full object-cover"
                   />
@@ -551,7 +603,7 @@ export const OneOnOneCallModal: React.FC<OneOnOneCallModalProps> = ({
               </div>
               <div className="text-center space-y-1">
                 <h3 className="text-xl font-bold text-white">{remoteUser.name}</h3>
-                <p className="text-sm text-rose-300 font-medium animate-pulse flex items-center justify-center space-x-1.5">
+                <p className="text-sm text-rose-200 font-medium animate-pulse flex items-center justify-center space-x-1.5">
                   <RefreshCw className="w-4 h-4 animate-spin" />
                   <span>{isIncoming ? "Ulanmoqda..." : (remoteUser.status === 'online' ? "Jiringlamoqda..." : "Kutilmoqda...")}</span>
                 </p>
@@ -559,7 +611,28 @@ export const OneOnOneCallModal: React.FC<OneOnOneCallModalProps> = ({
             </div>
           )}
 
-          {/* Local PiP (Picture-in-Picture) Preview */}
+          {/* Audio-only live call avatar stage */}
+          {isAudioOnly && callStatus === 'connected' && (
+            <div className="absolute inset-0 flex flex-col items-center justify-center bg-gradient-to-b from-[#131520] via-[#0B0C12] to-black z-10 space-y-4">
+              <div className="relative">
+                <div className="w-32 h-32 rounded-full overflow-hidden border-4 border-emerald-400/70 shadow-[0_0_50px_rgba(52,211,153,0.35)]">
+                  <img
+                    src={remoteUser.avatar || '/assets/aistudio/image_e20a1307.webp'}
+                    alt={remoteUser.name}
+                    className="w-full h-full object-cover"
+                  />
+                </div>
+                <div className="absolute -inset-3 rounded-full border border-emerald-400/25 animate-ping pointer-events-none" />
+              </div>
+              <div className="text-center space-y-1">
+                <h3 className="text-2xl font-bold text-white">{remoteUser.name}</h3>
+                <p className="text-xs font-mono text-emerald-300">Audio aloqa • {formatDuration(duration)}</p>
+              </div>
+            </div>
+          )}
+
+          {/* Local PiP (Picture-in-Picture) Preview — hidden in audio-only mode */}
+          {!isAudioOnly && (
           <div className="absolute top-4 right-4 z-20 w-28 h-40 md:w-44 md:h-60 rounded-2xl overflow-hidden border-2 border-white/20 bg-slate-800 shadow-2xl backdrop-blur-md">
             <video 
               ref={localVideoRef} 
@@ -578,11 +651,20 @@ export const OneOnOneCallModal: React.FC<OneOnOneCallModalProps> = ({
               <span>{isScreenSharing ? "Ekraningiz" : "Siz"}</span>
             </div>
           </div>
+          )}
 
           {/* Top Status Banner */}
-          <div className="absolute top-4 left-4 z-20 flex items-center space-x-3 bg-black/50 backdrop-blur-md px-3.5 py-1.5 rounded-full border border-white/10 text-white">
+          <div className="absolute top-4 left-4 z-20 flex flex-wrap items-center gap-2 bg-black/60 backdrop-blur-md px-3.5 py-1.5 rounded-full border border-white/10 text-white">
             <div className="w-2.5 h-2.5 rounded-full bg-emerald-400 animate-pulse" />
             <span className="text-xs font-bold">{remoteUser.name}</span>
+            <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-cyan-500/20 text-cyan-300 border border-cyan-500/30">
+              {isAudioOnly ? 'Audio: 10 💎/daq' : 'Video: 20 💎/daq'}
+            </span>
+            {earnedSessionDiamonds > 0 && (
+              <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/30">
+                +{earnedSessionDiamonds} 💎
+              </span>
+            )}
             {callStatus === 'connected' && (
               <span className="text-xs text-slate-300 font-mono pl-1 border-l border-white/20">
                 {formatDuration(duration)}
@@ -614,7 +696,8 @@ export const OneOnOneCallModal: React.FC<OneOnOneCallModalProps> = ({
             {isMicEnabled ? <Mic className="w-5 h-5 md:w-6 md:h-6" /> : <MicOff className="w-5 h-5 md:w-6 md:h-6" />}
           </button>
 
-          {/* Camera On/Off */}
+          {/* Camera On/Off (only in video mode) */}
+          {!isAudioOnly && (
           <button 
             type="button"
             onClick={toggleCamera}
@@ -628,6 +711,7 @@ export const OneOnOneCallModal: React.FC<OneOnOneCallModalProps> = ({
           >
             {isCameraEnabled ? <VideoIcon className="w-5 h-5 md:w-6 md:h-6" /> : <VideoOff className="w-5 h-5 md:w-6 md:h-6" />}
           </button>
+          )}
 
           {/* Screen Sharing (getDisplayMedia) */}
           <button 

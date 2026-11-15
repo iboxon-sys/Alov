@@ -292,6 +292,9 @@ export default function App() {
   const [pendingFaceId, setPendingFaceId] = useState<FaceIdProfileData | null>(null);
   const [showProfileFaceIdModal, setShowProfileFaceIdModal] = useState<boolean>(false);
   const [hasStartedBotError, setHasStartedBotError] = useState<boolean>(false);
+  const [privacyAgreed, setPrivacyAgreed] = useState<boolean>(false);
+  const [showPrivacyModal, setShowPrivacyModal] = useState<boolean>(false);
+  const [privacyReadToBottom, setPrivacyReadToBottom] = useState<boolean>(false);
 
   // Profile Form Fields (including Avatar URL and Location Visibility)
   const [regName, setRegName] = useState('');
@@ -2234,6 +2237,8 @@ export default function App() {
     setPendingGoogleUser(null);
     setPendingFaceId(null);
     setHasStartedBotError(false);
+    setPrivacyAgreed(false);
+    setPrivacyReadToBottom(false);
     setErrorMsg('');
     setRegName(clean.regName);
     setRegUsername(clean.regUsername);
@@ -2308,6 +2313,10 @@ export default function App() {
     e.preventDefault();
     if (!authEmail || !authPassword || !regName) {
       setErrorMsg("Iltimos, email, parol va ism-familiyani to'ldiring!");
+      return;
+    }
+    if (!privacyAgreed) {
+      setErrorMsg("Iltimos, Maxfiylik siyosati bilan tanishib chiqing va rozilik bildiring.");
       return;
     }
     try {
@@ -2387,6 +2396,10 @@ export default function App() {
     if (!pendingGoogleUser) return;
     if (!regName.trim()) {
       setErrorMsg("Iltimos, ismingizni kiriting!");
+      return;
+    }
+    if (!privacyAgreed) {
+      setErrorMsg("Iltimos, Maxfiylik siyosati bilan tanishib chiqing va rozilik bildiring.");
       return;
     }
     if (authOrigin !== 'email' && !pendingFaceId?.verified) {
@@ -2672,6 +2685,10 @@ export default function App() {
     if (!pendingTgUser) return;
     if (!regName.trim()) {
       setErrorMsg("Iltimos, ismingizni kiriting!");
+      return;
+    }
+    if (!privacyAgreed) {
+      setErrorMsg("Iltimos, Maxfiylik siyosati bilan tanishib chiqing va rozilik bildiring.");
       return;
     }
     if (!pendingFaceId?.verified) {
@@ -5365,6 +5382,19 @@ export default function App() {
                     </div>
                   </div>
 
+                  <div className="flex items-start space-x-2.5 pt-1">
+                    <input
+                      type="checkbox"
+                      id="google_privacy_checkbox"
+                      checked={privacyAgreed}
+                      onChange={(e) => setPrivacyAgreed(e.target.checked)}
+                      className="mt-0.5 w-4 h-4 rounded bg-[#171A26] border-white/20 text-rose-500 focus:ring-rose-500/40 cursor-pointer"
+                    />
+                    <label htmlFor="google_privacy_checkbox" className="text-[11px] text-zinc-300 select-none cursor-pointer leading-relaxed text-left">
+                      Men <button type="button" onClick={() => setShowPrivacyModal(true)} className="text-rose-400 font-bold underline hover:text-rose-300">Maxfiylik siyosati</button> bilan tanishib chiqdim va roziman
+                    </label>
+                  </div>
+
                   <button 
                     type="submit"
                     disabled={isLoggingIn}
@@ -5761,6 +5791,19 @@ export default function App() {
                     </p>
                   </div>
 
+                  <div className="flex items-start space-x-2.5 pt-1">
+                    <input
+                      type="checkbox"
+                      id="tg_privacy_checkbox"
+                      checked={privacyAgreed}
+                      onChange={(e) => setPrivacyAgreed(e.target.checked)}
+                      className="mt-0.5 w-4 h-4 rounded bg-[#171A26] border-white/20 text-rose-500 focus:ring-rose-500/40 cursor-pointer"
+                    />
+                    <label htmlFor="tg_privacy_checkbox" className="text-[11px] text-zinc-300 select-none cursor-pointer leading-relaxed text-left">
+                      Men <button type="button" onClick={() => setShowPrivacyModal(true)} className="text-rose-400 font-bold underline hover:text-rose-300">Maxfiylik siyosati</button> bilan tanishib chiqdim va roziman
+                    </label>
+                  </div>
+
                   <button 
                     type="submit"
                     disabled={isLoggingIn}
@@ -5937,6 +5980,20 @@ export default function App() {
                           </button>
                         </div>
                       </div>
+
+                      <div className="flex items-start space-x-2.5 pt-1">
+                        <input
+                          type="checkbox"
+                          id="email_privacy_checkbox"
+                          checked={privacyAgreed}
+                          onChange={(e) => setPrivacyAgreed(e.target.checked)}
+                          className="mt-0.5 w-4 h-4 rounded bg-[#171A26] border-white/20 text-rose-500 focus:ring-rose-500/40 cursor-pointer"
+                        />
+                        <label htmlFor="email_privacy_checkbox" className="text-[11px] text-zinc-300 select-none cursor-pointer leading-relaxed text-left">
+                          Men <button type="button" onClick={() => setShowPrivacyModal(true)} className="text-rose-400 font-bold underline hover:text-rose-300">Maxfiylik siyosati</button> bilan tanishib chiqdim va roziman
+                        </label>
+                      </div>
+
                       <button 
                         type="submit"
                         disabled={isLoggingIn}
@@ -5982,6 +6039,91 @@ export default function App() {
               </div>
             )}
           </motion.div>
+        </div>
+      )}
+
+      {/* --- PRIVACY POLICY MODAL --- */}
+      {showPrivacyModal && (
+        <div className="fixed inset-0 z-[160] flex items-center justify-center p-4 bg-black/80 backdrop-blur-md">
+          <div className="bg-[#12141E] text-zinc-100 rounded-[24px] w-full max-w-2xl max-h-[90vh] flex flex-col border border-white/15 shadow-2xl overflow-hidden animate-fadeIn">
+            <div className="p-5 border-b border-white/10 flex items-center justify-between bg-[#181A26]">
+              <h2 className="text-lg font-editorial font-bold text-white tracking-tight">Maxfiylik Siyosati (Privacy Policy)</h2>
+              <button 
+                onClick={() => setShowPrivacyModal(false)}
+                className="w-8 h-8 rounded-full bg-white/10 hover:bg-rose-500/20 text-zinc-300 hover:text-white flex items-center justify-center transition cursor-pointer"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+            
+            <div 
+              onScroll={(e) => {
+                const el = e.currentTarget;
+                if (el.scrollTop + el.clientHeight >= el.scrollHeight - 30) {
+                  setPrivacyReadToBottom(true);
+                }
+              }}
+              className="p-6 overflow-y-auto space-y-4 text-xs text-zinc-300 leading-relaxed text-left flex-1"
+            >
+              <p className="font-bold text-white text-sm">Oxirgi yangilangan sana: 2026-yil 16-noyabr</p>
+              <p>Ushbu Maxfiylik Siyosati Alov.uz platformasi (keyingi o‘rinlarda — "Platforma") foydalanuvchilarining shaxsiy ma'lumotlarini qanday yig‘ishi, saqlashi, qayta ishlashi va himoya qilishini tartibga soladi. Platformadan foydalanish orqali siz ushbu shartlarga rozilik bildirasiz.</p>
+              
+              <h3 className="font-bold text-white text-sm pt-2">1. Yig‘iladigan ma'lumotlar</h3>
+              <p>Platformamiz xizmatlarini ko‘rsatish va xavfsizlikni ta'minlash maqsadida quyidagi ma'lumotlar yig‘iladi:</p>
+              <p>• Ro‘yxatdan o‘tish ma'lumotlari: Foydalanuvchi ismi, foydalanuvchi nomi (username), jinsi va ro‘yxatdan o‘tgan vaqti.</p>
+              <p>• Profil rasmi: Foydalanuvchi tomonidan yuklangan yoki kamera orqali olingan oddiy profil avatari.</p>
+              <p>• Texnik ma'lumotlar: Platforma xavfsizligini ta'minlash va firibgarlikning oldini olish uchun IP-manzillar va qurilma loglari.</p>
+
+              <h3 className="font-bold text-white text-sm pt-2">2. Biometrik ma'lumotlar va Face ID bo‘yicha tushuntirish</h3>
+              <p>Platformamizda yuzni aniqlash (Face ID / Liveness Detection) texnologiyasi faqatgina foydalanuvchining real inson ekanligini tekshirish (soxta profil yaratishning oldini olish) uchun real vaqt rejimida ishlatiladi.</p>
+              <p>Foydalanuvchining yuz vektorlari, o‘lchovlari yoki biometrik shablonlari serverimizda yoki ma'lumotlar bazasida aslo saqlanmaydi. Tasdiqlashdan so‘ng faqat oddiy profil rasmi saqlanib qoladi.</p>
+
+              <h3 className="font-bold text-white text-sm pt-2">3. Ma'lumotlardan foydalanish maqsadi</h3>
+              <p>To‘plangan ma'lumotlar quyidagi maqsadlarda ishlatiladi:</p>
+              <p>• Platformaning ishlashini ta'minlash va foydalanuvchilarni o‘zaro bog‘lash.</p>
+              <p>• Xavfsizlikni ta'minlash, soxta akkauntlar va spamning oldini olish.</p>
+              <p>• Qonunbuzarliklar yoki shubhali harakatlar sodir bo‘lganda, O‘zbekiston Respublikasining amaldagi qonunchiligiga muvofiq vakolatli davlat organlarining (IIV) rasmiy so‘rovlariga zarur texnik ma'lumotlarni taqdim etish.</p>
+
+              <h3 className="font-bold text-white text-sm pt-2">4. Admin panel va Moderatsiya</h3>
+              <p>Platforma ma'muriyati tizim xavfsizligini nazorat qilish va qoidalarga rioya etilishini tekshirish maqsadida foydalanuvchilarning asosiy ma'lumotlari (ismi, profil rasmi, ro‘yxatdan o‘tgan vaqti) bo‘yicha texnik xabarnomalar (loglar) olish huquqiga ega.</p>
+              <p>Bu ma'lumotlar faqat xavfsizlik va moderatsiya maqsadida ishlatiladi, uchinchi shaxslarga sotilmaydi va shaxsiy maqsadlarda shaxsiy qurilmalarga saqlab olinmaydi.</p>
+
+              <h3 className="font-bold text-white text-sm pt-2">5. Videoqo‘ng‘iroqlar maxfiyligi (End-to-End Encryption)</h3>
+              <p>Platformamizdagi barcha video va ovozli qo‘ng‘iroqlar 100% End-to-End Shifrlangan (E2EE) hisoblanadi.</p>
+              <p>Qo‘ng‘iroqlar mazmuni va videolavhalar serverimizda yozib olinmaydi va saqlanmaydi. Suhbatdoshlar o‘rtasidagi ma'lumotlar faqat ularning o‘ziga tegishli bo‘lib, ma'muriyat ularni ko‘ra olmaydi.</p>
+
+              <h3 className="font-bold text-white text-sm pt-2">6. Taqiqlangan harakatlar va Kontent cheklovi</h3>
+              <p>Platforma orqali har qanday zararli dasturlar (.apk, .exe va boshqa virusli fayllar), 100% taqiqlangan behayo (18+) kontent, shantaj materiallari va firibgarlik havolalarini tarqatish qat'iyan taqiqlanadi.</p>
+              <p>Shubhali yoki zararli fayllar aniqlansa, tizim ularni avtomatik bloklaydi. Qoidalarni buzgan foydalanuvchilarning akkaunti ogohlantirishsiz bloklanadi va ularning ma'lumotlari qonun doirasida huquq-tartibot organlariga taqdim etilishi mumkin.</p>
+
+              <h3 className="font-bold text-white text-sm pt-2">7. Foydalanuvchining huquq va majburiyatlari</h3>
+              <p>Har bir foydalanuvchi o‘z shaxsiy ma'lumotlarini o‘chirishni yoki akkauntini yopishni talab qilish huquqiga ega.</p>
+              <p>Foydalanuvchi o‘z harakatlari va boshqalar bilan muloqotdagi odob-axloq qoidalari uchun shaxsan o‘zi javobgardir. Shubhali yoki tahdidli holatlar yuz berganda "Shikoyat qilish" (Report) tugmasidan foydalanish tavsiya etiladi.</p>
+
+              {!privacyReadToBottom && (
+                <div className="p-3 bg-amber-500/10 border border-amber-400/30 rounded-xl text-amber-300 text-center font-bold text-xs animate-pulse">
+                  ⬇️ Matnni oxirigacha o'qish uchun pastga aylantiring...
+                </div>
+              )}
+            </div>
+
+            <div className="p-4 border-t border-white/10 bg-[#181A26] flex items-center justify-between">
+              <span className="text-[11px] text-zinc-400">
+                {privacyReadToBottom ? "✅ Matn oxirigacha o'qildi" : "⚠️ Matnni oxirigacha o'qing"}
+              </span>
+              <button
+                type="button"
+                disabled={!privacyReadToBottom}
+                onClick={() => {
+                  setPrivacyAgreed(true);
+                  setShowPrivacyModal(false);
+                }}
+                className="py-2.5 px-6 rounded-xl bg-gradient-to-r from-[#E11D48] to-rose-600 text-white font-bold text-xs shadow-md hover:brightness-110 disabled:opacity-40 disabled:cursor-not-allowed transition cursor-pointer"
+              >
+                Roziman
+              </button>
+            </div>
+          </div>
         </div>
       )}
 

@@ -3007,7 +3007,9 @@ Suhbatlashish qoidalaringiz:
         age: lockedAge,
         phone: formattedSyncedPhone,
         username: rawUsername,
-        name: fetchedName || (!isPlaceholderOrUsername(user.name, incomingTgHandle, incomingPhone) ? user.name : '') || (!isPlaceholderOrUsername(existing.name, incomingTgHandle, incomingPhone) ? existing.name : '') || (isTelegramAccount ? '' : 'Foydalanuvchi'),
+        name: (user.name && user.name.trim() && !isPlaceholderOrUsername(user.name, incomingTgHandle, incomingPhone)) 
+          ? user.name.trim() 
+          : (fetchedName || (!isPlaceholderOrUsername(existing.name, incomingTgHandle, incomingPhone) ? existing.name : '') || (isTelegramAccount ? '' : 'Foydalanuvchi')),
         avatar: faceIdAvatar || (isTelegramAccount && !isAdminAccount && !isAlreadyCompleted ? '' : fetchedAvatar) || fallbackAvatar,
         banner: user.banner !== undefined ? user.banner : (existing.banner || ''),
         coins: (existing && existing.coins !== undefined) ? existing.coins : (user.coins !== undefined ? user.coins : 100),

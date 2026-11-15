@@ -18,6 +18,9 @@ import {
   isHlsStreamUrl,
   extractTwitterStatusPath,
   extractInstagramShortcode,
+  inferAudioFileExtension,
+  buildFfmpegMp3Args,
+  deriveAudioMetadataFromUrl,
 } from './src/utils/videoImport';
 import { parseMediaLink } from './src/utils/mediaLinks';
 import {
@@ -53,6 +56,11 @@ import {
   type PostComment
 } from './src/utils/posts';
 import { formatPhoneNumberPretty } from './src/utils/phone';
+import {
+  buildCoinPurchaseRequest,
+  canReviewCoinRequest,
+  type CoinPurchaseRequest,
+} from './src/utils/coinRequests';
 
 dotenv.config();
 
@@ -356,6 +364,12 @@ async function startServer() {
     res.setHeader('Content-Type', contentType);
     res.setHeader('Content-Length', stat.size);
     res.setHeader('Cache-Control', 'public, max-age=86400');
+    if (req.query.download === '1') {
+      const requestedName = String(req.query.filename || safeName)
+        .replace(/[^a-zA-Z0-9._-]/g, '_')
+        .slice(0, 80);
+      res.setHeader('Content-Disposition', `attachment; filename="${requestedName || safeName}"`);
+    }
     res.sendFile(filePath);
   });
 
@@ -786,6 +800,399 @@ async function startServer() {
       return res.status(500).json({
         success: false,
         error: err?.message || "Videoni yuklab olishda xatolik yuz berdi.",
+      });
+    }
+  });
+
+  // Extract or download audio from any video/social/audio URL and save as real MP3
+  async function convertLocalMediaToMp3(inputPath: string): Promise<string | null> {
+    const outName = `audio_${Date.now()}_${Math.random().toString(36).slice(2, 8)}.mp3`;
+    const outPath = path.join(MEDIA_UPLOADS_DIR, outName);
+    try {
+      const args = buildFfmpegMp3Args(inputPath, outPath, { maxDurationSec: 600 });
+      await execFileAsync('ffmpeg', args, { timeout: 60000, maxBuffer: 5 * 1024 * 1024 });
+      if (fs.existsSync(outPath)) {
+        const stat = fs.statSync(outPath);
+        if (stat.size > 512 && stat.size <= MAX_REMOTE_VIDEO_BYTES) {
+          return outName;
+        }
+        try { fs.unlinkSync(outPath); } catch {}
+      }
+    } catch {
+      if (fs.existsSync(outPath)) {
+        try { fs.unlinkSync(outPath); } catch {}
+      }
+    }
+    return null;
+  }
+
+  async function downloadAudioStreamAsMp3(
+    sourceUrl: string,
+    refererUrl?: string
+  ): Promise<{ url: string; mimeType: 'audio/mpeg'; format: 'mp3'; title?: string; artist?: string; sizeBytes?: number } | null> {
+    const check = validateExternalVideoUrl(sourceUrl, {
+      allowLoopback: process.env.ALLOW_LOOPBACK_MEDIA_IMPORT === 'true',
+    });
+    if (!check.ok) return null;
+    const normalized = check.url.toString();
+
+    if (isHlsStreamUrl(normalized)) {
+      const outName = `audio_${Date.now()}_${Math.random().toString(36).slice(2, 8)}.mp3`;
+      const outPath = path.join(MEDIA_UPLOADS_DIR, outName);
+      try {
+        const args = buildFfmpegMp3Args(normalized, outPath, {
+          maxDurationSec: 600,
+          userAgent: VIDEO_BROWSER_HEADERS['User-Agent'],
+          refererUrl,
+        });
+        await execFileAsync('ffmpeg', args, { timeout: 60000 });
+        if (fs.existsSync(outPath) && fs.statSync(outPath).size > 512) {
+          const stat = fs.statSync(outPath);
+          const meta = deriveAudioMetadataFromUrl(normalized);
+          return {
+            url: `/api/media/${outName}`,
+            mimeType: 'audio/mpeg',
+            format: 'mp3',
+            sizeBytes: stat.size,
+            ...meta,
+          };
+        }
+      } catch {
+        if (fs.existsSync(outPath)) {
+          try { fs.unlinkSync(outPath); } catch {}
+        }
+      }
+      return null;
+    }
+
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 35000);
+    try {
+      const headers: Record<string, string> = { ...VIDEO_BROWSER_HEADERS };
+      if (refererUrl) headers.Referer = refererUrl;
+
+      const response = await fetch(normalized, {
+        headers,
+        redirect: 'follow',
+        signal: controller.signal,
+      });
+      if (!response.ok) return null;
+
+      const contentType = String(response.headers.get('content-type') || '');
+      const contentLen = Number(response.headers.get('content-length') || 0);
+      if (contentLen > MAX_REMOTE_VIDEO_BYTES) {
+        throw new Error('Media hajmi 80 MB dan oshmasligi kerak.');
+      }
+      const finalUrl = response.url || normalized;
+
+      if (contentType.toLowerCase().includes('mpegurl') || isHlsStreamUrl(finalUrl)) {
+        return downloadAudioStreamAsMp3(finalUrl, refererUrl);
+      }
+
+      const audioExt = inferAudioFileExtension(contentType, finalUrl);
+      const videoExt = audioExt ? null : inferVideoFileExtension(contentType, finalUrl);
+      if (!audioExt && !videoExt) return null;
+
+      const arrayBuf = await response.arrayBuffer();
+      if (arrayBuf.byteLength === 0 || arrayBuf.byteLength > MAX_REMOTE_VIDEO_BYTES) {
+        return null;
+      }
+
+      const buf = Buffer.from(arrayBuf);
+      const meta = deriveAudioMetadataFromUrl(finalUrl);
+
+      if (audioExt === '.mp3' && buf.length > 256) {
+        const storedName = `audio_${Date.now()}_${Math.random().toString(36).slice(2, 8)}.mp3`;
+        const destPath = path.join(MEDIA_UPLOADS_DIR, storedName);
+        fs.writeFileSync(destPath, buf);
+        return {
+          url: `/api/media/${storedName}`,
+          mimeType: 'audio/mpeg',
+          format: 'mp3',
+          sizeBytes: buf.length,
+          ...meta,
+        };
+      }
+
+      const tempExt = audioExt || videoExt || '.mp4';
+      const tempName = `tmp_av_${Date.now()}_${Math.random().toString(36).slice(2, 8)}${tempExt}`;
+      const tempPath = path.join(MEDIA_UPLOADS_DIR, tempName);
+      fs.writeFileSync(tempPath, buf);
+      try {
+        const mp3FileName = await convertLocalMediaToMp3(tempPath);
+        if (!mp3FileName) return null;
+        const mp3Stat = fs.statSync(path.join(MEDIA_UPLOADS_DIR, mp3FileName));
+        return {
+          url: `/api/media/${mp3FileName}`,
+          mimeType: 'audio/mpeg',
+          format: 'mp3',
+          sizeBytes: mp3Stat.size,
+          ...meta,
+        };
+      } finally {
+        if (fs.existsSync(tempPath)) {
+          try { fs.unlinkSync(tempPath); } catch {}
+        }
+      }
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  async function downloadAudioViaYtDlp(targetUrl: string): Promise<{ url: string; mimeType: 'audio/mpeg'; format: 'mp3'; title?: string; artist?: string; sizeBytes?: number } | null> {
+    const bin = await ensureYtDlpBinary();
+    if (!bin) return null;
+
+    const prefix = `audio_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+    const outTemplate = path.join(MEDIA_UPLOADS_DIR, `${prefix}.%(ext)s`);
+
+    const cookiesRaw = process.env.YOUTUBE_COOKIES || process.env.YTDLP_COOKIES || '';
+    let tempCookiesPath: string | null = null;
+    if (cookiesRaw.trim()) {
+      tempCookiesPath = path.join('/tmp', `alov_cookies_${Date.now()}.txt`);
+      fs.writeFileSync(tempCookiesPath, cookiesRaw, 'utf-8');
+    }
+
+    try {
+      const args = [
+        '--no-playlist',
+        '--no-warnings',
+        '--max-filesize', '80M',
+        '--js-runtimes', 'node',
+        '--extractor-args', 'youtube:player_client=tv,ios,mweb',
+        '-x',
+        '--audio-format', 'mp3',
+        '--audio-quality', '192K',
+        '--print', 'after_move:%(title)s|||%(uploader)s',
+        ...(tempCookiesPath ? ['--cookies', tempCookiesPath] : []),
+        '-o', outTemplate,
+        targetUrl,
+      ];
+      const { stdout } = await execFileAsync(bin, args, { timeout: 65000, maxBuffer: 5 * 1024 * 1024 });
+      const metaLine = String(stdout || '').trim().split('\n').filter(Boolean).pop() || '';
+      const [rawTitle, rawUploader] = metaLine.includes('|||') ? metaLine.split('|||') : ['', ''];
+
+      const files = fs.readdirSync(MEDIA_UPLOADS_DIR).filter((f) => f.startsWith(`${prefix}.`) && !f.endsWith('.part'));
+      const mp3File = files.find((f) => f.toLowerCase().endsWith('.mp3')) || files[0];
+      if (mp3File) {
+        const fullPath = path.join(MEDIA_UPLOADS_DIR, mp3File);
+        const stat = fs.statSync(fullPath);
+        if (stat.size > 512 && stat.size <= MAX_REMOTE_VIDEO_BYTES) {
+          if (!mp3File.toLowerCase().endsWith('.mp3')) {
+            const converted = await convertLocalMediaToMp3(fullPath);
+            try { fs.unlinkSync(fullPath); } catch {}
+            if (!converted) return null;
+            const cStat = fs.statSync(path.join(MEDIA_UPLOADS_DIR, converted));
+            return {
+              url: `/api/media/${converted}`,
+              mimeType: 'audio/mpeg',
+              format: 'mp3',
+              sizeBytes: cStat.size,
+              title: rawTitle?.trim() || deriveAudioMetadataFromUrl(targetUrl).title,
+              artist: rawUploader?.trim() || 'Alov.uz Audio',
+            };
+          }
+          return {
+            url: `/api/media/${mp3File}`,
+            mimeType: 'audio/mpeg',
+            format: 'mp3',
+            sizeBytes: stat.size,
+            title: rawTitle?.trim() || deriveAudioMetadataFromUrl(targetUrl).title,
+            artist: rawUploader?.trim() || 'Alov.uz Audio',
+          };
+        }
+        try { fs.unlinkSync(fullPath); } catch {}
+      }
+    } catch {
+      try {
+        for (const f of fs.readdirSync(MEDIA_UPLOADS_DIR)) {
+          if (f.startsWith(`${prefix}.`)) fs.unlinkSync(path.join(MEDIA_UPLOADS_DIR, f));
+        }
+      } catch {}
+    } finally {
+      if (tempCookiesPath && fs.existsSync(tempCookiesPath)) {
+        try { fs.unlinkSync(tempCookiesPath); } catch {}
+      }
+    }
+    return null;
+  }
+
+  app.post('/api/media/import-audio-url', async (req, res) => {
+    try {
+      const rawUrl = String(req.body?.url || '').trim();
+      const validation = validateExternalVideoUrl(rawUrl, {
+        allowLoopback: process.env.ALLOW_LOOPBACK_MEDIA_IMPORT === 'true',
+      });
+      if (!validation.ok) {
+        return res.status(400).json({ success: false, error: validation.error });
+      }
+
+      const targetUrl = validation.url.toString();
+      const parsedSocial = parseMediaLink(targetUrl, 'music');
+
+      const replyMp3 = (payload: any) =>
+        res.json({
+          success: true,
+          mode: 'mp3',
+          mimeType: 'audio/mpeg',
+          format: 'mp3',
+          ...payload,
+        });
+
+      // 1. Direct video (.mp4/.webm/.mov/.m3u8) or audio (.mp3/.m4a/.wav/.ogg) stream -> convert/save as .mp3
+      const directAudio = await downloadAudioStreamAsMp3(targetUrl).catch((err) => {
+        if (err?.message?.includes('80 MB')) throw err;
+        return null;
+      });
+      if (directAudio) {
+        return replyMp3(directAudio);
+      }
+
+      // 2. TikTok audio / video -> MP3
+      if (/tiktok\.com/i.test(targetUrl)) {
+        try {
+          const tikRes = await fetch(`https://www.tikwm.com/api/?url=${encodeURIComponent(targetUrl)}`, {
+            headers: VIDEO_BROWSER_HEADERS,
+          });
+          if (tikRes.ok) {
+            const tikData: any = await tikRes.json();
+            const tikTitle = tikData?.data?.music_info?.title || tikData?.data?.title;
+            const tikArtist = tikData?.data?.music_info?.author || tikData?.data?.author?.nickname;
+            const candidates = [tikData?.data?.music, tikData?.data?.hdplay, tikData?.data?.play].filter(
+              (u) => typeof u === 'string' && u.length > 0
+            );
+            for (const c of candidates) {
+              const converted = await downloadAudioStreamAsMp3(c, 'https://www.tiktok.com/').catch(() => null);
+              if (converted) {
+                return replyMp3({
+                  ...converted,
+                  title: tikTitle || converted.title,
+                  artist: tikArtist || converted.artist,
+                });
+              }
+            }
+          }
+        } catch {}
+      }
+
+      // 3. X / Twitter video -> MP3
+      const twitterPath = extractTwitterStatusPath(targetUrl);
+      if (twitterPath) {
+        try {
+          const fxRes = await fetch(`https://api.fxtwitter.com/${twitterPath}`, { headers: VIDEO_BROWSER_HEADERS });
+          if (fxRes.ok) {
+            const fxData: any = await fxRes.json();
+            const videoUrl = fxData?.tweet?.media?.videos?.[0]?.url;
+            if (videoUrl && typeof videoUrl === 'string') {
+              const converted = await downloadAudioStreamAsMp3(videoUrl, 'https://x.com/');
+              if (converted) {
+                return replyMp3({
+                  ...converted,
+                  artist: fxData?.tweet?.author?.name || converted.artist,
+                });
+              }
+            }
+          }
+        } catch {}
+      }
+
+      // 4. Reddit video -> MP3
+      if (/reddit\.com\/r\/[^/]+\/comments\//i.test(targetUrl)) {
+        try {
+          const cleanBase = targetUrl.split('?')[0].replace(/\/$/, '');
+          const rdRes = await fetch(`${cleanBase}.json`, { headers: VIDEO_BROWSER_HEADERS });
+          if (rdRes.ok) {
+            const rdText = await rdRes.text();
+            const candidates = extractVideoUrlsFromHtml(rdText, targetUrl);
+            for (const c of candidates.slice(0, 3)) {
+              const converted = await downloadAudioStreamAsMp3(c, targetUrl).catch(() => null);
+              if (converted) return replyMp3(converted);
+            }
+          }
+        } catch {}
+      }
+
+      // 5. Instagram Reels / Posts video -> MP3
+      const igShortcode = extractInstagramShortcode(targetUrl);
+      if (igShortcode) {
+        try {
+          const igRes = await fetch(`https://www.instagram.com/p/${igShortcode}/embed/captioned/`, {
+            headers: {
+              ...VIDEO_BROWSER_HEADERS,
+              Accept: 'text/html,application/xhtml+xml',
+            },
+          });
+          if (igRes.ok) {
+            const igHtml = await igRes.text();
+            const candidates = extractVideoUrlsFromHtml(igHtml, targetUrl);
+            for (const c of candidates.slice(0, 4)) {
+              const converted = await downloadAudioStreamAsMp3(c, 'https://www.instagram.com/').catch(() => null);
+              if (converted) return replyMp3(converted);
+            }
+          }
+        } catch {}
+      }
+
+      // 6. Telegram & General HTML page -> extract embedded video/audio URL & convert to MP3
+      const htmlFetchUrl =
+        /t\.me\/[^/]+\/\d+/i.test(targetUrl) && !targetUrl.includes('embed=1')
+          ? `${targetUrl}${targetUrl.includes('?') ? '&' : '?'}embed=1&mode=tme`
+          : targetUrl;
+
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 15000);
+      try {
+        const pageRes = await fetch(htmlFetchUrl, {
+          headers: {
+            ...VIDEO_BROWSER_HEADERS,
+            Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+          },
+          redirect: 'follow',
+          signal: controller.signal,
+        });
+        if (pageRes.ok) {
+          const pageCt = String(pageRes.headers.get('content-type') || '').toLowerCase();
+          if (pageCt.includes('text/html') || pageCt.includes('application/xhtml')) {
+            const html = (await pageRes.text()).slice(0, 1_500_000);
+            const candidates = extractVideoUrlsFromHtml(html, pageRes.url || htmlFetchUrl);
+            for (const candidate of candidates.slice(0, 5)) {
+              const converted = await downloadAudioStreamAsMp3(candidate, targetUrl).catch(() => null);
+              if (converted) return replyMp3(converted);
+            }
+          }
+        }
+      } catch {
+        // continue to yt-dlp
+      } finally {
+        clearTimeout(timer);
+      }
+
+      // 7. Universal social audio extractor via yt-dlp -> MP3
+      const ytAudio = await downloadAudioViaYtDlp(targetUrl);
+      if (ytAudio) {
+        return replyMp3(ytAudio);
+      }
+
+      // 8. SoundCloud / Spotify embed fallback only if server download is blocked
+      if (parsedSocial.kind === 'embed_iframe' && parsedSocial.embedUrl && (parsedSocial.provider === 'soundcloud' || parsedSocial.provider === 'spotify')) {
+        return res.json({
+          success: true,
+          mode: 'embed',
+          url: parsedSocial.normalizedUrl,
+          embedUrl: parsedSocial.embedUrl,
+          provider: parsedSocial.provider,
+        });
+      }
+
+      return res.status(422).json({
+        success: false,
+        error:
+          "Ushbu havoladan video/audio faylni MP3 formatida ajratib bo'lmadi. To'g'ridan-to'g'ri video/audio havola kiriting yoki qurilmadan fayl yuklang.",
+      });
+    } catch (err: any) {
+      return res.status(500).json({
+        success: false,
+        error: err?.message || "Havolani MP3 formatiga aylantirishda xatolik yuz berdi.",
       });
     }
   });
@@ -2134,9 +2541,11 @@ Suhbatlashish qoidalaringiz:
 
   const transactionsStore: any[] = [];
   const withdrawalsStore: any[] = [];
+  const coinRequestsStore: CoinPurchaseRequest[] = [];
 
   const TRANSACTIONS_DB_FILE = resolveDataFile('transactions_db.json');
   const WITHDRAWALS_DB_FILE = resolveDataFile('withdrawals_db.json');
+  const COIN_REQUESTS_DB_FILE = resolveDataFile('coin_requests_db.json');
   const POSTS_DB_FILE = resolveDataFile('posts_db.json');
   const postsStore: PostItem[] = [];
 
@@ -2203,12 +2612,34 @@ Suhbatlashish qoidalaringiz:
     } catch (e) {}
   }
 
+  function saveCoinRequestsToDisk() {
+    try {
+      fs.writeFileSync(COIN_REQUESTS_DB_FILE, JSON.stringify(coinRequestsStore, null, 2), 'utf-8');
+    } catch (e) {
+      console.warn("Could not save coin_requests_db.json:", e);
+    }
+  }
+
+  function loadCoinRequestsFromDisk() {
+    try {
+      if (fs.existsSync(COIN_REQUESTS_DB_FILE)) {
+        const raw = fs.readFileSync(COIN_REQUESTS_DB_FILE, 'utf-8');
+        const list = JSON.parse(raw);
+        if (Array.isArray(list)) {
+          coinRequestsStore.length = 0;
+          coinRequestsStore.push(...list);
+        }
+      }
+    } catch (e) {}
+  }
+
   loadUsersFromDisk();
   loadChatsFromDisk();
   loadMessagesFromDisk();
   loadFriendshipsFromDisk();
   loadTransactionsFromDisk();
   loadWithdrawalsFromDisk();
+  loadCoinRequestsFromDisk();
   loadPostsFromDisk();
 
   // At server boot, 0 sockets are connected -> enforce true initial offline state for all users
@@ -2506,8 +2937,8 @@ Suhbatlashish qoidalaringiz:
         } else if (!fetchedName && botName) {
           fetchedName = botName;
         }
-        // Only use Telegram photo if no Face ID photo exists AND account is not Telegram-FaceID onboarding
-        if (!faceIdAvatar && !isTelegramAccount) {
+        // Only use Telegram photo if no Face ID photo exists AND account is admin or already completed profile
+        if (!faceIdAvatar && (!isTelegramAccount || isAdminTelegramUser(existing) || isAdminTelegramUser(user))) {
           const preferredBotAvatar = pickPreferredAvatar(botRecord.avatar, fetchedAvatar);
           if (preferredBotAvatar) {
             fetchedAvatar = preferredBotAvatar;
@@ -2516,6 +2947,7 @@ Suhbatlashish qoidalaringiz:
       }
 
       const fallbackAvatar = '';
+      const isAdminAccount = isAdminTelegramUser(existing) || isAdminTelegramUser(user);
 
       const rawUsername = String(user.username || existing.username || `user_${targetUid.slice(-6)}`).trim().replace(/^@/, '');
       if (/\s/.test(rawUsername) || !/^[a-zA-Z0-9_]{3,20}$/.test(rawUsername)) {
@@ -2576,7 +3008,7 @@ Suhbatlashish qoidalaringiz:
         phone: formattedSyncedPhone,
         username: rawUsername,
         name: fetchedName || (!isPlaceholderOrUsername(user.name, incomingTgHandle, incomingPhone) ? user.name : '') || (!isPlaceholderOrUsername(existing.name, incomingTgHandle, incomingPhone) ? existing.name : '') || (isTelegramAccount ? '' : 'Foydalanuvchi'),
-        avatar: faceIdAvatar || (isTelegramAccount ? '' : fetchedAvatar) || fallbackAvatar,
+        avatar: faceIdAvatar || (isTelegramAccount && !isAdminAccount && !isAlreadyCompleted ? '' : fetchedAvatar) || fallbackAvatar,
         banner: user.banner !== undefined ? user.banner : (existing.banner || ''),
         coins: (existing && existing.coins !== undefined) ? existing.coins : (user.coins !== undefined ? user.coins : 100),
         diamonds: (existing && existing.diamonds !== undefined) ? existing.diamonds : (user.diamonds !== undefined ? user.diamonds : 0),
@@ -2620,6 +3052,14 @@ Suhbatlashish qoidalaringiz:
         }
         if (sanitizedUpdates.phone) {
           sanitizedUpdates.phone = formatPhoneNumberPretty(String(sanitizedUpdates.phone));
+        }
+        if (sanitizedUpdates.faceId?.capturedPhotoUrl) {
+          sanitizedUpdates.avatar = sanitizedUpdates.faceId.capturedPhotoUrl;
+        } else if (
+          existing.faceId?.capturedPhotoUrl &&
+          (!sanitizedUpdates.avatar || isPlaceholderAvatar(sanitizedUpdates.avatar))
+        ) {
+          sanitizedUpdates.avatar = existing.faceId.capturedPhotoUrl;
         }
         const updated = { ...existing, ...sanitizedUpdates, updatedAt: new Date().toISOString() };
         if (updates.isOnline === undefined && updates.status === undefined) {
@@ -2932,6 +3372,57 @@ Suhbatlashish qoidalaringiz:
     } catch (err: any) {
       res.status(500).json({ error: err.message });
     }
+  });
+
+  // Coin Shop Purchase Request ("Ariza") — lands in Admin Panel for approval
+  app.post('/api/wallet/topup-request', (req, res) => {
+    try {
+      const { uid, coinAmount, paymentMethod = 'click', note = '' } = req.body || {};
+      const parsedAmount = Math.floor(Number(coinAmount));
+      if (!uid || !parsedAmount || parsedAmount <= 0) {
+        return res.status(400).json({ success: false, error: 'Yaroqli foydalanuvchi va moneta miqdorini tanlang' });
+      }
+      const user = usersStore.get(uid);
+      if (!user) {
+        return res.status(404).json({ success: false, error: 'Foydalanuvchi topilmadi' });
+      }
+
+      const coinReq = buildCoinPurchaseRequest({
+        user,
+        coinAmount: parsedAmount,
+        paymentMethod,
+        note,
+      });
+
+      coinRequestsStore.unshift(coinReq);
+      saveCoinRequestsToDisk();
+
+      const tx = {
+        id: 'tx_cr_' + Date.now() + Math.random().toString(36).substring(2, 6),
+        sender: uid,
+        type: 'topup_request',
+        coinAmount: coinReq.coinAmount,
+        uzsAmount: coinReq.uzsAmount,
+        paymentMethod: coinReq.paymentMethod,
+        status: 'pending',
+        note: `${coinReq.coinAmount} moneta (${coinReq.uzsAmount.toLocaleString()} so'm) xarid arizasi yuborildi`,
+        createdAt: coinReq.createdAt,
+      };
+      transactionsStore.unshift(tx);
+      void walletRepository.recordTransaction(tx);
+      saveTransactionsToDisk();
+
+      io.emit('coin_request_created', coinReq);
+      res.json({ success: true, request: coinReq });
+    } catch (err: any) {
+      res.status(500).json({ success: false, error: err.message });
+    }
+  });
+
+  app.get('/api/wallet/topup-requests/:uid', (req, res) => {
+    const { uid } = req.params;
+    const list = coinRequestsStore.filter((r) => r.userUid === uid);
+    res.json({ success: true, requests: list });
   });
 
   app.post('/api/wallet/withdraw', (req, res) => {
@@ -3375,9 +3866,11 @@ Suhbatlashish qoidalaringiz:
         totalDiamonds,
         pendingDiamonds,
         pendingWithdrawalsCount: withdrawalsStore.filter((w) => w.status === 'pending').length,
+        pendingCoinRequestsCount: coinRequestsStore.filter((r) => r.status === 'pending').length,
       },
       users,
       withdrawals: withdrawalsStore,
+      coinRequests: coinRequestsStore,
       transactions: transactionsStore.slice(0, 120),
     });
   });
@@ -3476,6 +3969,79 @@ Suhbatlashish qoidalaringiz:
       }
 
       res.json({ success: true, withdrawal: wReq, user: updatedUser });
+    } catch (err: any) {
+      res.status(500).json({ success: false, error: err.message });
+    }
+  });
+
+  app.post('/api/admin/coin-request-action', (req, res) => {
+    try {
+      const { adminUid, requestId, action } = req.body || {};
+      if (!getVerifiedAdmin(adminUid)) {
+        return res.status(403).json({ success: false, error: 'Admin huquqi talab qilinadi' });
+      }
+      if (action !== 'approve' && action !== 'reject') {
+        return res.status(400).json({ success: false, error: 'Noto\'g\'ri amal' });
+      }
+      const reqItem = coinRequestsStore.find((r) => r.id === requestId);
+      if (!reqItem) {
+        return res.status(404).json({ success: false, error: 'Ariza topilmadi' });
+      }
+      if (!canReviewCoinRequest(reqItem)) {
+        return res.status(400).json({ success: false, error: 'Bu ariza allaqachon ko\'rib chiqilgan' });
+      }
+
+      reqItem.status = action === 'approve' ? 'approved' : 'rejected';
+      reqItem.reviewedAt = new Date().toISOString();
+      reqItem.reviewedBy = adminUid;
+      saveCoinRequestsToDisk();
+
+      let updatedUser: any = null;
+      if (action === 'approve') {
+        const user = usersStore.get(reqItem.userUid);
+        if (user) {
+          user.coins = (user.coins || 0) + Number(reqItem.coinAmount || 0);
+          user.updatedAt = new Date().toISOString();
+          normalizeAndReleaseUser(user);
+          usersStore.set(user.uid, user);
+          saveUsersToDisk();
+          void walletRepository.syncUserWallet(user);
+          io.emit('user_updated', user);
+          updatedUser = user;
+        }
+        const tx = {
+          id: 'tx_cr_app_' + Date.now() + Math.random().toString(36).substring(2, 5),
+          receiver: reqItem.userUid,
+          type: 'topup',
+          coinAmount: Number(reqItem.coinAmount || 0),
+          uzsAmount: Number(reqItem.uzsAmount || 0),
+          paymentMethod: reqItem.paymentMethod,
+          status: 'completed',
+          note: `Admin tasdiqladi: +${reqItem.coinAmount} moneta (${reqItem.paymentMethod.toUpperCase()})`,
+          createdAt: new Date().toISOString(),
+        };
+        transactionsStore.unshift(tx);
+        void walletRepository.recordTransaction(tx);
+        saveTransactionsToDisk();
+      } else {
+        const tx = {
+          id: 'tx_cr_rej_' + Date.now() + Math.random().toString(36).substring(2, 5),
+          receiver: reqItem.userUid,
+          type: 'topup_request',
+          coinAmount: Number(reqItem.coinAmount || 0),
+          uzsAmount: Number(reqItem.uzsAmount || 0),
+          paymentMethod: reqItem.paymentMethod,
+          status: 'rejected',
+          note: `Moneta xaridi arizasi rad etildi (${reqItem.coinAmount} moneta)`,
+          createdAt: new Date().toISOString(),
+        };
+        transactionsStore.unshift(tx);
+        void walletRepository.recordTransaction(tx);
+        saveTransactionsToDisk();
+      }
+
+      io.emit('coin_request_updated', reqItem);
+      res.json({ success: true, request: reqItem, user: updatedUser });
     } catch (err: any) {
       res.status(500).json({ success: false, error: err.message });
     }

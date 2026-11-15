@@ -10,9 +10,9 @@ import {
   ChevronRight, X, ArrowUpRight, ShieldCheck, Globe, LogIn, LogOut, CheckCircle2, Edit3, ArrowLeft, VideoOff,
   ZoomIn, ZoomOut, Move, Crop, AlertTriangle, RefreshCw, Navigation, Shield, Lock, EyeOff, Car, Upload,
   Clock, Check, CheckCheck, Gift, Coins, Wallet, CreditCard, Handshake, Crown, ScanFace,
-  Image as ImageIcon, Camera, Newspaper
+  Image as ImageIcon, Camera, Newspaper, SlidersHorizontal
 } from 'lucide-react';
-import { motion, AnimatePresence } from 'framer-motion';
+import { motion, AnimatePresence, MotionConfig } from 'framer-motion';
 import { clsx, type ClassValue } from 'clsx';
 import { twMerge } from 'tailwind-merge';
 import { LandingPage } from './LandingPage';
@@ -54,10 +54,15 @@ import {
 } from './utils/tokenomics';
 import {
   requiresFaceIdForUser,
+  resolveEffectiveProfileAvatar,
   formatFaceIdDateUz,
   genderToUzLabel,
   type FaceIdProfileData,
 } from './utils/faceId';
+import {
+  COIN_SHOP_PACKAGES,
+  type CoinPurchaseRequest,
+} from './utils/coinRequests';
 import { isUserOnlineStrict, formatLastSeenUz } from './utils/presence';
 import { resolveExactUserByUid, getInitialAuthDraftState } from './utils/profileLookup';
 import { computeAuthorTotalLikes, isPostVisibleToViewer, type PostItem } from './utils/posts';
@@ -242,6 +247,26 @@ function getGpsErrorMessage(error: any): string {
   }
 }
 
+function escapeHtml(value: unknown): string {
+  return String(value ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+function computeHaversineKm(lat1: number, lng1: number, lat2: number, lng2: number): number {
+  const toRad = (deg: number) => (deg * Math.PI) / 180;
+  const R = 6371;
+  const dLat = toRad(lat2 - lat1);
+  const dLng = toRad(lng2 - lng1);
+  const a =
+    Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+    Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLng / 2) * Math.sin(dLng / 2);
+  return R * (2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a)));
+}
+
 export default function App() {
   const [activeTab, setActiveTab] = useState<string>('landing');
 
@@ -254,8 +279,10 @@ export default function App() {
   const [showProfileModal, setShowProfileModal] = useState(false);
   const [errorMsg, setErrorMsg] = useState('');
   const [authMode, setAuthMode] = useState<'login' | 'register' | 'register_face_id' | 'google_face_id' | 'google_setup' | 'telegram'>('login');
+  const [authOrigin, setAuthOrigin] = useState<'google' | 'telegram' | 'email'>('email');
   const [authEmail, setAuthEmail] = useState('');
   const [authPassword, setAuthPassword] = useState('');
+  const [showAuthPassword, setShowAuthPassword] = useState(false);
   const [pendingGoogleUser, setPendingGoogleUser] = useState<any | null>(null);
   const [telegramInput, setTelegramInput] = useState('');
   const [telegramStep, setTelegramStep] = useState<'input_phone' | 'input_code' | 'face_id' | 'profile_setup'>('input_phone');
@@ -342,7 +369,8 @@ export default function App() {
 
   // OSRM Street Routing State
   const [activeRouteUser, setActiveRouteUser] = useState<any | null>(null);
-  const [routeInfo, setRouteInfo] = useState<{ distanceKm: string; durationMin: number } | null>(null);
+  const [routeInfo, setRouteInfo] = useState<{ distanceKm: string; durationMin: number; isFallback?: boolean } | null>(null);
+  const [isCalculatingRoute, setIsCalculatingRoute] = useState<boolean>(false);
   const mapPolylineRef = useRef<any>(null);
   const mapInstanceRef = useRef<any>(null);
   const mapContainerRef = useRef<HTMLDivElement>(null);
@@ -367,6 +395,9 @@ export default function App() {
   const [showGiftModal, setShowGiftModal] = useState(false);
   const [topUpPackage, setTopUpPackage] = useState<{ coins: number; uzs: number }>({ coins: 300, uzs: 28000 });
   const [paymentProvider, setPaymentProvider] = useState<'click' | 'payme' | 'uzum' | 'telegram_stars'>('click');
+  const [coinRequestNote, setCoinRequestNote] = useState('');
+  const [isSubmittingCoinRequest, setIsSubmittingCoinRequest] = useState(false);
+  const [userCoinRequests, setUserCoinRequests] = useState<CoinPurchaseRequest[]>([]);
   const [withdrawCardNumber, setWithdrawCardNumber] = useState('');
   const [withdrawAmount, setWithdrawAmount] = useState<number>(100);
   const [walletNoticeMsg, setWalletNoticeMsg] = useState('');
@@ -791,6 +822,22 @@ export default function App() {
       setShowTopUpModal(true);
     });
 
+    socket.on('coin_request_updated', (updatedReq: CoinPurchaseRequest) => {
+      if (!updatedReq?.id) return;
+      setUserCoinRequests((prev) => {
+        const exists = prev.some((r) => r.id === updatedReq.id);
+        return exists ? prev.map((r) => (r.id === updatedReq.id ? updatedReq : r)) : prev;
+      });
+      const myUid = currentUserRef.current?.uid;
+      if (myUid && updatedReq.userUid === myUid) {
+        if (updatedReq.status === 'approved') {
+          showToast(`Arizangiz tasdiqlandi: +${updatedReq.coinAmount} moneta qo'shildi`);
+        } else if (updatedReq.status === 'rejected') {
+          showToast('Moneta xaridi arizangiz rad etildi');
+        }
+      }
+    });
+
     return () => {
       window.clearInterval(heartbeatTimer);
       socket.off('connect', registerSocketUser);
@@ -814,6 +861,7 @@ export default function App() {
       socket.off('call-ended');
       socket.off('friendship_updated');
       socket.off('insufficient_coins');
+      socket.off('coin_request_updated');
       socket.disconnect();
     };
   }, []);
@@ -1071,7 +1119,8 @@ export default function App() {
   }, []);
 
   // Foydalanuvchi hisobini Render server va Lokal kesh bilan sinxronizatsiya qilish (Zero Firestore)
-  const syncUserWithBackend = async (user: User) => {
+  const syncUserWithBackend = async (user: User, options?: { autoOpenFaceId?: boolean }) => {
+    const autoOpenFaceId = options?.autoOpenFaceId === true;
     try {
       let userData: any = null;
 
@@ -1130,15 +1179,19 @@ export default function App() {
       setRegRegion(userData.region || 'Toshkent shahri');
       setRegDistrict(userData.district || 'Yunusobod tumani');
       setRegBio(userData.bio || '');
-      setRegAvatar(userData.faceId?.capturedPhotoUrl || userData.avatar || '');
+      setRegAvatar(resolveEffectiveProfileAvatar(userData));
       setRegLocationVisibility(userData.locationVisibility || 'everyone');
       setIsLocationEnabled(userData.isLocationEnabled !== false);
 
-      // Admin bypasses Face ID completely; non-admins without verified Face ID or completed profile go to Face ID first
-      if (!isAdminTelegramUser(userData) && (!userData.isProfileCompleted || requiresFaceIdForUser(userData))) {
-        setPendingGoogleUser(user);
-        setAuthMode(prev => (prev === 'register_face_id' ? 'register_face_id' : 'google_face_id'));
-        setShowAuthModal(true);
+      // Admin bypasses Face ID completely; non-admins only trigger Face ID during explicit Google/Telegram sign-in (never silently on site entry)
+      const needsFaceId = !isAdminTelegramUser(userData) && (!userData.isProfileCompleted || requiresFaceIdForUser(userData));
+      if (needsFaceId) {
+        if (autoOpenFaceId) {
+          setPendingGoogleUser(user);
+          setAuthOrigin('google');
+          setAuthMode('google_face_id');
+          setShowAuthModal(true);
+        }
         return userData;
       }
 
@@ -1163,9 +1216,7 @@ export default function App() {
     getRedirectResult(auth)
       .then(async (result) => {
         if (result?.user) {
-          await syncUserWithBackend(result.user);
-          setShowAuthModal(false);
-          setActiveTab('discover');
+          await syncUserWithBackend(result.user, { autoOpenFaceId: true });
         }
       })
       .catch((err: any) => {
@@ -1208,7 +1259,7 @@ export default function App() {
 
         setFirebaseUser(user);
         if (user) {
-          await syncUserWithBackend(user);
+          await syncUserWithBackend(user, { autoOpenFaceId: false });
         } else {
           let hasLocalSession = false;
           try {
@@ -1461,17 +1512,18 @@ export default function App() {
   // Handle Privacy-Protected Route Calculation to a target user
   const handleDrawRouteToUser = (targetUser: any) => {
     if (!userCoords?.lat || !userCoords?.lng) {
-      alert("Marshrut chizish uchun avval GPS lokatsiyangizni yoqing!");
+      showToast("Marshrut chizish uchun avval GPS lokatsiyangizni yoqing!");
+      setActiveTab('map');
       return;
     }
     if (!targetUser || !targetUser.location?.lat || !targetUser.location?.lng) {
-      alert("Ushbu foydalanuvchining lokatsiyasi mavjud emas.");
+      showToast("Ushbu foydalanuvchining lokatsiyasi mavjud emas.");
       return;
     }
 
     const vis = targetUser.locationVisibility || 'everyone';
     if (vis === 'ghost' || targetUser.isLocationEnabled === false) {
-      alert("Bu foydalanuvchi o'z lokatsiyasini yashirgan (Ghost Mode). Marshrut chizib bo'lmaydi.");
+      showToast("Bu foydalanuvchi o'z lokatsiyasini yashirgan (Ghost Mode).");
       return;
     }
 
@@ -1554,50 +1606,94 @@ export default function App() {
     };
   }, [usersList, followingIds, userCoords, isLocationEnabled]);
 
-  // OSRM Real Street Polyline Generator on Leaflet Map
+  // OSRM Real Street Polyline Generator on Leaflet Map (with Haversine fallback)
   useEffect(() => {
-    if (activeTab === 'map' && activeRouteUser && activeRouteUser.location?.lat && mapInstanceRef.current) {
-      const L = (window as any).L;
-      if (!L) return;
-
-      if (mapPolylineRef.current) {
-        mapPolylineRef.current.remove();
-        mapPolylineRef.current = null;
-      }
-
-      const originLng = userCoords.lng;
-      const originLat = userCoords.lat;
-      const destLng = activeRouteUser.location.lng;
-      const destLat = activeRouteUser.location.lat;
-
-      safeFetchJson(`https://router.project-osrm.org/route/v1/driving/${originLng},${originLat};${destLng},${destLat}?overview=full&geometries=geojson`)
-        .then(data => {
-          if (data && data.routes && data.routes.length > 0) {
-            const route = data.routes[0];
-            const latLngs = route.geometry.coordinates.map((c: [number, number]) => [c[1], c[0]]);
-
-            const polyline = L.polyline(latLngs, {
-              color: '#E8474A',
-              weight: 6,
-              opacity: 0.9,
-              lineJoin: 'round',
-              lineCap: 'round'
-            }).addTo(mapInstanceRef.current);
-
-            mapPolylineRef.current = polyline;
-            mapInstanceRef.current.fitBounds(polyline.getBounds(), { padding: [50, 50] });
-
-            const distKm = (route.distance / 1000).toFixed(1);
-            const durationMin = Math.round(route.duration / 60);
-            setRouteInfo({ distanceKm: distKm, durationMin });
-          }
-        })
-        .catch(err => {
-          console.error("OSRM Route Error:", err);
-        });
+    if (
+      activeTab !== 'map' ||
+      !activeRouteUser ||
+      activeRouteUser.location?.lat == null ||
+      activeRouteUser.location?.lng == null ||
+      userCoords?.lat == null ||
+      userCoords?.lng == null ||
+      !mapInstanceRef.current
+    ) {
+      return;
     }
-  }, [activeTab, activeRouteUser, userCoords]);
 
+    const L = (window as any).L;
+    if (!L) return;
+
+    if (mapPolylineRef.current) {
+      mapPolylineRef.current.remove();
+      mapPolylineRef.current = null;
+    }
+
+    const originLng = Number(userCoords.lng);
+    const originLat = Number(userCoords.lat);
+    const destLng = Number(activeRouteUser.location.lng);
+    const destLat = Number(activeRouteUser.location.lat);
+    if ([originLng, originLat, destLng, destLat].some((v) => Number.isNaN(v))) return;
+
+    let cancelled = false;
+    setIsCalculatingRoute(true);
+
+    safeFetchJson(
+      `https://router.project-osrm.org/route/v1/driving/${originLng},${originLat};${destLng},${destLat}?overview=full&geometries=geojson`
+    )
+      .then((data) => {
+        if (cancelled || !mapInstanceRef.current) return;
+        if (data && data.routes && data.routes.length > 0) {
+          const route = data.routes[0];
+          const latLngs = route.geometry.coordinates.map((c: [number, number]) => [c[1], c[0]]);
+          const polyline = L.polyline(latLngs, {
+            color: '#E11D48',
+            weight: 5,
+            opacity: 0.92,
+            lineJoin: 'round',
+            lineCap: 'round',
+          }).addTo(mapInstanceRef.current);
+
+          mapPolylineRef.current = polyline;
+          mapInstanceRef.current.fitBounds(polyline.getBounds(), { padding: [56, 56] });
+
+          const distKm = (route.distance / 1000).toFixed(1);
+          const durationMin = Math.max(1, Math.round(route.duration / 60));
+          setRouteInfo({ distanceKm: distKm, durationMin, isFallback: false });
+          return;
+        }
+        throw new Error('No routes found');
+      })
+      .catch(() => {
+        if (cancelled || !mapInstanceRef.current) return;
+        const straightKm = computeHaversineKm(originLat, originLng, destLat, destLng);
+        const polyline = L.polyline(
+          [
+            [originLat, originLng],
+            [destLat, destLng],
+          ],
+          {
+            color: '#F43F5E',
+            weight: 4,
+            opacity: 0.85,
+            dashArray: '8 8',
+          }
+        ).addTo(mapInstanceRef.current);
+        mapPolylineRef.current = polyline;
+        mapInstanceRef.current.fitBounds(polyline.getBounds(), { padding: [56, 56] });
+        setRouteInfo({
+          distanceKm: straightKm.toFixed(1),
+          durationMin: Math.max(2, Math.round((straightKm / 35) * 60)),
+          isFallback: true,
+        });
+      })
+      .finally(() => {
+        if (!cancelled) setIsCalculatingRoute(false);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [activeTab, activeRouteUser, userCoords, mapReadyTick]);
 
   // Initialize Unified Standard Leaflet Map cleanly when Map tab opens
   useEffect(() => {
@@ -1612,36 +1708,63 @@ export default function App() {
     }
 
     let cancelled = false;
+    let resizeObserver: ResizeObserver | null = null;
     const node = mapContainerRef.current;
-    if (!node || mapInstanceRef.current) return;
+    if (!node) return;
 
-    import('leaflet')
-      .then((LMod) => {
-        if (cancelled || !mapContainerRef.current || mapInstanceRef.current) return;
-        const L = (LMod as any).default || LMod;
-        (window as any).L = L;
-        const initialLat = userCoords?.lat || currentUser?.location?.lat || 41.2995;
-        const initialLng = userCoords?.lng || currentUser?.location?.lng || 69.2401;
-        const map = L.map(mapContainerRef.current, { zoomControl: true }).setView([initialLat, initialLng], 12);
-        mapInstanceRef.current = map;
-        hasCenteredMapRef.current = true;
-        L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-          maxZoom: 19,
-          attribution: '© OpenStreetMap Alov.uz GPS'
-        }).addTo(map);
-        setMapReadyTick(t => t + 1);
-        setTimeout(() => {
-          if (!cancelled && mapInstanceRef.current) {
-            mapInstanceRef.current.invalidateSize();
+    const handlePopupButtonClick = (evt: MouseEvent) => {
+      const target = (evt.target as HTMLElement | null)?.closest('[data-alov-action]') as HTMLElement | null;
+      if (!target) return;
+      const action = target.getAttribute('data-alov-action');
+      const uid = target.getAttribute('data-uid');
+      if (!uid) return;
+      if (action === 'watch-live') {
+        window.dispatchEvent(new CustomEvent('alov-watch-live-stream', { detail: uid }));
+      } else if (action === 'open-profile') {
+        window.dispatchEvent(new CustomEvent('alov-open-user-profile', { detail: uid }));
+      } else if (action === 'draw-route') {
+        window.dispatchEvent(new CustomEvent('alov-draw-route-to-user', { detail: uid }));
+      }
+    };
+    node.addEventListener('click', handlePopupButtonClick);
+
+    if (!mapInstanceRef.current) {
+      import('leaflet')
+        .then((LMod) => {
+          if (cancelled || !mapContainerRef.current || mapInstanceRef.current) return;
+          const L = (LMod as any).default || LMod;
+          (window as any).L = L;
+          const initialLat = userCoords?.lat || currentUser?.location?.lat || 41.2995;
+          const initialLng = userCoords?.lng || currentUser?.location?.lng || 69.2401;
+          const map = L.map(mapContainerRef.current, { zoomControl: true }).setView([initialLat, initialLng], 12);
+          mapInstanceRef.current = map;
+          hasCenteredMapRef.current = true;
+          L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+            maxZoom: 19,
+            attribution: '© OpenStreetMap Alov.uz GPS',
+          }).addTo(map);
+          setMapReadyTick((t) => t + 1);
+          setTimeout(() => {
+            if (!cancelled && mapInstanceRef.current) {
+              mapInstanceRef.current.invalidateSize();
+            }
+          }, 120);
+          if (typeof ResizeObserver !== 'undefined' && mapContainerRef.current) {
+            resizeObserver = new ResizeObserver(() => {
+              mapInstanceRef.current?.invalidateSize();
+            });
+            resizeObserver.observe(mapContainerRef.current);
           }
-        }, 120);
-      })
-      .catch((err) => {
-        console.error("Leaflet init error:", err);
-      });
+        })
+        .catch((err) => {
+          console.error('Leaflet init error:', err);
+        });
+    }
 
     return () => {
       cancelled = true;
+      node.removeEventListener('click', handlePopupButtonClick);
+      resizeObserver?.disconnect();
     };
   }, [activeTab]);
 
@@ -1662,25 +1785,26 @@ export default function App() {
 
       // 1. Sync User Marker ('me')
       if (userCoords?.lat && userCoords?.lng && isLocationEnabled) {
-        const myAvatar = resolveAvatarUrl(currentUser?.avatar || firebaseUser?.photoURL);
-        const myInitial = (getSafeUserDisplayName(currentUser, 'Siz') || 'S').charAt(0).toUpperCase();
+        const myAvatar = resolveAvatarUrl(resolveEffectiveProfileAvatar(currentUser) || firebaseUser?.photoURL);
+        const myInitial = escapeHtml((getSafeUserDisplayName(currentUser, 'Siz') || 'S').charAt(0).toUpperCase());
+        const safeMyAvatar = escapeHtml(myAvatar);
         const userIcon = L.divIcon({
           className: 'custom-user-marker',
           html: `<div style="position:relative;width:40px;height:40px;display:flex;align-items:center;justify-content:center;">
             <div class="pulse-ring"></div>
-            <div style="background:#E8474A;width:34px;height:34px;border-radius:50%;border:2.5px solid white;box-shadow:0 4px 14px rgba(232,71,74,0.55);overflow:hidden;display:flex;align-items:center;justify-content:center;color:white;font-weight:900;font-size:13px;position:relative;z-index:2;">
-              ${myAvatar ? `<img src="${myAvatar}" style="width:100%;height:100%;object-fit:cover;" />` : myInitial}
+            <div style="background:#E11D48;width:34px;height:34px;border-radius:50%;border:2.5px solid white;box-shadow:0 4px 14px rgba(225,29,72,0.55);overflow:hidden;display:flex;align-items:center;justify-content:center;color:white;font-weight:800;font-size:13px;position:relative;z-index:2;">
+              ${safeMyAvatar ? `<img src="${safeMyAvatar}" style="width:100%;height:100%;object-fit:cover;" />` : myInitial}
             </div>
           </div>`,
           iconSize: [40, 40],
-          iconAnchor: [20, 20]
+          iconAnchor: [20, 20],
         });
 
         if (!markersRef.current['me']) {
           markersRef.current['me'] = L.marker([userCoords.lat, userCoords.lng], { icon: userIcon }).addTo(map);
         } else {
           markersRef.current['me'].setLatLng([userCoords.lat, userCoords.lng]);
-          if (markersRef.current['me'].options.icon.options.html !== userIcon.options.html) {
+          if (markersRef.current['me'].options?.icon?.options?.html !== userIcon.options.html) {
             markersRef.current['me'].setIcon(userIcon);
           }
         }
@@ -1691,7 +1815,7 @@ export default function App() {
 
       // 2. Sync Other Users — ALL users who enabled location visibility appear on the shared map
       const myUid = currentUser?.uid || firebaseUser?.uid;
-      const activeUsers = usersList.filter(u => {
+      const activeUsers = usersList.filter((u) => {
         if (myUid && (u.uid === myUid || u.id === myUid)) return false;
         if (filterRegion !== 'Barchasi' && u.region !== filterRegion) return false;
         if (filterDistrict !== 'Barchasi' && u.district !== filterDistrict) return false;
@@ -1700,23 +1824,27 @@ export default function App() {
       });
 
       // Remove markers no longer active
-      Object.keys(markersRef.current).forEach(id => {
-        if (id !== 'me' && !activeUsers.find(u => (u.uid === id || u.id === id))) {
+      Object.keys(markersRef.current).forEach((id) => {
+        if (id !== 'me' && !activeUsers.find((u) => u.uid === id || u.id === id)) {
           markersRef.current[id].remove();
           delete markersRef.current[id];
         }
       });
 
       // Add/Update markers smoothly inside the map
-      activeUsers.forEach(u => {
-        const markerKey = u.uid || u.id;
+      activeUsers.forEach((u) => {
+        const markerKey = String(u.uid || u.id || '');
         const lat = Number(u.location.lat);
         const lng = Number(u.location.lng);
-        if (isNaN(lat) || isNaN(lng)) return;
+        if (!markerKey || Number.isNaN(lat) || Number.isNaN(lng)) return;
 
-        const userAvatar = resolveAvatarUrl(u.avatar);
-        const safeName = getSafeUserDisplayName(u, 'Foydalanuvchi');
-        const initial = safeName.charAt(0).toUpperCase();
+        const userAvatar = resolveAvatarUrl(resolveEffectiveProfileAvatar(u));
+        const safeAvatar = escapeHtml(userAvatar);
+        const rawName = getSafeUserDisplayName(u, 'Foydalanuvchi');
+        const safeName = escapeHtml(rawName);
+        const safeLocation = escapeHtml(u.district || u.region || "O'zbekiston");
+        const safeKeyAttr = escapeHtml(markerKey);
+        const initial = escapeHtml(rawName.charAt(0).toUpperCase());
         const isLive = u.isLive === true;
         const isOnline = isUserOnlineStrict(u, onlineUserIds);
 
@@ -1724,34 +1852,34 @@ export default function App() {
           className: isLive ? 'custom-live-marker' : 'custom-other-marker',
           html: `
             <div style="position:relative;width:42px;height:42px;display:flex;align-items:center;justify-content:center;">
-              ${(isLive || isOnline) ? '<div class="pulse-ring" style="background-color:' + (isLive ? '#EF4444' : '#10B981') + '"></div>' : ''}
-              <div style="background:#E8474A;width:36px;height:36px;border-radius:50%;border:2px solid ${isLive ? '#EF4444' : 'white'};box-shadow:0 4px 12px rgba(0,0,0,0.3);overflow:hidden;position:relative;z-index:2;display:flex;align-items:center;justify-content:center;color:white;font-weight:900;font-size:13px;">
-                ${userAvatar ? `<img src="${userAvatar}" style="width:100%;height:100%;object-fit:cover;" onerror="this.style.display='none'"/>` : initial}
-                ${isOnline ? '<span style="position:absolute;bottom:1px;right:1px;width:9px;height:9px;background:#10B981;border:1.5px solid white;border-radius:50%;"></span>' : ''}
+              ${isLive || isOnline ? '<div class="pulse-ring" style="background-color:' + (isLive ? '#EF4444' : '#10B981') + '"></div>' : ''}
+              <div style="background:#E11D48;width:36px;height:36px;border-radius:50%;border:2px solid ${isLive ? '#EF4444' : '#FFFFFF'};box-shadow:0 4px 12px rgba(0,0,0,0.45);overflow:hidden;position:relative;z-index:2;display:flex;align-items:center;justify-content:center;color:white;font-weight:800;font-size:13px;">
+                ${safeAvatar ? `<img src="${safeAvatar}" style="width:100%;height:100%;object-fit:cover;" onerror="this.style.display='none'"/>` : initial}
+                ${isOnline ? '<span style="position:absolute;bottom:1px;right:1px;width:9px;height:9px;background:#10B981;border:1.5px solid #131622;border-radius:50%;"></span>' : ''}
               </div>
               ${isLive ? '<span style="position:absolute;top:-4px;left:50%;transform:translateX(-50%);background:#EF4444;color:white;font-size:7px;font-weight:900;padding:0.5px 5px;border-radius:999px;z-index:10;white-space:nowrap;">● LIVE</span>' : ''}
             </div>
           `,
           iconSize: [42, 42],
-          iconAnchor: [21, 21]
+          iconAnchor: [21, 21],
         });
 
-        const popupAvatarHtml = userAvatar
-          ? `<img src="${userAvatar}" style="width:48px;height:48px;border-radius:50%;object-fit:cover;border:2px solid ${isLive ? '#EF4444' : '#E8474A'};" />`
-          : `<div style="width:48px;height:48px;border-radius:50%;background:#FCEAEA;color:#E8474A;font-weight:900;font-size:18px;display:flex;align-items:center;justify-content:center;border:2px solid #E8474A;">${initial}</div>`;
+        const popupAvatarHtml = safeAvatar
+          ? `<img src="${safeAvatar}" style="width:48px;height:48px;border-radius:50%;object-fit:cover;border:2px solid ${isLive ? '#EF4444' : '#E11D48'};" />`
+          : `<div style="width:48px;height:48px;border-radius:50%;background:#1E2232;color:#F43F5E;font-weight:800;font-size:18px;display:flex;align-items:center;justify-content:center;border:2px solid #E11D48;">${initial}</div>`;
 
         const popupContent = `
-          <div style="font-family: Inter, sans-serif; text-align: center; width: 175px; padding: 4px;">
-            <div style="position:relative; width:48px; margin: 0 auto 6px;">
+          <div style="font-family: 'Plus Jakarta Sans', sans-serif; text-align: center; width: 184px; padding: 4px 2px; color: #F4F4F6;">
+            <div style="position:relative; width:48px; margin: 0 auto 8px;">
               ${popupAvatarHtml}
-              ${isLive ? '<span style="position:absolute;bottom:-4px;left:50%;transform:translateX(-50%);background:#EF4444;color:white;font-size:8px;font-weight:900;padding:1px 5px;border-radius:6px;">LIVE</span>' : ''}
-              ${isOnline ? '<span style="position:absolute;top:0;right:0;width:12px;height:12px;background:#10B981;border:2px solid white;border-radius:50%;"></span>' : ''}
+              ${isLive ? '<span style="position:absolute;bottom:-4px;left:50%;transform:translateX(-50%);background:#EF4444;color:white;font-size:8px;font-weight:800;padding:1px 6px;border-radius:6px;">LIVE</span>' : ''}
+              ${isOnline ? '<span style="position:absolute;top:0;right:0;width:12px;height:12px;background:#10B981;border:2px solid #131622;border-radius:50%;"></span>' : ''}
             </div>
-            <b style="font-size: 13px; display:block; color:#1C1C1C;">${safeName}</b>
-            <p style="font-size: 10px; color: #666; margin: 2px 0 6px;">${u.district || u.region || 'O\'zbekiston'}</p>
-            ${isLive ? `<button onclick="window.dispatchEvent(new CustomEvent('alov-watch-live-stream', { detail: '${markerKey}' }))" style="background:#EF4444;color:white;border:none;padding:7px 12px;border-radius:12px;font-size:11px;font-weight:bold;cursor:pointer;margin-bottom:4px;width:100%;box-shadow:0 2px 8px rgba(239,68,68,0.4);">🎥 Efirni ko'rish (LIVE)</button>` : ''}
-            <button onclick="window.dispatchEvent(new CustomEvent('alov-open-user-profile', { detail: '${markerKey}' }))" style="background:#E8474A;color:white;border:none;padding:6px 12px;border-radius:12px;font-size:11px;font-weight:bold;cursor:pointer;margin-bottom:4px;width:100%;box-shadow:0 2px 6px rgba(232,71,74,0.3);">Profilni ko'rish 👤</button>
-            <button onclick="window.dispatchEvent(new CustomEvent('alov-draw-route-to-user', { detail: '${markerKey}' }))" style="background:#1C1C1C;color:white;border:none;padding:6px 12px;border-radius:12px;font-size:11px;font-weight:bold;cursor:pointer;width:100%;box-shadow:0 2px 6px rgba(0,0,0,0.2);">Yo'l (Marshrut) 🚗</button>
+            <b style="font-size: 13.5px; display:block; color:#FFFFFF; font-weight:700;">${safeName}</b>
+            <p style="font-size: 10.5px; color: #A1A1AA; margin: 2px 0 10px;">${safeLocation}</p>
+            ${isLive ? `<button type="button" data-alov-action="watch-live" data-uid="${safeKeyAttr}" style="background:#DC2626;color:white;border:none;padding:7px 12px;border-radius:10px;font-size:11px;font-weight:700;cursor:pointer;margin-bottom:5px;width:100%;">Efirni ko'rish (LIVE)</button>` : ''}
+            <button type="button" data-alov-action="open-profile" data-uid="${safeKeyAttr}" style="background:#E11D48;color:white;border:none;padding:7px 12px;border-radius:10px;font-size:11px;font-weight:700;cursor:pointer;margin-bottom:5px;width:100%;">Profilni ko'rish</button>
+            <button type="button" data-alov-action="draw-route" data-uid="${safeKeyAttr}" style="background:#1F2333;color:#E4E4E7;border:1px solid rgba(255,255,255,0.12);padding:7px 12px;border-radius:10px;font-size:11px;font-weight:700;cursor:pointer;width:100%;">Yo'l (Marshrut)</button>
           </div>
         `;
 
@@ -1762,10 +1890,10 @@ export default function App() {
         } else {
           const existingMarker = markersRef.current[markerKey];
           existingMarker.setLatLng([lat, lng]);
-          if (existingMarker.options.icon.options.html !== otherIcon.options.html) {
+          if (existingMarker.options?.icon?.options?.html !== otherIcon.options.html) {
             existingMarker.setIcon(otherIcon);
           }
-          if (existingMarker.getPopup().getContent() !== popupContent) {
+          if (existingMarker.getPopup()?.getContent() !== popupContent) {
             existingMarker.setPopupContent(popupContent);
           }
         }
@@ -1906,7 +2034,9 @@ export default function App() {
 
     if (enabled) {
       if (!navigator.geolocation) {
-        alert("Qurilmangiz geolokatsiyani (GPS) qo'llab-quvvatlamaydi.");
+        const msg = "Qurilmangiz geolokatsiyani (GPS) qo'llab-quvvatlamaydi.";
+        setGpsStatusMsg(msg);
+        showToast(msg);
         setIsLocationEnabled(false);
         return;
       }
@@ -1953,9 +2083,9 @@ export default function App() {
         },
         (err) => {
           const errMsg = getGpsErrorMessage(err);
-          alert(errMsg);
           setIsLocationEnabled(false);
           setGpsStatusMsg(errMsg);
+          showToast(errMsg);
           syncLocToServer({ isLocationEnabled: false });
         },
         GPS_OPTIONS
@@ -2028,7 +2158,7 @@ export default function App() {
         telegram: regTelegram || currentUser?.telegram || '@user_tg',
         instagram: regInstagram || currentUser?.instagram || '@user_insta',
         bio: regBio,
-        avatar: pickPreferredAvatar(regAvatar, firebaseUser?.photoURL, currentUser?.avatar),
+        avatar: pickPreferredAvatar(regAvatar, currentUser?.faceId?.capturedPhotoUrl, currentUser?.avatar, firebaseUser?.photoURL),
         banner: showProfileModal ? regBanner : (regBanner || currentUser?.banner || ''),
         videoUrl: currentUser?.videoUrl || 'https://assets.mixkit.co/videos/preview/mixkit-young-woman-looking-at-camera-in-a-park-41686-large.mp4',
         followersCount: currentUser?.followersCount ?? 0,
@@ -2096,6 +2226,7 @@ export default function App() {
     const clean = getInitialAuthDraftState();
     setAuthEmail(clean.authEmail);
     setAuthPassword(clean.authPassword);
+    setShowAuthPassword(false);
     setTelegramInput(clean.telegramInput);
     setEnteredTgCode(clean.enteredTgCode);
     setGeneratedTgCode(clean.generatedTgCode);
@@ -2146,17 +2277,6 @@ export default function App() {
 
       if (serverLoginRes && serverLoginRes.success && serverLoginRes.user) {
         const userData = serverLoginRes.user;
-        if (!isAdminTelegramUser(userData) && (requiresFaceIdForUser(userData) || !userData.isProfileCompleted)) {
-          setPendingTgUser(userData);
-          setRegName(getSafeUserDisplayName(userData, userData.name || ''));
-          setRegPhone(userData.phone || '+99890');
-          setRegTelegram(userData.telegram || '');
-          setRegRegion(userData.region || 'Toshkent shahri');
-          setRegDistrict(userData.district || 'Yunusobod tumani');
-          setAuthMode('telegram');
-          setTelegramStep('face_id');
-          return;
-        }
         setCurrentUser(userData);
         try {
           localStorage.setItem('alov_current_user', JSON.stringify(userData));
@@ -2171,7 +2291,7 @@ export default function App() {
       if (authEmail.includes('@') && !authEmail.startsWith('@')) {
         const userCredential = await signInWithEmailAndPassword(auth, authEmail.trim(), authPassword.trim());
         if (userCredential.user) {
-          await syncUserWithBackend(userCredential.user);
+          await syncUserWithBackend(userCredential.user, { autoOpenFaceId: false });
           return;
         }
       }
@@ -2195,10 +2315,10 @@ export default function App() {
       setErrorMsg('');
       const userCredential = await createUserWithEmailAndPassword(auth, authEmail, authPassword);
       if (userCredential.user) {
-        // Immediately enter Face ID verification BEFORE collecting remaining profile info
+        setAuthOrigin('email');
         setPendingGoogleUser(userCredential.user);
         setPendingFaceId(null);
-        setAuthMode('register_face_id');
+        setAuthMode('google_setup');
       }
     } catch (err: any) {
       setErrorMsg(err.message || "Ro'yxatdan o'tishda xatolik.");
@@ -2211,6 +2331,7 @@ export default function App() {
     try {
       setIsLoggingIn(true);
       setErrorMsg('');
+      setAuthOrigin('google');
       const provider = new GoogleAuthProvider();
       provider.setCustomParameters({ prompt: 'select_account' });
       const result = await signInWithPopup(auth, provider);
@@ -2231,7 +2352,7 @@ export default function App() {
 
         if (data && data.success && data.user) {
           const canonicalUser = data.user;
-          if (canonicalUser.isProfileCompleted && !requiresFaceIdForUser(canonicalUser)) {
+          if (isAdminTelegramUser(canonicalUser) || (canonicalUser.isProfileCompleted && !requiresFaceIdForUser(canonicalUser))) {
             setCurrentUser(canonicalUser);
             try {
               localStorage.setItem('alov_current_user', JSON.stringify(canonicalUser));
@@ -2268,7 +2389,7 @@ export default function App() {
       setErrorMsg("Iltimos, ismingizni kiriting!");
       return;
     }
-    if (!pendingFaceId?.verified) {
+    if (authOrigin !== 'email' && !pendingFaceId?.verified) {
       setErrorMsg("Avval Face ID tasdiqlashdan o'ting!");
       setAuthMode('google_face_id');
       return;
@@ -2296,12 +2417,14 @@ export default function App() {
       const cleanTg = (regTelegram || '').replace(/^(https?:\/\/t\.me\/|@)/i, '').toLowerCase();
       const formattedTg = cleanTg ? `https://t.me/${cleanTg}` : undefined;
       const confirmedGender: 'male' | 'female' = regGender === 'male' ? 'male' : 'female';
-      const verifiedAvatar = pendingFaceId.capturedPhotoUrl || regAvatar;
-      const syncedFaceId = {
-        ...pendingFaceId,
-        detectedGender: confirmedGender,
-        genderLabelUz: genderToUzLabel(confirmedGender),
-      };
+      const verifiedAvatar = pendingFaceId?.capturedPhotoUrl || regAvatar;
+      const syncedFaceId = pendingFaceId
+        ? {
+            ...pendingFaceId,
+            detectedGender: confirmedGender,
+            genderLabelUz: genderToUzLabel(confirmedGender),
+          }
+        : undefined;
 
       const newUserData = {
         uid: pendingGoogleUser.uid,
@@ -2312,8 +2435,8 @@ export default function App() {
         telegram: formattedTg,
         password: authPassword.trim() || undefined,
         avatar: verifiedAvatar,
-        faceId: syncedFaceId,
-        isVerified: true,
+        ...(syncedFaceId ? { faceId: syncedFaceId } : {}),
+        isVerified: Boolean(syncedFaceId?.verified),
         role: isAdminTelegramUser({ telegram: formattedTg }) ? 'admin' : 'user',
         isAdmin: isAdminTelegramUser({ telegram: formattedTg }),
         age: calculateAge(regBirthDate, Number(regAge) || 22),
@@ -2337,6 +2460,12 @@ export default function App() {
       });
       const finalUser = (syncData && syncData.success && syncData.user) ? syncData.user : newUserData;
       setCurrentUser(finalUser);
+      setUsersList(prev => {
+        const userMap = new Map<string, any>();
+        prev.forEach(u => userMap.set(u.uid || u.id, u));
+        userMap.set(finalUser.uid, finalUser);
+        return Array.from(userMap.values());
+      });
       try {
         localStorage.setItem('alov_current_user', JSON.stringify(finalUser));
         localStorage.setItem('alov_user_' + finalUser.uid, JSON.stringify(finalUser));
@@ -2491,16 +2620,17 @@ export default function App() {
 
   const handleFaceIdVerified = async (result: FaceIdVerificationResult, origin: 'telegram' | 'google' | 'register') => {
     setErrorMsg('');
+    const facePhoto = result.photoUrl || result.photoDataUrl;
     setPendingFaceId(result.faceId);
     setRegGender(result.detectedGender);
-    setRegAvatar(result.photoUrl || result.photoDataUrl);
+    setRegAvatar(facePhoto);
 
     if (origin === 'telegram') {
       // If returning Telegram user already completed profile fields previously, keep locked primary gender/birthDate and enter directly
       if (pendingTgUser?.isProfileCompleted) {
         const updatedUser = {
           ...pendingTgUser,
-          avatar: result.photoUrl || result.photoDataUrl,
+          avatar: facePhoto,
           gender: pendingTgUser.gender === 'male' || pendingTgUser.gender === 'female' ? pendingTgUser.gender : result.detectedGender,
           birthDate: pendingTgUser.birthDate,
           faceId: result.faceId,
@@ -2513,6 +2643,12 @@ export default function App() {
         });
         const finalUser = syncData?.user || updatedUser;
         setCurrentUser(finalUser);
+        setUsersList(prev => {
+          const userMap = new Map<string, any>();
+          prev.forEach(u => userMap.set(u.uid || u.id, u));
+          userMap.set(finalUser.uid, finalUser);
+          return Array.from(userMap.values());
+        });
         try {
           localStorage.setItem('alov_current_user', JSON.stringify(finalUser));
           localStorage.setItem('alov_user_' + finalUser.uid, JSON.stringify(finalUser));
@@ -2607,6 +2743,12 @@ export default function App() {
       });
       const finalUser = (syncData && syncData.success && syncData.user) ? syncData.user : newUserData;
       setCurrentUser(finalUser);
+      setUsersList(prev => {
+        const userMap = new Map<string, any>();
+        prev.forEach(u => userMap.set(u.uid || u.id, u));
+        userMap.set(finalUser.uid, finalUser);
+        return Array.from(userMap.values());
+      });
       try {
         localStorage.setItem('alov_current_user', JSON.stringify(finalUser));
         localStorage.setItem('alov_user_' + finalUser.uid, JSON.stringify(finalUser));
@@ -3021,37 +3163,59 @@ export default function App() {
       if (data && data.success && data.sender) {
         setCurrentUser(data.sender);
         setShowGiftModal(false);
+        showToast(`${gift.name} sovg'asi yuborildi!`);
       } else {
-        alert(data?.error || "Sovg'a yuborishda xatolik");
+        showToast(data?.error || "Sovg'a yuborishda xatolik");
       }
     } catch (e: any) {
-      alert(e.message || "Xatolik yuz berdi");
+      showToast(e.message || "Xatolik yuz berdi");
     }
   };
+
+  const fetchMyCoinRequests = async (uid?: string) => {
+    const targetUid = uid || currentUser?.uid || firebaseUser?.uid;
+    if (!targetUid) return;
+    try {
+      const data = await safeFetchJson(getApiUrl(`/api/wallet/topup-requests/${encodeURIComponent(targetUid)}`));
+      if (data && data.success && Array.isArray(data.requests)) {
+        setUserCoinRequests(data.requests);
+      }
+    } catch {}
+  };
+
+  useEffect(() => {
+    if (showTopUpModal) {
+      fetchMyCoinRequests();
+    }
+  }, [showTopUpModal, currentUser?.uid]);
 
   const handleExecuteTopUp = async () => {
     const myUid = currentUser?.uid || firebaseUser?.uid;
     if (!myUid) return;
+    setIsSubmittingCoinRequest(true);
     try {
-      const data = await safeFetchJson(getApiUrl('/api/wallet/topup'), {
+      const data = await safeFetchJson(getApiUrl('/api/wallet/topup-request'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           uid: myUid,
           coinAmount: topUpPackage.coins,
-          paymentMethod: paymentProvider
+          paymentMethod: paymentProvider,
+          note: coinRequestNote.trim(),
         })
       });
-      if (data && data.success && data.user) {
-        setCurrentUser(data.user);
-        setShowTopUpModal(false);
+      if (data && data.success && data.request) {
+        setUserCoinRequests((prev) => [data.request, ...prev.filter((r) => r.id !== data.request.id)]);
+        setCoinRequestNote('');
         setWalletNoticeMsg('');
-        alert(`🎉 ${topUpPackage.coins} moneta hisobingizga muvaffaqiyatli qo'shildi!`);
+        showToast(`${topUpPackage.coins} moneta bo'yicha arizangiz adminga yuborildi!`);
       } else {
-        alert(data?.error || "To'lovni amalga oshirishda xatolik.");
+        showToast(data?.error || "Arizani yuborishda xatolik.");
       }
     } catch (e: any) {
-      alert(e.message || "Xatolik yuz berdi");
+      showToast(e.message || "Xatolik yuz berdi");
+    } finally {
+      setIsSubmittingCoinRequest(false);
     }
   };
 
@@ -3060,11 +3224,11 @@ export default function App() {
     const myUid = currentUser?.uid || firebaseUser?.uid;
     if (!myUid) return;
     if (!withdrawCardNumber || withdrawCardNumber.replace(/\D/g, '').length < 16) {
-      alert("Iltimos, 16 xonali Humo yoki Uzcard karta raqamini kiriting!");
+      showToast("Iltimos, 16 xonali Humo yoki Uzcard karta raqamini kiriting!");
       return;
     }
     if (withdrawAmount < 100) {
-      alert("Minimal yechib olish miqdori 100 almaz (100,000 so'm)!");
+      showToast("Minimal yechib olish miqdori 100 almaz (100,000 so'm)!");
       return;
     }
 
@@ -3081,12 +3245,12 @@ export default function App() {
       if (data && data.success && data.user) {
         setCurrentUser(data.user);
         setShowWithdrawModal(false);
-        alert(`✅ Pul yechib olish arizangiz qabul qilindi! ${(withdrawAmount * 1000).toLocaleString()} so'm 1-24 soat ichida kartangizga o'tkaziladi.`);
+        showToast(`Pul yechib olish arizangiz qabul qilindi: ${(withdrawAmount * 1000).toLocaleString()} so'm`);
       } else {
-        alert(data?.error || "Arizani yuborishda xatolik.");
+        showToast(data?.error || "Arizani yuborishda xatolik.");
       }
     } catch (e: any) {
-      alert(e.message || "Xatolik yuz berdi");
+      showToast(e.message || "Xatolik yuz berdi");
     }
   };
 
@@ -3161,361 +3325,1251 @@ export default function App() {
     return true;
   });
 
-  // Dashboard content inside refined romantic dating shell
+  // Dashboard content inside Obsidian Midnight shell
   const dashboardContent = (
-    <div className="h-full bg-[#FDFBF9] text-[#221719] font-sans flex flex-col w-full relative overflow-hidden">
-      
-      {/* Top Header (always pinned cleanly at top, zero overflow on 390px mobile) */}
-      <header className="shrink-0 bg-white/95 backdrop-blur-md border-b border-[rgba(166,36,51,0.1)] px-3 sm:px-5 h-14 flex items-center justify-between gap-2 z-40 overflow-hidden">
-          <div className="flex items-center gap-1.5 sm:gap-2.5 min-w-0 shrink-0 cursor-pointer" onClick={() => setActiveTab('discover')}>
-            <img src="/assets/aistudio/image_e20a1307.webp" alt="Alov.uz Logo" className="w-7 h-7 rounded-xl object-cover border border-[#C93545]/30 shadow-xs shrink-0" />
-            <span className="text-[15px] sm:text-[18px] font-black font-editorial tracking-tight text-[#221719] whitespace-nowrap shrink-0">
-              alov<span className="text-[#C93545]">.uz</span>
-            </span>
-            <span className="text-[10px] font-bold text-emerald-700 bg-emerald-50/90 px-1.5 sm:px-2 py-0.5 rounded-full flex items-center gap-1 border border-emerald-200/80 shadow-xs whitespace-nowrap shrink-0">
-              <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse shrink-0" />
-              <span>{activeUsersCount}</span>
-              <span className="hidden xs:inline sm:inline">onlayn</span>
-            </span>
-          </div>
+    <div className="h-full bg-[#09090D] text-[#F4F4F6] font-sans flex flex-col w-full relative overflow-hidden">
+      {/* Subtle Ambient Rose Glow */}
+      <div className="pointer-events-none absolute -top-24 left-1/2 -translate-x-1/2 w-[540px] h-[180px] rounded-full bg-rose-600/10 blur-[90px]" />
 
-          <div className="flex items-center gap-1 sm:gap-1.5 shrink-0">
-            {isAdminTelegramUser(currentUser) ? (
-              <>
-                <button
-                  onClick={() => setActiveTab('profile')}
-                  title="Admin Full Almaz & Moneta Balansi"
-                  className="sm:hidden flex items-center gap-1 bg-[#FAF4F2] border border-[#C89B54]/40 text-[#221719] py-1 px-2 rounded-full text-[10px] font-bold shadow-xs transition whitespace-nowrap shrink-0"
-                >
-                  <span>💎</span>
-                  <Coins className="w-3 h-3 text-amber-600 fill-amber-400 shrink-0" />
-                  <span>Full</span>
-                </button>
-                <button
-                  onClick={() => setActiveTab('profile')}
-                  title="Admin Full Almaz Balansi"
-                  className="hidden sm:flex items-center gap-1 bg-gradient-to-r from-cyan-50 to-sky-50 border border-cyan-200/90 text-cyan-900 py-1 px-2.5 rounded-full text-[10.5px] font-bold shadow-xs hover:bg-cyan-100 transition whitespace-nowrap shrink-0"
-                >
-                  <span>💎</span>
-                  <span>Full</span>
-                </button>
-                <button
-                  onClick={() => setActiveTab('profile')}
-                  title="Admin Full Moneta Balansi"
-                  className="hidden sm:flex items-center gap-1 bg-gradient-to-r from-amber-50 to-yellow-50 border border-amber-300/80 text-amber-900 py-1 px-2.5 rounded-full text-[10.5px] font-bold shadow-xs hover:bg-amber-100 transition whitespace-nowrap shrink-0"
-                >
-                  <Coins className="w-3 h-3 text-amber-600 fill-amber-400 shrink-0" />
-                  <span>Full</span>
-                </button>
-              </>
-            ) : currentUser?.gender === 'female' ? (
-              <button 
-                onClick={() => setShowWithdrawModal(true)}
-                className="flex items-center gap-1 bg-cyan-50 border border-cyan-200 text-cyan-900 py-1 px-2 rounded-full text-[10px] font-bold shadow-xs hover:bg-cyan-100 transition active:scale-95 whitespace-nowrap shrink-0"
+      {/* Top Header */}
+      <header className="shrink-0 bg-[#0D0F17]/92 backdrop-blur-xl border-b border-white/[0.08] px-3 sm:px-5 h-14 flex items-center justify-between gap-2 z-40 overflow-hidden">
+        <div
+          className="flex items-center gap-2 sm:gap-2.5 min-w-0 shrink-0 cursor-pointer group"
+          onClick={() => setActiveTab('discover')}
+        >
+          <img
+            src="/assets/aistudio/image_e20a1307.webp"
+            alt="Alov.uz Logo"
+            className="w-7 h-7 rounded-xl object-cover border border-rose-500/35 shadow-sm shrink-0 group-hover:scale-105 transition-transform"
+          />
+          <span className="text-[16px] sm:text-[18px] font-bold font-editorial tracking-tight text-white whitespace-nowrap shrink-0">
+            alov<span className="text-rose-500">.uz</span>
+          </span>
+          <span className="text-[10.5px] font-semibold text-emerald-300 bg-emerald-500/10 px-2 py-0.5 rounded-full flex items-center gap-1 border border-emerald-500/25 whitespace-nowrap shrink-0">
+            <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse shrink-0" />
+            <span className="tabular-nums">{activeUsersCount}</span>
+            <span className="hidden sm:inline">onlayn</span>
+          </span>
+        </div>
+
+        <div className="flex items-center gap-1.5 shrink-0">
+          {isAdminTelegramUser(currentUser) ? (
+            <>
+              <button
+                onClick={() => setActiveTab('profile')}
+                title="Admin Full Almaz & Moneta Balansi"
+                className="sm:hidden flex items-center gap-1 bg-amber-500/10 border border-amber-400/30 text-amber-200 py-1 px-2 rounded-full text-[10px] font-bold transition whitespace-nowrap shrink-0 cursor-pointer"
               >
                 <span>💎</span>
-                <span>{currentUser?.diamonds ?? 0}</span>
+                <Coins className="w-3 h-3 text-amber-400 shrink-0" />
+                <span>Full</span>
               </button>
-            ) : (
-              <button 
-                onClick={() => setShowTopUpModal(true)}
-                className="flex items-center gap-1 bg-amber-50 border border-amber-200 text-amber-900 py-1 px-2 rounded-full text-[10px] font-bold shadow-xs hover:bg-amber-100 transition active:scale-95 whitespace-nowrap shrink-0"
-              >
-                <Coins className="w-3 h-3 text-amber-500 fill-amber-400 shrink-0" />
-                <span>{currentUser?.coins ?? 100}</span>
-              </button>
-            )}
-
-            {isAdminTelegramUser(currentUser) && (
               <button
-                onClick={() => setShowAdminPanel(true)}
-                title="Admin Panel"
-                className="flex items-center gap-1 bg-[#221719] hover:bg-[#352427] text-[#F5D28E] py-1 px-2 sm:px-2.5 rounded-full text-[10px] sm:text-[10.5px] font-bold shadow-xs border border-[#C89B54]/40 transition active:scale-95 whitespace-nowrap shrink-0"
+                onClick={() => setActiveTab('profile')}
+                title="Admin Full Almaz Balansi"
+                className="hidden sm:flex items-center gap-1 bg-cyan-500/10 border border-cyan-400/25 text-cyan-200 py-1 px-2.5 rounded-full text-[10.5px] font-bold hover:bg-cyan-500/20 transition whitespace-nowrap shrink-0 cursor-pointer"
               >
-                <Crown className="w-3 h-3 shrink-0" />
-                <span>Admin</span>
+                <span>💎</span>
+                <span>Full</span>
               </button>
-            )}
-
-            <button 
-              onClick={() => setActiveTab('profile')}
-              title="Profil"
-              className="flex items-center gap-1.5 bg-[#FAF4F2] border border-[rgba(166,36,51,0.14)] p-0.5 sm:px-1.5 sm:pr-2 rounded-full shadow-subtle whitespace-nowrap shrink-0 hover:bg-[#F5EBE7] transition"
+              <button
+                onClick={() => setActiveTab('profile')}
+                title="Admin Full Moneta Balansi"
+                className="hidden sm:flex items-center gap-1 bg-amber-500/10 border border-amber-400/25 text-amber-200 py-1 px-2.5 rounded-full text-[10.5px] font-bold hover:bg-amber-500/20 transition whitespace-nowrap shrink-0 cursor-pointer"
+              >
+                <Coins className="w-3 h-3 text-amber-400 shrink-0" />
+                <span>Full</span>
+              </button>
+            </>
+          ) : currentUser?.gender === 'female' ? (
+            <button
+              onClick={() => setShowWithdrawModal(true)}
+              className="flex items-center gap-1 bg-cyan-500/10 border border-cyan-400/25 text-cyan-200 py-1 px-2.5 rounded-full text-[10.5px] font-bold hover:bg-cyan-500/20 transition active:scale-95 whitespace-nowrap shrink-0 cursor-pointer tabular-nums"
             >
-              {(() => {
-                const headerAvatar = resolveAvatarUrl(currentUser?.avatar || firebaseUser?.photoURL);
-                const headerName = getSafeUserDisplayName(currentUser, firebaseUser?.displayName || 'Profil');
-                return (
-                  <>
-                    {headerAvatar ? (
-                      <img
-                        src={headerAvatar}
-                        alt={headerName}
-                        className="w-6 h-6 sm:w-5.5 sm:h-5.5 rounded-full object-cover shrink-0 border border-white"
-                        onError={(e: any) => {
-                          e.currentTarget.style.display = 'none';
-                          const fallbackEl = e.currentTarget.nextElementSibling as HTMLElement | null;
-                          if (fallbackEl) fallbackEl.style.display = 'flex';
-                        }}
-                      />
-                    ) : null}
-                    <span
-                      className={cn(
-                        "w-6 h-6 sm:w-5.5 sm:h-5.5 rounded-full bg-rose-100 text-[#C93545] text-[10px] font-black items-center justify-center shrink-0",
-                        headerAvatar ? "hidden" : "flex"
-                      )}
-                    >
-                      {headerName.charAt(0).toUpperCase()}
-                    </span>
-                    <span className="hidden sm:inline text-[11px] font-bold truncate max-w-[90px] text-[#221719]">{headerName}</span>
-                  </>
-                );
-              })()}
+              <span>💎</span>
+              <span>{currentUser?.diamonds ?? 0}</span>
             </button>
-            <button onClick={handleLogout} title="Chiqish" aria-label="Chiqish" className="p-1.5 rounded-full bg-[#FAF4F2] hover:bg-rose-100 text-[#C93545] border border-[rgba(166,36,51,0.1)] shrink-0 transition">
-              <LogOut className="w-3.5 h-3.5" />
+          ) : (
+            <button
+              onClick={() => setShowTopUpModal(true)}
+              data-testid="header-coin-shop-btn"
+              title="Moneta Do'koni"
+              className="flex items-center gap-1 bg-amber-500/12 border border-amber-400/30 text-amber-200 py-1 px-2.5 rounded-full text-[10.5px] font-bold hover:bg-amber-500/20 transition active:scale-95 whitespace-nowrap shrink-0 cursor-pointer tabular-nums"
+            >
+              <Coins className="w-3 h-3 text-amber-400 shrink-0" />
+              <span>{currentUser?.coins ?? 100}</span>
+              <span className="hidden sm:inline text-amber-300 font-semibold">· Do'kon</span>
             </button>
-          </div>
-        </header>
+          )}
+
+          {isAdminTelegramUser(currentUser) && (
+            <button
+              onClick={() => setShowAdminPanel(true)}
+              data-testid="header-admin-panel-btn"
+              title="Admin Panel"
+              className="flex items-center gap-1 bg-[#1B1E2B] hover:bg-[#252A3C] text-amber-300 py-1 px-2.5 rounded-full text-[10.5px] font-bold border border-amber-400/30 transition active:scale-95 whitespace-nowrap shrink-0 cursor-pointer"
+            >
+              <Crown className="w-3 h-3 shrink-0" />
+              <span>Admin</span>
+            </button>
+          )}
+
+          <button
+            onClick={() => setActiveTab('profile')}
+            title="Profil"
+            className="flex items-center gap-1.5 bg-white/[0.06] hover:bg-white/[0.11] border border-white/[0.1] p-0.5 sm:px-2 sm:py-1 rounded-full whitespace-nowrap shrink-0 transition cursor-pointer"
+          >
+            {(() => {
+              const headerAvatar = resolveAvatarUrl(resolveEffectiveProfileAvatar(currentUser) || firebaseUser?.photoURL);
+              const headerName = getSafeUserDisplayName(currentUser, firebaseUser?.displayName || 'Profil');
+              return (
+                <>
+                  {headerAvatar ? (
+                    <img
+                      src={headerAvatar}
+                      alt={headerName}
+                      className="w-6 h-6 sm:w-5 sm:h-5 rounded-full object-cover shrink-0 border border-white/20"
+                      onError={(e: any) => {
+                        e.currentTarget.style.display = 'none';
+                        const fallbackEl = e.currentTarget.nextElementSibling as HTMLElement | null;
+                        if (fallbackEl) fallbackEl.style.display = 'flex';
+                      }}
+                    />
+                  ) : null}
+                  <span
+                    className={cn(
+                      "w-6 h-6 sm:w-5 sm:h-5 rounded-full bg-rose-500/20 text-rose-300 text-[10px] font-bold items-center justify-center shrink-0",
+                      headerAvatar ? "hidden" : "flex"
+                    )}
+                  >
+                    {headerName.charAt(0).toUpperCase()}
+                  </span>
+                  <span className="hidden sm:inline text-[11px] font-semibold truncate max-w-[96px] text-zinc-100">{headerName}</span>
+                </>
+              );
+            })()}
+          </button>
+          <button
+            onClick={handleLogout}
+            title="Chiqish"
+            aria-label="Chiqish"
+            className="p-1.5 rounded-full bg-white/[0.05] hover:bg-rose-500/20 text-zinc-400 hover:text-rose-300 border border-white/[0.08] shrink-0 transition cursor-pointer"
+          >
+            <LogOut className="w-3.5 h-3.5" />
+          </button>
+        </div>
+      </header>
 
       {/* Scrollable Inner Viewport or Fixed-Height Reels / Map / Chat Container */}
-      <div className={`flex-1 min-h-0 relative ${(activeTab === 'reels' || activeTab === 'map' || (activeTab === 'chats' && chatView === 'conversation')) ? 'overflow-hidden flex flex-col p-0' : 'overflow-y-auto overscroll-y-contain p-3 sm:p-5 space-y-4 pb-20'}`}>
-        
+      <div className={`flex-1 min-h-0 relative z-10 ${(activeTab === 'reels' || activeTab === 'map' || (activeTab === 'chats' && chatView === 'conversation')) ? 'overflow-hidden flex flex-col p-0' : 'overflow-y-auto overscroll-y-contain p-3 sm:p-5 space-y-4 pb-24'}`}>
         {/* --- LANDING TAB --- */}
         {activeTab === 'landing' && <LandingPage onLogin={() => openAuthModalClean('login')} />}
 
-        {/* --- DISCOVER TAB --- */}
-        {activeTab === 'discover' && (
-          <div className="space-y-4">
-            {/* Live Stream Go Live Promo Banner */}
-            <div className="bg-gradient-to-r from-[#C93545] via-[#B42A3B] to-[#982030] rounded-[22px] p-4 text-white shadow-lg shadow-rose-900/15 flex items-center justify-between border border-[#C89B54]/30">
-              <div className="flex items-center space-x-3">
-                <div className="p-2.5 bg-white/15 backdrop-blur-md rounded-full shadow-inner border border-white/20">
-                  <Radio className="w-5 h-5 text-white animate-pulse" />
-                </div>
-                <div>
-                  <h3 className="font-bold text-xs sm:text-sm tracking-wide">JONLI EFIR (LIVE)</h3>
-                  <p className="text-[10.5px] sm:text-xs text-white/85">Kamerangizni yoqing va barcha bilan muloqot qiling</p>
-                </div>
-              </div>
-              <button
-                onClick={() => {
-                  if (!firebaseUser && !currentUser) {
-                    openAuthModalClean('login');
-                    return;
-                  }
-                  setLiveModalMode('broadcaster');
-                  setShowLiveModal(true);
-                }}
-                className="bg-white text-[#A62433] px-3.5 py-2 rounded-full text-xs font-black shadow-md shrink-0 hover:bg-[#FDFBF9] transition active:scale-95"
-              >
-                Efir boshlash 🔴
-              </button>
-            </div>
-
-            <div className="bg-white p-3.5 sm:p-4 rounded-[20px] border border-[rgba(166,36,51,0.1)] shadow-subtle flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2.5">
-              <div>
-                <h2 className="text-xl sm:text-2xl font-editorial font-bold text-[#221719]">Nomzodlar</h2>
-                <p className="text-[11px] text-[#6B5B5E]">Face ID bilan tasdiqlangan haqiqiy insonlar</p>
-              </div>
-              <select 
-                value={filterRegion}
-                onChange={(e) => setFilterRegion(e.target.value)}
-                className="w-full sm:w-64 px-3.5 py-2 rounded-xl bg-[#FAF4F2] border border-[rgba(166,36,51,0.12)] text-xs font-semibold text-[#221719] outline-none focus:border-[#C93545]"
-              >
-                <option value="Barchasi">Barcha viloyatlar</option>
-                {Object.keys(UZ_LOCATIONS).map((reg, idx) => (
-                  <option key={`reg_opt1_${reg}_${idx}`} value={reg}>{reg}</option>
-                ))}
-              </select>
-            </div>
-
-            <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-3 sm:gap-4">
-              {isLoadingCandidates ? (
-                <>
-                  <CandidateSkeleton />
-                  <CandidateSkeleton />
-                </>
-              ) : filteredCandidates.length === 0 ? (
-                <div className="col-span-full p-8 text-center bg-white rounded-[24px] border border-[rgba(166,36,51,0.1)] shadow-subtle space-y-3">
-                  <div className="w-12 h-12 bg-[#FAF4F2] text-[#C93545] rounded-full flex items-center justify-center mx-auto border border-[rgba(166,36,51,0.12)]">
-                    <Users className="w-6 h-6" />
-                  </div>
-                  <h4 className="text-sm font-bold text-[#221719]">Ushbu filtr bo'yicha nomzodlar topilmadi</h4>
-                  <p className="text-xs text-[#6B5B5E]">Filtrni tozalab barcha viloyatdagi nomzodlarni ko'rishingiz mumkin.</p>
-                  <button 
-                    onClick={() => {
-                      setFilterRegion('Barchasi');
-                      setFilterDistrict('Barchasi');
-                      setSearchQuery('');
-                    }}
-                    className="px-5 py-2.5 rounded-full bg-[#C93545] text-white text-xs font-bold hover:bg-[#A62433] transition active:scale-95 shadow-xs"
-                  >
-                    Barcha nomzodlarni ko'rish
-                  </button>
-                </div>
-              ) : filteredCandidates.map((user, idx) => {
-                const candidateAvatar = resolveAvatarUrl(user.avatar);
-                const candidateName = getSafeUserDisplayName(user, user.name || 'Foydalanuvchi');
-                const faceVerified = Boolean(user.faceId?.verified);
-                const detectedGender = user.faceId?.detectedGender || user.gender;
-                const genderBadge = detectedGender === 'female' ? '👩 Qiz' : '👨 Yigit';
-                const isOnline = isUserOnlineStrict(user, onlineUserIds);
-                return (
-                <div key={user.uid ? `${user.uid}_${idx}` : `${user.id}_${idx}`} className="bg-white rounded-[22px] p-2.5 shadow-subtle flex flex-col justify-between space-y-2.5 border border-[rgba(166,36,51,0.1)] hover:shadow-md hover:border-[rgba(166,36,51,0.22)] transition-all">
-                  <button
-                    type="button"
-                    onClick={() => openUserProfileByUid(user.uid || user.id, user)}
-                    aria-label={`${candidateName} profilini ochish`}
-                    className="relative aspect-[3/4] w-full rounded-[16px] overflow-hidden bg-[#FAF4F2] block text-left focus:outline-none focus:ring-2 focus:ring-[#C93545]/40"
-                  >
-                    {candidateAvatar ? (
-                      <img 
-                        src={candidateAvatar} 
-                        alt={candidateName} 
-                        className="w-full h-full object-cover object-center transition-transform duration-300 hover:scale-105"
-                        onError={(e: any) => {
-                          e.currentTarget.style.display = 'none';
-                          const fallback = e.currentTarget.nextElementSibling as HTMLElement | null;
-                          if (fallback) fallback.style.display = 'flex';
-                        }}
-                      />
-                    ) : null}
-                    <div
-                      className={cn(
-                        "w-full h-full items-center justify-center bg-gradient-to-br from-[#FAF0EC] to-[#F3DFD9] text-[#A62433] font-editorial font-black text-3xl",
-                        candidateAvatar ? "hidden" : "flex"
-                      )}
-                    >
-                      {candidateName.charAt(0).toUpperCase()}
+        {/* --- DISCOVER, POSTS, CHATS, PROFILE WITH SMOOTH ANIMATEPRESENCE --- */}
+        {activeTab !== 'landing' && activeTab !== 'map' && activeTab !== 'reels' && (
+          <AnimatePresence mode="wait">
+            <motion.div
+              key={activeTab}
+              initial={{ opacity: 0, y: 8 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: -6 }}
+              transition={{ duration: 0.18, ease: [0.16, 1, 0.3, 1] }}
+              className={activeTab === 'chats' ? 'h-full flex flex-col' : 'space-y-4'}
+            >
+              {/* --- DISCOVER TAB --- */}
+              {activeTab === 'discover' && (
+                <div className="space-y-4">
+                  {/* Live Stream Go Live Promo Banner */}
+                  <div className="relative overflow-hidden bg-gradient-to-r from-[#221118] via-[#171825] to-[#12141E] rounded-[22px] p-4 text-white border border-rose-500/25 shadow-[0_14px_36px_rgba(0,0,0,0.45)] flex items-center justify-between gap-3">
+                    <div className="flex items-center gap-3 min-w-0">
+                      <div className="w-10 h-10 rounded-xl bg-rose-600/20 border border-rose-500/35 flex items-center justify-center shrink-0">
+                        <Radio className="w-5 h-5 text-rose-400 animate-pulse" />
+                      </div>
+                      <div className="min-w-0">
+                        <h3 className="font-bold text-xs sm:text-sm tracking-wide text-white truncate">JONLI EFIR (LIVE)</h3>
+                        <p className="text-[11px] text-zinc-400 truncate">Kamerangizni yoqing va barcha bilan muloqot qiling</p>
+                      </div>
                     </div>
-                    
-                    {user.isLive && (
-                      <div className="absolute top-2 left-2 px-2 py-0.5 rounded-full bg-red-600 text-white text-[8px] font-black flex items-center space-x-1 shadow-md animate-pulse border border-white/30">
-                        <span className="w-1.5 h-1.5 rounded-full bg-white animate-ping" />
-                        <span>LIVE</span>
-                      </div>
-                    )}
-
-                    {faceVerified && !user.isLive && (
-                      <div className="absolute top-2 left-2 px-2 py-0.5 rounded-full bg-emerald-600/95 backdrop-blur-md text-white text-[8.5px] font-bold flex items-center space-x-1 shadow-xs border border-white/25">
-                        <ScanFace className="w-2.5 h-2.5" />
-                        <span>Face ID ✓</span>
-                      </div>
-                    )}
-
-                    <span className="absolute top-2 right-2 px-2 py-0.5 rounded-full bg-[#221719]/80 backdrop-blur-sm text-white text-[8px] font-mono font-bold shadow-xs">
-                      {user.id}
-                    </span>
-
-                    {/* Strict Real-Time Online / Offline Status Badge */}
-                    <div className={cn(
-                      "absolute bottom-2 left-2 px-2 py-0.5 rounded-full backdrop-blur-md text-[8.5px] font-semibold flex items-center space-x-1 shadow-xs border border-white/20 text-white",
-                      isOnline ? "bg-emerald-600/90" : "bg-[#221719]/75"
-                    )}>
-                      <span className={cn("w-1.5 h-1.5 rounded-full bg-white", isOnline && "animate-pulse")} />
-                      <span>{isOnline ? "Onlayn" : "Oflayn"}</span>
-                    </div>
-                  </button>
-
-                  <div className="min-w-0 space-y-1">
-                    <h3 className="text-sm font-bold font-editorial text-[#221719] truncate">{candidateName}, {calculateAge(user.birthDate, user.age)} yoshda</h3>
-                    <p className="text-[10.5px] text-[#6B5B5E] truncate">{user.district || user.region}</p>
-
-                    {/* Face ID biometric summary inside candidate card */}
-                    {faceVerified ? (
-                      <div className="bg-emerald-50/90 border border-emerald-200/80 rounded-xl px-2 py-1 text-[9.5px] text-emerald-900 space-y-0.5">
-                        <div className="flex items-center justify-between font-bold">
-                          <span className="flex items-center gap-1">
-                            <ShieldCheck className="w-3 h-3 text-emerald-600 shrink-0" />
-                            <span>{genderBadge}</span>
-                          </span>
-                          <span className="font-mono text-emerald-700">{user.faceId?.confidence ?? 95}%</span>
-                        </div>
-                        <p className="text-[8.5px] text-emerald-700 font-medium truncate">
-                          Face ID · Ko'z & Tabassum ✓
-                        </p>
-                      </div>
-                    ) : isAdminTelegramUser(user) ? (
-                      <div className="bg-amber-50 border border-amber-200 rounded-xl px-2 py-1 text-[9.5px] font-bold text-amber-900 flex items-center gap-1">
-                        <Crown className="w-3 h-3 text-amber-600 shrink-0" />
-                        <span>Platforma Admini</span>
-                      </div>
-                    ) : (
-                      <div className="bg-[#FAF4F2] border border-[rgba(166,36,51,0.08)] rounded-xl px-2 py-1 text-[9.5px] font-semibold text-[#6B5B5E]">
-                        {genderBadge}
-                      </div>
-                    )}
-                  </div>
-
-                  {user.isLive && (
                     <button
                       onClick={() => {
-                        setActiveLiveHostUser(user);
-                        setActiveLiveStreamId(user.liveStreamId || ('stream_' + (user.uid || user.id)));
-                        setLiveModalMode('viewer');
+                        if (!firebaseUser && !currentUser) {
+                          openAuthModalClean('login');
+                          return;
+                        }
+                        setLiveModalMode('broadcaster');
                         setShowLiveModal(true);
                       }}
-                      className="w-full py-1.5 rounded-full bg-red-600 hover:bg-red-500 text-white font-bold text-[10px] shadow-sm flex items-center justify-center space-x-1 transition active:scale-95"
+                      className="bg-gradient-to-r from-[#E11D48] to-[#BE123C] hover:brightness-110 text-white px-4 py-2 rounded-xl text-xs font-bold shadow-md shadow-rose-950/50 shrink-0 transition active:scale-95 whitespace-nowrap cursor-pointer"
                     >
-                      <Radio className="w-3 h-3 animate-pulse" />
-                      <span>Efir (LIVE) 🎥</span>
-                    </button>
-                  )}
-
-                  <div className="flex space-x-1.5 pt-0.5">
-                    <button onClick={() => openUserProfileByUid(user.uid || user.id, user)} className="flex-1 py-1.5 rounded-full bg-[#FAF4F2] hover:bg-[#F3E4E0] text-[#A62433] font-bold text-[10.5px] border border-[rgba(166,36,51,0.12)] transition active:scale-95">
-                      Profil
-                    </button>
-                    <button onClick={() => openChatWithUser(user)} className="flex-1 py-1.5 rounded-full bg-[#C93545] hover:bg-[#A62433] text-white font-bold text-[10.5px] transition active:scale-95">
-                      Chat
+                      Efir boshlash
                     </button>
                   </div>
+
+                  {/* Discover Header + Region Filter */}
+                  <div className="bg-[#12141E] p-3.5 sm:p-4 rounded-[20px] border border-white/[0.08] flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2.5">
+                    <div>
+                      <h2 className="text-xl sm:text-2xl font-editorial font-bold text-white leading-tight">Nomzodlar</h2>
+                      <p className="text-[11.5px] text-zinc-400">Face ID bilan tasdiqlangan haqiqiy insonlar</p>
+                    </div>
+                    <select
+                      value={filterRegion}
+                      onChange={(e) => setFilterRegion(e.target.value)}
+                      className="w-full sm:w-64 px-3.5 py-2.5 rounded-xl bg-[#181B29] border border-white/10 text-xs font-semibold text-zinc-100 outline-none focus:border-rose-500 cursor-pointer"
+                    >
+                      <option value="Barchasi" className="bg-[#12141E] text-white">Barcha viloyatlar</option>
+                      {Object.keys(UZ_LOCATIONS).map((reg, idx) => (
+                        <option key={`reg_opt1_${reg}_${idx}`} value={reg} className="bg-[#12141E] text-white">{reg}</option>
+                      ))}
+                    </select>
+                  </div>
+
+                  <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-3 sm:gap-4">
+                    {isLoadingCandidates ? (
+                      <>
+                        <CandidateSkeleton />
+                        <CandidateSkeleton />
+                        <CandidateSkeleton />
+                        <CandidateSkeleton />
+                      </>
+                    ) : filteredCandidates.length === 0 ? (
+                      <div className="col-span-full p-8 text-center bg-[#12141E] rounded-[24px] border border-white/[0.08] space-y-3">
+                        <div className="w-12 h-12 bg-white/[0.05] text-rose-400 rounded-full flex items-center justify-center mx-auto border border-white/10">
+                          <Users className="w-6 h-6" />
+                        </div>
+                        <h4 className="text-sm font-bold text-white">Ushbu filtr bo'yicha nomzodlar topilmadi</h4>
+                        <p className="text-xs text-zinc-400">Filtrni tozalab barcha viloyatdagi nomzodlarni ko'rishingiz mumkin.</p>
+                        <button
+                          onClick={() => {
+                            setFilterRegion('Barchasi');
+                            setFilterDistrict('Barchasi');
+                            setSearchQuery('');
+                          }}
+                          className="px-5 py-2.5 rounded-xl bg-rose-600 hover:bg-rose-500 text-white text-xs font-bold transition active:scale-95 cursor-pointer"
+                        >
+                          Barcha nomzodlarni ko'rish
+                        </button>
+                      </div>
+                    ) : filteredCandidates.map((user, idx) => {
+                      const candidateAvatar = resolveAvatarUrl(resolveEffectiveProfileAvatar(user));
+                      const candidateName = getSafeUserDisplayName(user, user.name || 'Foydalanuvchi');
+                      const faceVerified = Boolean(user.faceId?.verified);
+                      const detectedGender = user.faceId?.detectedGender || user.gender;
+                      const genderLabel = genderToUzLabel(detectedGender);
+                      const isOnline = isUserOnlineStrict(user, onlineUserIds);
+                      const ageVal = calculateAge(user.birthDate, user.age);
+                      return (
+                        <motion.div
+                          key={user.uid ? `${user.uid}_${idx}` : `${user.id}_${idx}`}
+                          initial={{ opacity: 0, y: 10 }}
+                          animate={{ opacity: 1, y: 0 }}
+                          transition={{ duration: 0.22, delay: Math.min(idx * 0.03, 0.24) }}
+                          className="bg-[#12141E] rounded-[22px] p-2.5 flex flex-col justify-between gap-2.5 border border-white/[0.08] hover:border-rose-500/35 hover:bg-[#161925] transition-colors group"
+                        >
+                          <button
+                            type="button"
+                            onClick={() => openUserProfileByUid(user.uid || user.id, user)}
+                            aria-label={`${candidateName} profilini ochish`}
+                            className="relative aspect-[3/4] w-full rounded-[16px] overflow-hidden bg-[#181B29] block text-left focus:outline-none focus:ring-2 focus:ring-rose-500/50 cursor-pointer"
+                          >
+                            {candidateAvatar ? (
+                              <img
+                                src={candidateAvatar}
+                                alt={candidateName}
+                                className="w-full h-full object-cover object-center transition-transform duration-300 group-hover:scale-105"
+                                onError={(e: any) => {
+                                  e.currentTarget.style.display = 'none';
+                                  const fallback = e.currentTarget.nextElementSibling as HTMLElement | null;
+                                  if (fallback) fallback.style.display = 'flex';
+                                }}
+                              />
+                            ) : null}
+                            <div
+                              className={cn(
+                                "w-full h-full items-center justify-center bg-gradient-to-br from-[#231822] to-[#151826] text-rose-400 font-editorial font-black text-3xl",
+                                candidateAvatar ? "hidden" : "flex"
+                              )}
+                            >
+                              {candidateName.charAt(0).toUpperCase()}
+                            </div>
+
+                            <div className="pointer-events-none absolute inset-x-0 bottom-0 h-20 bg-gradient-to-t from-black/80 via-black/30 to-transparent" />
+
+                            {user.isLive ? (
+                              <div className="absolute top-2 left-2 px-2 py-0.5 rounded-full bg-red-600/95 text-white text-[9px] font-bold flex items-center gap-1 shadow-md">
+                                <span className="w-1.5 h-1.5 rounded-full bg-white animate-ping" />
+                                <span>LIVE</span>
+                              </div>
+                            ) : faceVerified ? (
+                              <div className="absolute top-2 left-2 px-2 py-0.5 rounded-full bg-black/55 backdrop-blur-md text-emerald-300 text-[9px] font-semibold flex items-center gap-1 border border-emerald-400/30">
+                                <ScanFace className="w-2.5 h-2.5" />
+                                <span>Tasdiqlangan</span>
+                              </div>
+                            ) : null}
+
+                            <div
+                              className={cn(
+                                "absolute bottom-2 left-2 px-2 py-0.5 rounded-full backdrop-blur-md text-[9px] font-semibold flex items-center gap-1 border text-white",
+                                isOnline
+                                  ? "bg-emerald-600/85 border-emerald-300/30"
+                                  : "bg-black/60 border-white/15 text-zinc-300"
+                              )}
+                            >
+                              <span className={cn("w-1.5 h-1.5 rounded-full", isOnline ? "bg-white animate-pulse" : "bg-zinc-400")} />
+                              <span>{isOnline ? "Onlayn" : "Oflayn"}</span>
+                            </div>
+                          </button>
+
+                          <div className="min-w-0 px-0.5 space-y-1">
+                            <div className="flex items-center justify-between gap-1.5">
+                              <h3 className="text-[14px] font-bold font-editorial text-white truncate">
+                                {candidateName}, {ageVal}
+                              </h3>
+                              {faceVerified && (
+                                <ShieldCheck className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+                              )}
+                            </div>
+                            <p className="text-[11px] text-zinc-400 truncate">
+                              {[user.district || user.region, genderLabel, faceVerified ? `${user.faceId?.confidence ?? 95}%` : null]
+                                .filter(Boolean)
+                                .join(' · ')}
+                            </p>
+                          </div>
+
+                          {user.isLive && (
+                            <button
+                              onClick={() => {
+                                setActiveLiveHostUser(user);
+                                setActiveLiveStreamId(user.liveStreamId || ('stream_' + (user.uid || user.id)));
+                                setLiveModalMode('viewer');
+                                setShowLiveModal(true);
+                              }}
+                              className="w-full py-1.5 rounded-xl bg-red-600 hover:bg-red-500 text-white font-bold text-[10.5px] flex items-center justify-center gap-1 transition active:scale-95 cursor-pointer"
+                            >
+                              <Radio className="w-3 h-3 animate-pulse" />
+                              <span>Efirni ko'rish</span>
+                            </button>
+                          )}
+
+                          <div className="flex gap-1.5 pt-0.5">
+                            <button
+                              onClick={() => openUserProfileByUid(user.uid || user.id, user)}
+                              className="flex-1 py-2 rounded-xl bg-white/[0.06] hover:bg-white/[0.11] text-zinc-200 font-semibold text-[11px] border border-white/[0.08] transition active:scale-95 cursor-pointer"
+                            >
+                              Profil
+                            </button>
+                            <button
+                              onClick={() => openChatWithUser(user)}
+                              className="flex-1 py-2 rounded-xl bg-[#E11D48] hover:bg-[#BE123C] text-white font-bold text-[11px] transition active:scale-95 cursor-pointer"
+                            >
+                              Chat
+                            </button>
+                          </div>
+                        </motion.div>
+                      );
+                    })}
+                  </div>
                 </div>
+              )}
+
+              {/* --- POSTS / LENTA TAB --- */}
+              {activeTab === 'posts' && (
+                <div className="space-y-4">
+                  <div className="bg-[#12141E] p-4 sm:p-5 rounded-[22px] border border-white/[0.08] flex items-center justify-between gap-3">
+                    <div>
+                      <h2 className="text-xl sm:text-2xl font-editorial font-bold text-white">Postlar</h2>
+                      <p className="text-[11.5px] text-zinc-400">Rasm, video va musiqiy lahzalar bilan bo'lishing</p>
+                    </div>
+                    <span className="text-xs font-semibold text-zinc-400 tabular-nums shrink-0">
+                      {postsList.length} ta post
+                    </span>
+                  </div>
+
+                  <PostsFeed
+                    posts={postsList}
+                    currentUser={currentUser}
+                    usersList={usersList}
+                    onlineUserIds={onlineUserIds}
+                    allowCompose={true}
+                    onPostCreated={(post) =>
+                      setPostsList((prev) => (prev.some((p) => p.id === post.id) ? prev : [post, ...prev]))
+                    }
+                    onPostUpdated={(post) =>
+                      setPostsList((prev) => prev.map((p) => (p.id === post.id ? post : p)))
+                    }
+                    onPostDeleted={(postId) =>
+                      setPostsList((prev) => prev.filter((p) => p.id !== postId))
+                    }
+                    onOpenProfile={openUserProfileByUid}
+                    onOpenAuth={() => openAuthModalClean('login')}
+                    onNotify={showToast}
+                  />
+                </div>
+              )}
+
+              {/* --- CHATS TAB --- */}
+              {activeTab === 'chats' && (
+                <div className="h-full flex flex-col">
+                  {chatView === 'list' ? (
+                    <div className="bg-[#11131C] rounded-[24px] border border-white/[0.08] overflow-hidden flex flex-col h-full">
+                      <div className="p-4 border-b border-white/[0.08] flex items-center justify-between">
+                        <h2 className="font-editorial text-2xl font-bold text-white">Xabarlar</h2>
+                        <span className="text-xs font-semibold text-zinc-400 tabular-nums">
+                          {chatsList.length} faol suhbat
+                        </span>
+                      </div>
+                      <div className="divide-y divide-white/[0.06] overflow-y-auto pb-20">
+                        {isLoadingChats ? (
+                          <>
+                            <ChatSkeleton />
+                            <ChatSkeleton />
+                            <ChatSkeleton />
+                          </>
+                        ) : chatsList.length === 0 ? (
+                          <div className="p-10 text-center space-y-3">
+                            <div className="w-16 h-16 bg-white/[0.05] border border-white/[0.08] rounded-full flex items-center justify-center mx-auto">
+                              <MessageCircle className="w-8 h-8 text-zinc-500" />
+                            </div>
+                            <p className="text-xs text-zinc-400 font-medium">
+                              Hozircha xabarlar yo'q. Nomzodlar bilan suhbatni boshlang!
+                            </p>
+                          </div>
+                        ) : chatsList.map((chat, idx) => {
+                          const myUid = currentUser?.uid || firebaseUser?.uid;
+                          const otherUid = chat.participants?.find((p: string) => p !== myUid) || chat.partner?.uid || chat.partner?.id;
+                          const otherUser = usersList.find(u => u.uid === otherUid || u.id === otherUid) ||
+                                            (otherUid === ALOV_AI_USER.uid ? ALOV_AI_USER : null) ||
+                                            chat.partner ||
+                                            { uid: otherUid, name: 'Foydalanuvchi' };
+                          const unread = chat.unreadCount?.[myUid || ''] || 0;
+                          const chatAvatar = resolveAvatarUrl(resolveEffectiveProfileAvatar(otherUser));
+
+                          return (
+                            <motion.div
+                              key={chat.id ? `${chat.id}_${idx}` : `chat_${idx}`}
+                              initial={{ opacity: 0, x: -8 }}
+                              animate={{ opacity: 1, x: 0 }}
+                              transition={{ duration: 0.16, delay: Math.min(idx * 0.025, 0.2) }}
+                              onClick={() => {
+                                setSelectedChatUser(otherUser);
+                                setChatView('conversation');
+                                setChatsList(prev => prev.map(c => c.id === chat.id ? { ...c, unreadCount: { ...(c.unreadCount || {}), [myUid || '']: 0 } } : c));
+                              }}
+                              className={cn(
+                                "p-4 flex items-center space-x-3 cursor-pointer hover:bg-white/[0.04] transition-colors relative",
+                                chat.isAI && "bg-rose-500/[0.06]"
+                              )}
+                            >
+                              <div className="relative">
+                                {chatAvatar ? (
+                                  <img src={chatAvatar} alt={otherUser?.name || ''} className="w-12 h-12 rounded-full object-cover shrink-0 border border-white/15" />
+                                ) : (
+                                  <div className="w-12 h-12 rounded-full bg-rose-500/20 text-rose-300 font-bold text-base flex items-center justify-center shrink-0 border border-rose-500/30">
+                                    {getSafeUserDisplayName(otherUser, 'F').charAt(0).toUpperCase()}
+                                  </div>
+                                )}
+                                {isUserOnlineStrict(otherUser, onlineUserIds) && (
+                                  <span className="absolute bottom-0 right-0 w-3 h-3 bg-emerald-500 border-2 border-[#11131C] rounded-full"></span>
+                                )}
+                              </div>
+                              <div className="flex-1 min-w-0">
+                                <div className="flex items-center justify-between gap-2">
+                                  <div className="flex items-center space-x-1.5 min-w-0">
+                                    <h4 className="font-bold text-sm text-white truncate">{otherUser?.name || 'Foydalanuvchi'}</h4>
+                                    {chat.isAI && <span className="text-[10px] font-bold text-rose-400 shrink-0">· AI</span>}
+                                  </div>
+                                  <span className="text-[10.5px] text-zinc-500 tabular-nums shrink-0">
+                                    {chat.updatedAt?.toDate ? chat.updatedAt.toDate().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : ''}
+                                  </span>
+                                </div>
+                                <div className="flex items-center justify-between mt-0.5">
+                                  <p className={cn("text-xs truncate flex-1 pr-2", unread > 0 ? "text-white font-semibold" : "text-zinc-400")}>
+                                    {chat.isTyping?.[otherUid] || (chat.isAI && isAiTyping) ? (
+                                      <span className="text-emerald-400 font-semibold">yozmoqda...</span>
+                                    ) : chat.lastMessage}
+                                  </p>
+                                  {unread > 0 && (
+                                    <span className="bg-rose-600 text-white text-[10px] font-bold min-w-[18px] h-[18px] rounded-full flex items-center justify-center px-1 tabular-nums">
+                                      {unread}
+                                    </span>
+                                  )}
+                                </div>
+                              </div>
+                            </motion.div>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="flex-1 min-h-0 w-full bg-[#09090D] flex flex-col overflow-hidden">
+                      <div className="shrink-0 z-20 px-3 py-2.5 border-b border-white/[0.08] flex items-center justify-between bg-[#11131C]">
+                        <div className="flex items-center space-x-2 min-w-0">
+                          <button onClick={() => setChatView('list')} className="p-2 rounded-full hover:bg-white/[0.08] text-zinc-200 transition active:scale-90 shrink-0 cursor-pointer">
+                            <ArrowLeft className="w-5 h-5" />
+                          </button>
+                          {(() => {
+                            const partnerOnline = isUserOnlineStrict(selectedChatUser, onlineUserIds);
+                            const partnerUid = selectedChatUser?.uid || selectedChatUser?.id;
+                            const partnerAvatar = resolveAvatarUrl(resolveEffectiveProfileAvatar(selectedChatUser));
+                            return (
+                              <button
+                                type="button"
+                                onClick={() => partnerUid && openUserProfileByUid(partnerUid, selectedChatUser)}
+                                className="flex items-center space-x-2.5 min-w-0 text-left hover:opacity-85 transition cursor-pointer"
+                                title="Profilni ko'rish"
+                              >
+                                <div className="relative shrink-0">
+                                  {partnerAvatar ? (
+                                    <img src={partnerAvatar} alt={selectedChatUser?.name || ''} className="w-9 h-9 rounded-full object-cover border border-white/15" />
+                                  ) : (
+                                    <div className="w-9 h-9 rounded-full bg-rose-500/20 text-rose-300 font-bold text-sm flex items-center justify-center border border-rose-500/30">
+                                      {getSafeUserDisplayName(selectedChatUser, 'F').charAt(0).toUpperCase()}
+                                    </div>
+                                  )}
+                                  {partnerOnline && (
+                                    <span className="absolute bottom-0 right-0 w-2.5 h-2.5 bg-emerald-500 border-2 border-[#11131C] rounded-full"></span>
+                                  )}
+                                </div>
+                                <div className="min-w-0">
+                                  <h3 className="font-sans font-bold text-sm text-white leading-none truncate">{selectedChatUser?.name}</h3>
+                                  <p className={cn("text-[10.5px] mt-1", partnerOnline ? "text-emerald-400 font-semibold" : "text-zinc-400")}>
+                                    {partnerOnline ? 'tarmoqda' : formatLastSeenUz(selectedChatUser?.lastSeen, false)}
+                                  </p>
+                                </div>
+                              </button>
+                            );
+                          })()}
+                        </div>
+                        <div className="flex items-center space-x-1">
+                          {(() => {
+                            const myUid = currentUser?.uid || firebaseUser?.uid;
+                            const otherUid = selectedChatUser?.uid || selectedChatUser?.id;
+                            const activeChatId = (myUid && otherUid) ? [myUid, otherUid].sort().join('_') : '';
+                            const isAIBotChat = otherUid === ALOV_AI_USER.uid || otherUid === 'user_kamola_006' || otherUid === 'ALOV-006';
+                            const isFriendActive = Boolean(activeChatId && chatFriendships[activeChatId]);
+                            if (currentUser?.gender === 'female' && !isAIBotChat) {
+                              return (
+                                <button
+                                  type="button"
+                                  onClick={handleToggleFriendship}
+                                  title={isFriendActive ? "Do'stlashishni bekor qilish (5 moneta yechiladi)" : "Do'stlashish — yigitdan moneta yechilmaydi"}
+                                  className={cn(
+                                    "px-2.5 py-1.5 rounded-full text-[10px] font-bold flex items-center space-x-1 transition active:scale-95 whitespace-nowrap shrink-0 cursor-pointer",
+                                    isFriendActive
+                                      ? "bg-emerald-600 text-white"
+                                      : "bg-rose-500/15 hover:bg-rose-500/25 text-rose-300 border border-rose-500/30"
+                                  )}
+                                >
+                                  <Handshake className="w-3.5 h-3.5" />
+                                  <span>{isFriendActive ? "Do'stlashilgan" : "Do'stlashish"}</span>
+                                </button>
+                              );
+                            }
+                            return null;
+                          })()}
+                          <button
+                            onClick={() => setShowGiftModal(true)}
+                            title="Sovg'a yuborish"
+                            className="p-2 rounded-full hover:bg-amber-500/15 text-amber-400 transition active:scale-90 cursor-pointer"
+                          >
+                            <Gift className="w-5 h-5" />
+                          </button>
+                          <button
+                            onClick={() => {
+                              if (selectedChatUser) {
+                                setActiveCallUser(selectedChatUser);
+                              }
+                            }}
+                            title="Video qo'ng'iroq"
+                            className="p-2 rounded-full hover:bg-rose-500/15 text-rose-400 transition active:scale-90 cursor-pointer"
+                          >
+                            <Video className="w-5 h-5" />
+                          </button>
+                        </div>
+                      </div>
+
+                      {(() => {
+                        const myUid = currentUser?.uid || firebaseUser?.uid;
+                        const otherUid = selectedChatUser?.uid || selectedChatUser?.id;
+                        const activeChatId = (myUid && otherUid) ? [myUid, otherUid].sort().join('_') : '';
+                        const isFriendActive = Boolean(activeChatId && chatFriendships[activeChatId]);
+                        const isAIBotChat = otherUid === ALOV_AI_USER.uid || otherUid === 'user_kamola_006' || otherUid === 'ALOV-006';
+
+                        if (isFriendActive && !isAIBotChat) {
+                          return (
+                            <div className="bg-emerald-500/15 border-b border-emerald-500/25 text-emerald-200 px-3.5 py-1.5 text-[10.5px] font-semibold flex items-center justify-between shrink-0">
+                              <span>Do'stlashish faol — Yigitdan moneta yechilmaydi</span>
+                              <span className="text-emerald-300 font-bold whitespace-nowrap">Bepul chat</span>
+                            </div>
+                          );
+                        }
+                        if (currentUser?.gender === 'female') {
+                          return (
+                            <div className="bg-cyan-500/10 border-b border-cyan-500/20 text-cyan-200 px-3.5 py-1.5 text-[10.5px] font-semibold flex items-center justify-between shrink-0">
+                              <span>💎 Har bir javobingiz uchun +5 Almaz limitga qo'shiladi</span>
+                              <span className="font-mono text-cyan-300 font-bold whitespace-nowrap tabular-nums">Wallet: {currentUser?.diamonds ?? 0}</span>
+                            </div>
+                          );
+                        }
+                        if (!isAIBotChat) {
+                          return (
+                            <div className="bg-amber-500/10 border-b border-amber-500/20 text-amber-200 px-3.5 py-1.5 text-[10.5px] font-semibold flex items-center justify-between shrink-0">
+                              <span>🪙 Har bir xabar narxi: {MESSAGE_COIN_COST} Moneta</span>
+                              <span className="font-mono text-amber-300 font-bold whitespace-nowrap tabular-nums">Balans: {currentUser?.coins ?? 100}</span>
+                            </div>
+                          );
+                        }
+                        return null;
+                      })()}
+
+                      <div ref={chatMessagesContainerRef} className="flex-1 min-h-0 px-3.5 py-3 overflow-y-auto overscroll-y-contain space-y-2.5 bg-[#09090D] [-webkit-overflow-scrolling:touch]">
+                        <AnimatePresence>
+                          {(() => {
+                            const myUid = currentUser?.uid || firebaseUser?.uid;
+                            const otherUid = selectedChatUser?.uid || selectedChatUser?.id;
+                            const activeKey = selectedChatUser?.id || selectedChatUser?.uid;
+                            const activeChatId = (myUid && otherUid) ? [myUid, otherUid].sort().join('_') : null;
+
+                            const msgs = (activeChatId && chatMessages[activeChatId]) ||
+                                         (activeKey && chatMessages[activeKey]) ||
+                                         (selectedChatUser?.uid && chatMessages[selectedChatUser.uid]) ||
+                                         (selectedChatUser?.id && chatMessages[selectedChatUser.id]) ||
+                                         [];
+
+                            const sortedMessages = [...msgs].sort((a, b) =>
+                              new Date(a.createdAt || 0).getTime() - new Date(b.createdAt || 0).getTime()
+                            );
+
+                            return sortedMessages.map((msg, idx) => {
+                              const isMe = msg.senderId === 'me' || (myUid && (msg.senderId === myUid || msg.userId === myUid));
+
+                              return (
+                                <motion.div
+                                  key={msg.id ? `${msg.id}_${idx}` : `msg_${idx}`}
+                                  initial={{ opacity: 0, y: 8, scale: 0.96 }}
+                                  animate={{ opacity: 1, y: 0, scale: 1 }}
+                                  transition={{ duration: 0.16 }}
+                                  className={cn("flex", isMe ? 'justify-end' : 'justify-start')}
+                                >
+                                  <div className={cn(
+                                    "max-w-[85%] rounded-[18px] px-4 py-2.5 relative",
+                                    isMe
+                                      ? 'bg-gradient-to-br from-[#E11D48] to-[#BE123C] text-white rounded-tr-none shadow-md shadow-rose-950/30'
+                                      : 'bg-[#151824] text-zinc-100 border border-white/[0.08] rounded-tl-none'
+                                  )}>
+                                    {msg.type === 'gift' ? (
+                                      <div className="flex items-center space-x-2.5 py-1">
+                                        <span className="text-3xl shrink-0">{msg.giftIcon || '🎁'}</span>
+                                        <div>
+                                          <p className="font-bold text-xs">{msg.giftName || "Sovg'a"} yuborildi!</p>
+                                          <p className="text-[10px] opacity-90 flex items-center space-x-1 mt-0.5">
+                                            <span>🪙 {msg.coinPrice || 10} moneta</span>
+                                          </p>
+                                        </div>
+                                      </div>
+                                    ) : msg.type === 'meet' ? (
+                                      <a href={msg.meetUrl} target="_blank" rel="noreferrer" className="underline font-bold flex items-center space-x-2 py-1">
+                                        <Video className="w-4 h-4" />
+                                        <span>Google Meet Qo'shilish</span>
+                                        <ArrowUpRight className="w-3.5 h-3.5" />
+                                      </a>
+                                    ) : msg.type === 'image' ? (
+                                      <img src={msg.fileUrl} alt="" className="rounded-lg max-h-60 object-cover" />
+                                    ) : msg.type === 'video' ? (
+                                      <VideoPlayer url={msg.fileUrl || ''} />
+                                    ) : (msg.type === 'voice' || msg.type === 'audio') ? (
+                                      <VoiceMessage url={msg.fileUrl || ''} senderId={isMe ? 'me' : msg.senderId} />
+                                    ) : (
+                                      <p className="text-[13px] leading-relaxed whitespace-pre-wrap break-words">{msg.text}</p>
+                                    )}
+                                    <div className="flex items-center justify-end space-x-1 mt-1">
+                                      <span className={cn("text-[9.5px] tabular-nums", isMe ? 'text-rose-100/80' : 'text-zinc-500')}>
+                                        {msg.time}
+                                      </span>
+                                      {isMe && (
+                                        <div className="flex items-center ml-1 shrink-0">
+                                          {msg.status === 'sending' ? (
+                                            <Clock className="w-3 h-3 text-rose-200/90 animate-pulse" />
+                                          ) : (msg.status === 'read' || msg.read) ? (
+                                            <CheckCheck className="w-3.5 h-3.5 text-cyan-200 font-bold" />
+                                          ) : (
+                                            <Check className="w-3.5 h-3.5 text-rose-200" />
+                                          )}
+                                        </div>
+                                      )}
+                                    </div>
+                                  </div>
+                                </motion.div>
+                              );
+                            });
+                          })()}
+                          <div ref={chatBottomRef} />
+
+                          {isOtherTyping || (selectedChatUser?.uid === ALOV_AI_USER.uid && isAiTyping) ? (
+                            <motion.div
+                              initial={{ opacity: 0, y: 5 }}
+                              animate={{ opacity: 1, y: 0 }}
+                              className="flex justify-start"
+                            >
+                              <div className="bg-[#151824] border border-white/[0.08] text-zinc-400 rounded-[18px] rounded-tl-none px-4 py-2 flex items-center space-x-2">
+                                <span className="text-[11px] font-semibold">{selectedChatUser?.uid === ALOV_AI_USER.uid ? 'Alov AI yozmoqda' : 'yozmoqda'}</span>
+                                <div className="flex space-x-1">
+                                  <motion.div animate={{ opacity: [0.3, 1, 0.3] }} transition={{ repeat: Infinity, duration: 1, delay: 0 }} className="w-1 h-1 bg-zinc-400 rounded-full" />
+                                  <motion.div animate={{ opacity: [0.3, 1, 0.3] }} transition={{ repeat: Infinity, duration: 1, delay: 0.2 }} className="w-1 h-1 bg-zinc-400 rounded-full" />
+                                  <motion.div animate={{ opacity: [0.3, 1, 0.3] }} transition={{ repeat: Infinity, duration: 1, delay: 0.4 }} className="w-1 h-1 bg-zinc-400 rounded-full" />
+                                </div>
+                              </div>
+                            </motion.div>
+                          ) : null}
+                        </AnimatePresence>
+                      </div>
+
+                      {(() => {
+                        const progressVal = Number(currentUser?.diamondProgress || 0);
+                        const progressPct = getDiamondProgressPercent(progressVal);
+                        const pendingBatches = Array.isArray(currentUser?.pendingDiamondBatches) ? currentUser.pendingDiamondBatches : [];
+                        const pendingTotal = getPendingDiamondsTotal(pendingBatches);
+                        const nextUnlockAt = getNextUnlockTimestamp(pendingBatches);
+                        const countdown = computeCountdownParts(nextUnlockAt, countdownNow);
+
+                        if (currentUser?.gender === 'female') {
+                          return (
+                            <div className="bg-[#11131C] border-t border-white/[0.08] px-3.5 pt-2 pb-1.5 shrink-0 space-y-1">
+                              <div className="flex items-center justify-between text-[10.5px] font-bold">
+                                <span className="text-zinc-300 flex items-center gap-1">
+                                  <span>💎 Olmos limiti:</span>
+                                  <span className="text-cyan-300 tabular-nums">{progressVal} / {DIAMOND_LIMIT_TARGET}</span>
+                                </span>
+                                <span className="text-emerald-400 tabular-nums">{progressPct}%</span>
+                              </div>
+                              <div className="w-full h-1.5 bg-white/[0.08] rounded-full overflow-hidden">
+                                <div
+                                  className="h-full bg-gradient-to-r from-cyan-500 to-emerald-500 transition-all duration-500 rounded-full"
+                                  style={{ width: `${progressPct}%` }}
+                                />
+                              </div>
+                              {pendingTotal > 0 && (
+                                <div className="flex items-center justify-between text-[10px] font-semibold text-amber-200 bg-amber-500/10 px-2.5 py-1 rounded-lg border border-amber-400/20">
+                                  <span className="flex items-center gap-1">
+                                    <Clock className="w-3 h-3 shrink-0 text-amber-400" />
+                                    <span>{pendingTotal} 💎 24 soat ichida hisobga qo'shiladi</span>
+                                  </span>
+                                  <span className="font-mono font-bold text-amber-300 tabular-nums">{countdown.formatted}</span>
+                                </div>
+                              )}
+                            </div>
+                          );
+                        }
+                        return null;
+                      })()}
+
+                      <div className="shrink-0 z-20 px-3 py-2.5 pb-safe bg-[#11131C] border-t border-white/[0.08] flex items-end space-x-2">
+                        <label aria-label="Media yuklash" className="p-2.5 rounded-full text-zinc-400 hover:bg-white/[0.06] hover:text-zinc-200 transition active:scale-90 cursor-pointer shrink-0">
+                          <Plus className="w-5 h-5" />
+                          <input type="file" className="hidden" accept="image/*,video/*,audio/*" onChange={handleMediaUpload} />
+                        </label>
+                        <div className="flex-1 relative">
+                          <textarea
+                            placeholder="Xabar yozing..."
+                            rows={1}
+                            value={inputMessage}
+                            onFocus={() => {
+                              setTimeout(() => {
+                                const el = chatMessagesContainerRef.current;
+                                if (el) el.scrollTop = el.scrollHeight;
+                              }, 120);
+                            }}
+                            onChange={(e) => {
+                              setInputMessage(e.target.value);
+                              handleTyping();
+                            }}
+                            onKeyDown={(e) => {
+                              if (e.key === 'Enter' && !e.shiftKey) {
+                                e.preventDefault();
+                                handleSendChatMessage();
+                              }
+                            }}
+                            className="w-full px-4 py-2.5 rounded-[20px] bg-[#181B29] border border-white/[0.08] text-[13px] text-white placeholder:text-zinc-500 focus:outline-none focus:border-rose-500 resize-none max-h-32"
+                          />
+                        </div>
+                        {inputMessage.trim() ? (
+                          <button
+                            onClick={() => handleSendChatMessage()}
+                            className="bg-[#E11D48] text-white p-3 rounded-full shadow-lg hover:bg-[#BE123C] transition-all active:scale-95 flex items-center justify-center cursor-pointer"
+                          >
+                            <Send className="w-4.5 h-4.5" />
+                          </button>
+                        ) : (
+                          <button
+                            onMouseDown={startRecording}
+                            onMouseUp={stopRecording}
+                            onTouchStart={startRecording}
+                            onTouchEnd={stopRecording}
+                            className={cn(
+                              "p-3 rounded-full transition-all active:scale-95 flex items-center justify-center cursor-pointer",
+                              isRecording ? "bg-red-600 text-white animate-pulse" : "bg-white/[0.07] text-zinc-300 hover:bg-white/[0.12]"
+                            )}
+                          >
+                            <Mic className="w-5 h-5" />
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* --- PROFILE TAB (Editorial Obsidian Dating Profile) --- */}
+              {activeTab === 'profile' && (() => {
+                const profileAvatar = resolveAvatarUrl(resolveEffectiveProfileAvatar(currentUser) || firebaseUser?.photoURL);
+                const profileName = getSafeUserDisplayName(currentUser, firebaseUser?.displayName || 'Profil');
+                const isAdmin = isAdminTelegramUser(currentUser);
+                const locationText = [currentUser?.district, currentUser?.region].filter(Boolean).join(', ') || "O'zbekiston";
+                const profileBanner = resolveAvatarUrl(currentUser?.banner);
+                const followersCount = Array.isArray(currentUser?.followers)
+                  ? currentUser.followers.length
+                  : (currentUser?.followersCount ?? 0);
+                const followingCount = Array.isArray(currentUser?.following)
+                  ? currentUser.following.length
+                  : (currentUser?.followingCount ?? 0);
+                const totalLikesCount = Math.max(
+                  Number(currentUser?.likesCount || 0),
+                  computeAuthorTotalLikes(postsList, currentUser?.uid)
                 );
-              })}
-            </div>
-          </div>
-        )}
+                const openEditProfileModal = () => {
+                  setErrorMsg('');
+                  setRegName(currentUser?.name || '');
+                  setRegUsername(currentUser?.username || '');
+                  setRegBirthDate(currentUser?.birthDate || '2002-05-15');
+                  setRegAge(String(currentUser?.age || calculateAge(currentUser?.birthDate, 22)));
+                  setRegGender(currentUser?.gender || 'female');
+                  setRegRegion(currentUser?.region || 'Toshkent shahri');
+                  setRegDistrict(currentUser?.district || 'Yunusobod tumani');
+                  setRegNeighborhood(currentUser?.neighborhood || '');
+                  setRegPhone(formatPhoneNumberPretty(currentUser?.phone || '+998 '));
+                  setRegTelegram(currentUser?.telegram || '');
+                  setRegInstagram(currentUser?.instagram || '');
+                  setRegBio(currentUser?.bio || '');
+                  setRegAvatar(resolveEffectiveProfileAvatar(currentUser));
+                  setRegBanner(currentUser?.banner || '');
+                  setRegLocationVisibility(currentUser?.locationVisibility || 'everyone');
+                  setShowProfileModal(true);
+                };
 
-        {/* --- POSTS / LENTA TAB --- */}
-        {activeTab === 'posts' && (
-          <div className="space-y-4">
-            <div className="bg-white p-4 sm:p-5 rounded-[24px] border border-[rgba(166,36,51,0.1)] shadow-subtle flex items-center justify-between gap-3">
-              <div>
-                <h2 className="text-xl sm:text-2xl font-editorial font-bold text-[#221719]">Postlar</h2>
-                <p className="text-[11px] text-[#6B5B5E]">Rasm, video va musiqiy lahzalar bilan bo'lishing</p>
-              </div>
-              <span className="px-3 py-1 rounded-full bg-[#FAF4F2] border border-[rgba(166,36,51,0.12)] text-[11px] font-bold text-[#A62433] tabular-nums shrink-0">
-                {postsList.length} ta post
-              </span>
-            </div>
+                return (
+                  <div className="space-y-4">
+                    {/* Editorial Profile Hero Card */}
+                    <div className="bg-[#12141E] rounded-[28px] border border-white/[0.08] overflow-hidden">
+                      {/* Cover Banner */}
+                      <div className="relative h-40 sm:h-52 bg-gradient-to-br from-[#27121C] via-[#1B1726] to-[#11131C] border-b border-white/[0.08] overflow-hidden">
+                        {profileBanner ? (
+                          <img
+                            src={profileBanner}
+                            alt={`${profileName} banneri`}
+                            className="w-full h-full object-cover object-center"
+                            onError={(e: any) => {
+                              e.currentTarget.style.display = 'none';
+                            }}
+                          />
+                        ) : (
+                          <div className="w-full h-full flex items-center justify-center pointer-events-none">
+                            <div className="text-center opacity-50">
+                              <ImageIcon className="w-8 h-8 text-rose-400 mx-auto mb-1" />
+                              <p className="text-[11px] font-semibold text-zinc-400">Profil banneri uchun joy</p>
+                            </div>
+                          </div>
+                        )}
+                        <div className="absolute inset-0 bg-gradient-to-t from-[#12141E] via-black/25 to-black/30 pointer-events-none" />
 
-            <PostsFeed
-              posts={postsList}
-              currentUser={currentUser}
-              usersList={usersList}
-              onlineUserIds={onlineUserIds}
-              allowCompose={true}
-              onPostCreated={(post) =>
-                setPostsList((prev) => (prev.some((p) => p.id === post.id) ? prev : [post, ...prev]))
-              }
-              onPostUpdated={(post) =>
-                setPostsList((prev) => prev.map((p) => (p.id === post.id ? post : p)))
-              }
-              onPostDeleted={(postId) =>
-                setPostsList((prev) => prev.filter((p) => p.id !== postId))
-              }
-              onOpenProfile={openUserProfileByUid}
-              onOpenAuth={() => openAuthModalClean('login')}
-              onNotify={showToast}
-            />
-          </div>
+                        <div className="absolute top-3.5 left-4 right-4 flex items-center justify-between gap-2">
+                          <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-black/55 backdrop-blur-md text-emerald-300 text-[10.5px] font-semibold border border-emerald-400/25">
+                            <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
+                            <span>Onlayn</span>
+                          </span>
+
+                          <div className="flex items-center gap-2">
+                            <label className="cursor-pointer inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-black/60 hover:bg-black/80 backdrop-blur-md text-white border border-white/15 text-[11px] font-semibold transition active:scale-95">
+                              <Camera className="w-3.5 h-3.5 text-rose-400" />
+                              <span>{isUploadingBanner ? 'Yuklanmoqda...' : 'Banner'}</span>
+                              <input
+                                type="file"
+                                accept="image/*"
+                                disabled={isUploadingBanner}
+                                onChange={(e) => handleBannerFileChange(e, true)}
+                                className="hidden"
+                              />
+                            </label>
+                            <button
+                              type="button"
+                              onClick={openEditProfileModal}
+                              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-black/60 hover:bg-black/80 backdrop-blur-md text-white border border-white/15 text-[11px] font-semibold transition active:scale-95 cursor-pointer"
+                            >
+                              <Edit3 className="w-3.5 h-3.5 text-rose-400" />
+                              <span>Tahrirlash</span>
+                            </button>
+                          </div>
+                        </div>
+                      </div>
+
+                      <div className="px-5 sm:px-7 pb-6">
+                        <div className="flex flex-col sm:flex-row sm:items-end gap-4 -mt-12 sm:-mt-14 relative z-10">
+                          <div className="relative shrink-0 self-start">
+                            {profileAvatar ? (
+                              <img
+                                src={profileAvatar}
+                                alt={profileName}
+                                className="w-24 h-24 sm:w-28 sm:h-28 rounded-full object-cover border-4 border-[#12141E] shadow-xl bg-[#181B29]"
+                                onError={(e: any) => {
+                                  e.currentTarget.style.display = 'none';
+                                  const fallbackEl = e.currentTarget.nextElementSibling as HTMLElement | null;
+                                  if (fallbackEl) fallbackEl.style.display = 'flex';
+                                }}
+                              />
+                            ) : null}
+                            <div
+                              className={cn(
+                                "w-24 h-24 sm:w-28 sm:h-28 rounded-full bg-[#1C1F2E] text-rose-400 font-editorial font-black text-3xl items-center justify-center border-4 border-[#12141E] shadow-xl",
+                                profileAvatar ? "hidden" : "flex"
+                              )}
+                            >
+                              {profileName.charAt(0).toUpperCase()}
+                            </div>
+                            {currentUser?.faceId?.verified && (
+                              <span
+                                title="Face ID Tasdiqlangan"
+                                className="absolute bottom-1 right-1 w-6 h-6 rounded-full bg-emerald-600 text-white border-2 border-[#12141E] flex items-center justify-center shadow-sm"
+                              >
+                                <Check className="w-3.5 h-3.5" />
+                              </span>
+                            )}
+                          </div>
+
+                          <div className="flex-1 min-w-0 sm:pb-1">
+                            <div className="flex items-center gap-2 flex-wrap">
+                              <h1 className="text-2xl sm:text-[28px] font-editorial font-bold text-white leading-tight truncate">
+                                {profileName}
+                              </h1>
+                              {currentUser?.username && (
+                                <span className="font-mono text-xs font-semibold text-rose-400 shrink-0">
+                                  {formatUsernameDisplay(currentUser.username)}
+                                </span>
+                              )}
+                              {isAdmin ? (
+                                <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full bg-amber-500/15 text-amber-300 border border-amber-400/25 text-[10px] font-bold shrink-0">
+                                  <Crown className="w-3 h-3" />
+                                  <span>Admin</span>
+                                </span>
+                              ) : currentUser?.faceId?.verified ? (
+                                <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-emerald-500/15 text-emerald-300 border border-emerald-400/25 text-[10px] font-semibold shrink-0">
+                                  <ShieldCheck className="w-3 h-3" />
+                                  <span>Face ID</span>
+                                </span>
+                              ) : null}
+                            </div>
+
+                            <div className="mt-1 flex flex-wrap items-center gap-x-2.5 gap-y-1 text-xs text-zinc-400">
+                              <span className="inline-flex items-center gap-1">
+                                <MapPin className="w-3.5 h-3.5 text-rose-400" />
+                                <span>{locationText}</span>
+                              </span>
+                              <span className="text-zinc-600">·</span>
+                              <span>{genderToUzLabel(currentUser?.faceId?.detectedGender || currentUser?.gender || 'female')}</span>
+                              <span className="text-zinc-600">·</span>
+                              <span className="font-mono text-[11px] tabular-nums text-zinc-500">ID: {currentUser?.id}</span>
+                            </div>
+                          </div>
+                        </div>
+
+                        <p className="mt-4 text-[13.5px] text-zinc-300 leading-relaxed max-w-2xl">
+                          {currentUser?.bio || "Alov.uz platformasida samimiy tanishuvlar va yangi suhbatlar."}
+                        </p>
+
+                        {/* Hairline-divided Interactive Stats Row */}
+                        <div className="mt-5 pt-4 border-t border-white/[0.08] grid grid-cols-3 divide-x divide-white/[0.08] text-center">
+                          <button
+                            type="button"
+                            onClick={() => setFollowModalState({ user: currentUser, tab: 'followers' })}
+                            className="px-2 py-1.5 rounded-xl hover:bg-white/[0.04] transition group cursor-pointer"
+                          >
+                            <p className="text-lg sm:text-xl font-black tabular-nums text-white group-hover:text-rose-400 transition">{followersCount}</p>
+                            <p className="text-[11px] font-medium text-zinc-400 mt-0.5">Obunachilar</p>
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setFollowModalState({ user: currentUser, tab: 'following' })}
+                            className="px-2 py-1.5 rounded-xl hover:bg-white/[0.04] transition group cursor-pointer"
+                          >
+                            <p className="text-lg sm:text-xl font-black tabular-nums text-white group-hover:text-rose-400 transition">{followingCount}</p>
+                            <p className="text-[11px] font-medium text-zinc-400 mt-0.5">Obunalar</p>
+                          </button>
+                          <div className="px-2 py-1.5">
+                            <p className="text-lg sm:text-xl font-black tabular-nums text-rose-400">{totalLikesCount}</p>
+                            <p className="text-[11px] font-medium text-zinc-400 mt-0.5">Laiklar</p>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* Balanced 2-Column Account & Privacy Grid */}
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                      {/* Left Card: Balans & Biometrik Tasdiq */}
+                      <div className="bg-[#12141E] rounded-[24px] border border-white/[0.08] p-5 flex flex-col justify-between gap-4">
+                        <div className="space-y-3.5">
+                          <div className="flex items-center justify-between">
+                            <h2 className="text-[11px] font-bold uppercase tracking-[0.12em] text-zinc-400">
+                              Balans va Biometrik Tasdiq
+                            </h2>
+                            {isAdmin && (
+                              <span className="text-[10.5px] font-bold text-amber-300">Cheksiz</span>
+                            )}
+                          </div>
+
+                          {isAdmin ? (
+                            <div className="rounded-2xl bg-gradient-to-br from-[#1C1722] to-[#171A26] text-white p-4 space-y-3 border border-amber-400/25">
+                              <div className="grid grid-cols-2 gap-3 divide-x divide-white/10">
+                                <div>
+                                  <p className="text-[10px] font-bold uppercase tracking-wider text-amber-300">Almaz Wallet</p>
+                                  <p className="text-base font-black tabular-nums mt-0.5">💎 Full</p>
+                                  <p className="text-[10.5px] text-zinc-400 font-mono tabular-nums">
+                                    {(currentUser?.diamonds ?? ADMIN_FULL_DIAMONDS).toLocaleString()}
+                                  </p>
+                                </div>
+                                <div className="pl-3">
+                                  <p className="text-[10px] font-bold uppercase tracking-wider text-amber-300">Moneta</p>
+                                  <p className="text-base font-black tabular-nums mt-0.5">🪙 Full</p>
+                                  <p className="text-[10.5px] text-zinc-400 font-mono tabular-nums">
+                                    {(currentUser?.coins ?? ADMIN_FULL_COINS).toLocaleString()}
+                                  </p>
+                                </div>
+                              </div>
+                              <div className="pt-2.5 border-t border-white/10 flex items-center justify-between text-[11px] text-zinc-300">
+                                <span className="inline-flex items-center gap-1.5">
+                                  <Crown className="w-3.5 h-3.5 text-amber-400" />
+                                  <span>Admin tezkor kirishi faol</span>
+                                </span>
+                              </div>
+                            </div>
+                          ) : (
+                            <div className="space-y-3">
+                              <div className="flex items-center justify-between py-2 border-b border-white/[0.07]">
+                                <div className="flex items-center gap-2.5">
+                                  <div className="w-9 h-9 rounded-xl bg-rose-500/15 text-rose-400 flex items-center justify-center shrink-0">
+                                    <Wallet className="w-4 h-4" />
+                                  </div>
+                                  <div>
+                                    <p className="text-xs font-bold text-white">
+                                      {currentUser?.gender === 'female' ? 'Almaz Wallet' : 'Moneta Balansi'}
+                                    </p>
+                                    <p className="text-[11px] text-zinc-400 tabular-nums">
+                                      {currentUser?.gender === 'female'
+                                        ? `${currentUser?.diamonds ?? 0} olmos mavjud`
+                                        : `${currentUser?.coins ?? 100} moneta mavjud`}
+                                    </p>
+                                  </div>
+                                </div>
+                                <button
+                                  type="button"
+                                  onClick={() =>
+                                    currentUser?.gender === 'female' ? setShowWithdrawModal(true) : setShowTopUpModal(true)
+                                  }
+                                  data-testid="profile-wallet-action-btn"
+                                  className="px-3.5 py-1.5 rounded-xl bg-rose-500/15 hover:bg-rose-600 text-rose-300 hover:text-white text-[11px] font-bold transition cursor-pointer"
+                                >
+                                  {currentUser?.gender === 'female' ? 'Chiqarish' : "Do'kon"}
+                                </button>
+                              </div>
+
+                              {currentUser?.gender === 'female' && (() => {
+                                const progressVal = Number(currentUser?.diamondProgress || 0);
+                                const progressPct = getDiamondProgressPercent(progressVal);
+                                const pendingTotal = getPendingDiamondsTotal(currentUser?.pendingDiamondBatches);
+                                const nextUnlockAt = getNextUnlockTimestamp(currentUser?.pendingDiamondBatches);
+                                const countdown = computeCountdownParts(nextUnlockAt, countdownNow);
+                                return (
+                                  <div className="space-y-1.5 pb-2 border-b border-white/[0.07]">
+                                    <div className="flex items-center justify-between text-[11px] font-bold text-zinc-200">
+                                      <span>Olmos limiti</span>
+                                      <span className="tabular-nums text-cyan-300">{progressVal} / {DIAMOND_LIMIT_TARGET} ({progressPct}%)</span>
+                                    </div>
+                                    <div className="w-full h-1.5 bg-white/[0.08] rounded-full overflow-hidden">
+                                      <div
+                                        className="h-full bg-gradient-to-r from-cyan-500 to-emerald-500 transition-all duration-500"
+                                        style={{ width: `${progressPct}%` }}
+                                      />
+                                    </div>
+                                    {pendingTotal > 0 && (
+                                      <p className="text-[10.5px] font-semibold text-amber-300 flex items-center justify-between">
+                                        <span>Walletga qo'shilish vaqti ({pendingTotal} olmos):</span>
+                                        <span className="font-mono font-bold tabular-nums">{countdown.formatted}</span>
+                                      </p>
+                                    )}
+                                  </div>
+                                );
+                              })()}
+
+                              {/* Face ID Biometric Status Row */}
+                              {currentUser?.faceId?.verified ? (
+                                <div className="flex items-center justify-between gap-2 pt-0.5">
+                                  <div className="flex items-center gap-2.5 min-w-0">
+                                    <div className="w-9 h-9 rounded-xl bg-emerald-500/15 text-emerald-400 flex items-center justify-center shrink-0">
+                                      <ScanFace className="w-4 h-4" />
+                                    </div>
+                                    <div className="min-w-0">
+                                      <p className="text-xs font-bold text-white">Face ID Tasdiqlangan</p>
+                                      <p className="text-[11px] text-zinc-400 truncate">
+                                        {genderToUzLabel(currentUser.faceId.detectedGender || currentUser.gender)} · {currentUser.faceId.confidence ?? 95}%
+                                        {currentUser.faceId.verifiedAt ? ` · ${formatFaceIdDateUz(currentUser.faceId.verifiedAt)}` : ''}
+                                      </p>
+                                    </div>
+                                  </div>
+                                  <span className="text-[11px] font-semibold text-emerald-400 shrink-0">
+                                    Faol
+                                  </span>
+                                </div>
+                              ) : (
+                                <div className="flex items-center justify-between gap-2 pt-0.5">
+                                  <div className="flex items-center gap-2.5 min-w-0">
+                                    <div className="w-9 h-9 rounded-xl bg-rose-500/15 text-rose-400 flex items-center justify-center shrink-0">
+                                      <ScanFace className="w-4 h-4" />
+                                    </div>
+                                    <div className="min-w-0">
+                                      <p className="text-xs font-bold text-white">Face ID kutilmoqda</p>
+                                      <p className="text-[11px] text-zinc-400">Haqiqiy surat va jinsni tasdiqlang</p>
+                                    </div>
+                                  </div>
+                                  <button
+                                    type="button"
+                                    onClick={() => setShowProfileFaceIdModal(true)}
+                                    className="px-3 py-1.5 rounded-xl bg-rose-600 hover:bg-rose-500 text-white text-[11px] font-bold transition shrink-0 cursor-pointer"
+                                  >
+                                    Tasdiqlash
+                                  </button>
+                                </div>
+                              )}
+                            </div>
+                          )}
+                        </div>
+
+                        {isAdmin && (
+                          <button
+                            type="button"
+                            onClick={() => setShowAdminPanel(true)}
+                            className="w-full py-2.5 px-4 rounded-xl bg-amber-500/15 hover:bg-amber-500/25 border border-amber-400/30 text-amber-200 font-bold text-xs flex items-center justify-center gap-2 transition active:scale-[0.98] cursor-pointer"
+                          >
+                            <Crown className="w-3.5 h-3.5" />
+                            <span>Admin Panelni Ochish (@Salikh_07)</span>
+                          </button>
+                        )}
+                      </div>
+
+                      {/* Right Card: Maxfiylik va Lokatsiya */}
+                      <div className="bg-[#12141E] rounded-[24px] border border-white/[0.08] p-5 flex flex-col justify-between gap-3">
+                        <div>
+                          <h2 className="text-[11px] font-bold uppercase tracking-[0.12em] text-zinc-400 mb-3">
+                            Maxfiylik va Lokatsiya
+                          </h2>
+
+                          <div className="divide-y divide-white/[0.07]">
+                            <div className="py-2.5 flex items-center justify-between gap-3">
+                              <div className="min-w-0">
+                                <p className="text-xs font-bold text-white flex items-center gap-1.5">
+                                  <span className={`w-2 h-2 rounded-full ${isLocationEnabled ? 'bg-emerald-400' : 'bg-zinc-600'}`} />
+                                  <span>Jonli GPS Lokatsiya</span>
+                                </p>
+                                <p className="text-[11px] text-zinc-400 mt-0.5">
+                                  {isLocationEnabled ? 'Koordinatalaringiz real vaqtda faol' : 'Xaritada vaqtincha yashirilgan'}
+                                </p>
+                              </div>
+                              <button
+                                type="button"
+                                role="switch"
+                                aria-checked={isLocationEnabled}
+                                aria-label="Jonli GPS lokatsiya"
+                                onClick={() => handleToggleLocation(!isLocationEnabled)}
+                                className={`w-11 h-6 rounded-full transition-colors duration-200 p-0.5 flex items-center shrink-0 cursor-pointer ${
+                                  isLocationEnabled ? 'bg-rose-600 justify-end' : 'bg-white/15 justify-start'
+                                }`}
+                              >
+                                <span className="w-5 h-5 rounded-full bg-white shadow-xs" />
+                              </button>
+                            </div>
+
+                            <div className="py-2.5 flex items-center justify-between gap-3">
+                              <div className="min-w-0">
+                                <p className="text-xs font-bold text-white">Kimlarga ko'rinadi</p>
+                                <p className="text-[11px] text-zinc-400 mt-0.5">
+                                  {regLocationVisibility === 'mutual'
+                                    ? 'Faqat obunachilarga'
+                                    : regLocationVisibility === 'everyone'
+                                    ? 'Barcha foydalanuvchilarga'
+                                    : 'Hech kimga (Yashirin)'}
+                                </p>
+                              </div>
+                              <select
+                                aria-label="Lokatsiya maxfiyligi"
+                                value={regLocationVisibility}
+                                onChange={(e) => handleLocationVisibilityChange(e.target.value as any)}
+                                className="px-2.5 py-1.5 rounded-xl bg-[#181B29] border border-white/10 text-[11px] font-bold text-zinc-100 outline-none focus:border-rose-500 cursor-pointer"
+                              >
+                                <option value="everyone" className="bg-[#12141E] text-white">Barchaga ochiq</option>
+                                <option value="mutual" className="bg-[#12141E] text-white">Faqat tanishlar</option>
+                                <option value="ghost" className="bg-[#12141E] text-white">Yashirin</option>
+                              </select>
+                            </div>
+                          </div>
+                        </div>
+
+                        <button
+                          type="button"
+                          onClick={openEditProfileModal}
+                          className="w-full py-2.5 px-4 rounded-xl bg-white/[0.06] hover:bg-white/[0.11] text-white border border-white/[0.1] font-bold text-xs flex items-center justify-center gap-2 transition active:scale-[0.98] cursor-pointer"
+                        >
+                          <Edit3 className="w-3.5 h-3.5 text-rose-400" />
+                          <span>Anketa ma'lumotlarini tahrirlash</span>
+                        </button>
+                      </div>
+                    </div>
+
+                    {/* Own Posts Section */}
+                    <div className="space-y-3 pt-1">
+                      <div className="flex items-center justify-between px-1">
+                        <h2 className="text-base sm:text-lg font-editorial font-bold text-white">
+                          Mening postlarim
+                        </h2>
+                        <span className="text-[11px] font-medium text-zinc-400">
+                          Rasm, video va musiqa ulashing
+                        </span>
+                      </div>
+                      <PostsFeed
+                        posts={postsList}
+                        currentUser={currentUser}
+                        usersList={usersList}
+                        onlineUserIds={onlineUserIds}
+                        authorUid={currentUser?.uid}
+                        allowCompose={true}
+                        onPostCreated={(post) =>
+                          setPostsList((prev) => (prev.some((p) => p.id === post.id) ? prev : [post, ...prev]))
+                        }
+                        onPostUpdated={(post) =>
+                          setPostsList((prev) => prev.map((p) => (p.id === post.id ? post : p)))
+                        }
+                        onPostDeleted={(postId) =>
+                          setPostsList((prev) => prev.filter((p) => p.id !== postId))
+                        }
+                        onOpenProfile={openUserProfileByUid}
+                        onOpenAuth={() => openAuthModalClean('login')}
+                        onNotify={showToast}
+                      />
+                    </div>
+                  </div>
+                );
+              })()}
+            </motion.div>
+          </AnimatePresence>
         )}
 
         {/* --- REELS / EFIRLAR TAB (Only active live streamers) --- */}
         {activeTab === 'reels' && (
-          <div 
+          <div
             className="absolute inset-0 z-30 bg-black flex flex-col select-none"
             onTouchStart={(e) => setTouchStartY(e.touches[0].clientY)}
             onTouchEnd={(e) => {
@@ -3536,17 +4590,17 @@ export default function App() {
 
               if (activeLiveUsers.length === 0) {
                 return (
-                  <div className="relative w-full h-full flex flex-col items-center justify-center p-6 text-center text-white bg-slate-950 space-y-4">
-                    <button onClick={() => setActiveTab('discover')} className="absolute top-4 left-4 p-2 rounded-full bg-black/40 backdrop-blur-md text-white">
+                  <div className="relative w-full h-full flex flex-col items-center justify-center p-6 text-center text-white bg-[#09090D] space-y-4">
+                    <button onClick={() => setActiveTab('discover')} className="absolute top-4 left-4 p-2.5 rounded-full bg-white/10 hover:bg-white/20 backdrop-blur-md text-white transition cursor-pointer">
                       <X className="w-5 h-5" />
                     </button>
                     <div className="w-16 h-16 rounded-full bg-rose-600/20 border border-rose-500/40 flex items-center justify-center animate-pulse">
                       <Radio className="w-8 h-8 text-rose-500" />
                     </div>
                     <div className="space-y-1">
-                      <h3 className="text-xl font-black">Hozirda jonli efirlar mavjud emas</h3>
-                      <p className="text-xs text-slate-400 max-w-xs">
-                        Faqat "Efirni boshlash" tugmasini bosgan foydalanuvchilar shu yerda ko'rinadi. Birinchi bo'lib efir boshlang! 🔴
+                      <h3 className="text-xl font-editorial font-bold">Hozirda jonli efirlar mavjud emas</h3>
+                      <p className="text-xs text-zinc-400 max-w-xs">
+                        Faqat "Efirni boshlash" tugmasini bosgan foydalanuvchilar shu yerda ko'rinadi. Birinchi bo'lib efir boshlang!
                       </p>
                     </div>
                     <button
@@ -3558,10 +4612,10 @@ export default function App() {
                         setLiveModalMode('broadcaster');
                         setShowLiveModal(true);
                       }}
-                      className="px-6 py-3.5 rounded-full bg-rose-600 hover:bg-rose-500 text-white font-bold text-xs shadow-lg shadow-rose-600/30 transition active:scale-95 flex items-center space-x-2"
+                      className="px-6 py-3 rounded-xl bg-[#E11D48] hover:bg-[#BE123C] text-white font-bold text-xs shadow-lg shadow-rose-950/40 transition active:scale-95 flex items-center space-x-2 cursor-pointer"
                     >
                       <Radio className="w-4 h-4" />
-                      <span>Efirni Boshlash 🔴</span>
+                      <span>Efirni Boshlash</span>
                     </button>
                   </div>
                 );
@@ -3572,10 +4626,10 @@ export default function App() {
               return (
                 <div className="relative w-full h-full flex flex-col justify-between overflow-hidden">
                   {getYouTubeEmbedUrl(currentReelUser.videoUrl) ? (
-                    <iframe 
-                      src={getYouTubeEmbedUrl(currentReelUser.videoUrl)!} 
-                      className="absolute inset-0 w-full h-full object-cover pointer-events-none border-0" 
-                      allow="autoplay; encrypted-media" 
+                    <iframe
+                      src={getYouTubeEmbedUrl(currentReelUser.videoUrl)!}
+                      className="absolute inset-0 w-full h-full object-cover pointer-events-none border-0"
+                      allow="autoplay; encrypted-media"
                       allowFullScreen
                     />
                   ) : (
@@ -3583,73 +4637,67 @@ export default function App() {
                   )}
                   <div className="absolute inset-0 bg-gradient-to-b from-black/60 via-transparent to-black/80 pointer-events-none" />
 
-                  {/* Top Header - Profile & Title */}
                   <div className="relative z-10 p-4 flex items-center justify-between text-white pt-6">
                     <div className="flex items-center space-x-3">
-                      <button onClick={() => setActiveTab('discover')} className="p-2 rounded-full bg-black/40 backdrop-blur-md"><X className="w-5 h-5" /></button>
-                      
-                      {/* Top Left Profile & Obuna */}
+                      <button onClick={() => setActiveTab('discover')} className="p-2 rounded-full bg-black/40 backdrop-blur-md cursor-pointer"><X className="w-5 h-5" /></button>
+
                       <div className="flex items-center space-x-2 bg-black/40 backdrop-blur-md px-3 py-1.5 rounded-full">
                         <img src={currentReelUser.avatar} className="w-7 h-7 rounded-full object-cover" />
                         <div>
                           <div className="font-bold text-xs">{currentReelUser.name}</div>
                         </div>
-                        <button 
+                        <button
                           onClick={() => handleToggleFollow(currentReelUser.id)}
-                          className="ml-2 px-3 py-1 bg-red-500 rounded-full text-[10px] font-bold text-white"
+                          className="ml-2 px-3 py-1 bg-rose-600 rounded-full text-[10px] font-bold text-white cursor-pointer"
                         >
                           {followingIds.includes(currentReelUser.id) ? 'Obuna' : '+ Obuna'}
                         </button>
                       </div>
                     </div>
-                    
+
                     <div className="flex items-center space-x-2 bg-black/40 backdrop-blur-md px-3 py-1 rounded-full text-[10px] font-bold">
-                       <span className="text-red-500 animate-pulse">●</span> {activeUsersCount || 1}
+                      <span className="text-red-500 animate-pulse">●</span> {activeUsersCount || 1}
                     </div>
                   </div>
 
-                  {/* Right Side Action Buttons */}
                   <div className="absolute right-3 top-1/2 -translate-y-1/2 flex flex-col space-y-4 z-20">
-                    <button className="flex flex-col items-center space-y-1 group">
-                      <div className="p-3 rounded-full bg-black/30 backdrop-blur-md hover:bg-black/50 transition">
-                        <Heart className="w-6 h-6 text-white group-hover:text-red-500" />
+                    <button className="flex flex-col items-center space-y-1 group cursor-pointer">
+                      <div className="p-3 rounded-full bg-black/40 backdrop-blur-md hover:bg-black/60 transition">
+                        <Heart className="w-6 h-6 text-white group-hover:text-rose-500" />
                       </div>
                       <span className="text-[10px] font-bold text-white">4.2K</span>
                     </button>
-                    <button className="flex flex-col items-center space-y-1 group">
-                      <div className="p-3 rounded-full bg-black/30 backdrop-blur-md hover:bg-black/50 transition">
+                    <button className="flex flex-col items-center space-y-1 group cursor-pointer">
+                      <div className="p-3 rounded-full bg-black/40 backdrop-blur-md hover:bg-black/60 transition">
                         <Flame className="w-6 h-6 text-white group-hover:text-orange-500" />
                       </div>
                       <span className="text-[10px] font-bold text-white">Sovg'a</span>
                     </button>
-                    <button className="flex flex-col items-center space-y-1 group">
-                      <div className="p-3 rounded-full bg-black/30 backdrop-blur-md hover:bg-black/50 transition">
+                    <button className="flex flex-col items-center space-y-1 group cursor-pointer">
+                      <div className="p-3 rounded-full bg-black/40 backdrop-blur-md hover:bg-black/60 transition">
                         <ArrowUpRight className="w-6 h-6 text-white group-hover:text-blue-400" />
                       </div>
                       <span className="text-[10px] font-bold text-white">Ulashish</span>
                     </button>
                   </div>
 
-                  {/* Bottom Reel Info & Borderless Live Comments Overlay */}
-                  <div className="relative z-10 space-y-2.5 text-white pb-2">
-                    <p className="text-xs text-slate-100 font-medium leading-relaxed">{currentReelUser.bio}</p>
+                  <div className="relative z-10 p-4 space-y-2.5 text-white pb-2">
+                    <p className="text-xs text-zinc-100 font-medium leading-relaxed">{currentReelUser.bio}</p>
 
-                    {/* Comments */}
                     <div className="space-y-1.5 max-h-[150px] overflow-y-auto pb-2" onWheel={(e) => e.stopPropagation()}>
                       {comments.map((c, idx) => (
                         <div key={c.id ? `${c.id}_${idx}` : `comment_${idx}`} className="text-white text-xs flex items-center space-x-1.5">
-                          <span className="font-bold text-rose-200">{c.name}:</span>
-                          <span className="text-slate-100">{c.text}</span>
+                          <span className="font-bold text-rose-300">{c.name}:</span>
+                          <span className="text-zinc-100">{c.text}</span>
                         </div>
                       ))}
                       <div ref={commentsEndRef} />
                     </div>
 
-                    {/* Live Comment Input Field */}
                     <div className="flex items-center space-x-2 pt-1">
-                      <input 
-                        type="text" 
-                        placeholder="Efirga xabar yozing..." 
+                      <input
+                        type="text"
+                        placeholder="Efirga xabar yozing..."
                         value={reelCommentInput}
                         onChange={(e) => setReelCommentInput(e.target.value)}
                         onKeyDown={(e) => {
@@ -3662,9 +4710,9 @@ export default function App() {
                             setReelCommentInput('');
                           }
                         }}
-                        className="flex-1 px-4 py-2.5 rounded-full bg-black/60 text-white placeholder-white/50 border border-white/20 text-xs focus:outline-none focus:border-red-500"
+                        className="flex-1 px-4 py-2.5 rounded-full bg-black/60 text-white placeholder-white/50 border border-white/20 text-xs focus:outline-none focus:border-rose-500"
                       />
-                      <button 
+                      <button
                         onClick={() => {
                           if (reelCommentInput.trim()) {
                             const newComment = { id: 'c-' + Date.now(), name: currentUser?.name || 'Siz', text: reelCommentInput };
@@ -3675,7 +4723,7 @@ export default function App() {
                             setReelCommentInput('');
                           }
                         }}
-                        className="bg-[#E8474A] text-white p-2 rounded-full shadow-md shrink-0 hover:bg-[#CB2E31] transition-all"
+                        className="bg-[#E11D48] text-white p-2.5 rounded-full shadow-md shrink-0 hover:bg-[#BE123C] transition-all cursor-pointer"
                       >
                         <Send className="w-3.5 h-3.5" />
                       </button>
@@ -3687,888 +4735,20 @@ export default function App() {
           </div>
         )}
 
-        {/* --- CHATS TAB --- */}
-        {activeTab === 'chats' && (
-          <div className="h-full flex flex-col">
-            {chatView === 'list' ? (
-              <div className="bg-white rounded-[24px] card-shadow overflow-hidden flex flex-col h-full animate-fade-in-up">
-                <div className="p-4 border-b border-slate-100 flex items-center justify-between">
-                  <h2 className="font-editorial text-2xl">Xabarlar</h2>
-                  <div className="px-2.5 py-1 bg-rose-50 text-[#E8474A] rounded-full text-[10px] font-bold">
-                    {chatsList.length} faol
-                  </div>
-                </div>
-                <div className="divide-y divide-slate-50 overflow-y-auto pb-20">
-                  {isLoadingChats ? (
-                    <>
-                      <ChatSkeleton />
-                      <ChatSkeleton />
-                      <ChatSkeleton />
-                    </>
-                  ) : chatsList.length === 0 ? (
-                    <div className="p-10 text-center space-y-3">
-                      <div className="w-16 h-16 bg-slate-50 rounded-full flex items-center justify-center mx-auto">
-                        <MessageCircle className="w-8 h-8 text-slate-300" />
-                      </div>
-                      <p className="text-xs text-slate-400 font-medium">Hozircha xabarlar yo'q. Nomzodlar bilan suhbatni boshlang!</p>
-                    </div>
-                  ) : chatsList.map((chat, idx) => {
-                    const myUid = currentUser?.uid || firebaseUser?.uid;
-                    const otherUid = chat.participants?.find((p: string) => p !== myUid) || chat.partner?.uid || chat.partner?.id;
-                    const otherUser = usersList.find(u => u.uid === otherUid || u.id === otherUid) || 
-                                      (otherUid === ALOV_AI_USER.uid ? ALOV_AI_USER : null) || 
-                                      chat.partner || 
-                                      { uid: otherUid, name: 'Foydalanuvchi' };
-                    const unread = chat.unreadCount?.[myUid || ''] || 0;
-                    
-                    return (
-                      <motion.div 
-                        key={chat.id ? `${chat.id}_${idx}` : `chat_${idx}`}
-                        initial={{ opacity: 0, x: -10 }}
-                        animate={{ opacity: 1, x: 0 }}
-                        onClick={() => { 
-                          setSelectedChatUser(otherUser); 
-                          setChatView('conversation'); 
-                          setChatsList(prev => prev.map(c => c.id === chat.id ? { ...c, unreadCount: { ...(c.unreadCount || {}), [myUid || '']: 0 } } : c));
-                        }}
-                        className={cn(
-                          "p-4 flex items-center space-x-3 cursor-pointer hover:bg-slate-50 transition-all relative",
-                          chat.isAI && "bg-rose-50/30 border-l-4 border-rose-500"
-                        )}
-                      >
-                        <div className="relative">
-                          {resolveAvatarUrl(otherUser?.avatar) ? (
-                            <img src={resolveAvatarUrl(otherUser?.avatar)} alt={otherUser?.name || ''} className="w-12 h-12 rounded-full object-cover shrink-0 border border-slate-100" />
-                          ) : (
-                            <div className="w-12 h-12 rounded-full bg-rose-100 text-[#E8474A] font-black text-base flex items-center justify-center shrink-0 border border-rose-200">
-                              {getSafeUserDisplayName(otherUser, 'F').charAt(0).toUpperCase()}
-                            </div>
-                          )}
-                          {isUserOnlineStrict(otherUser, onlineUserIds) && (
-                            <span className="absolute bottom-0 right-0 w-3 h-3 bg-[#10B981] border-2 border-white rounded-full"></span>
-                          )}
-                          {chat.isAI && (
-                            <div className="absolute -top-1 -right-1 bg-rose-500 text-white p-0.5 rounded-full shadow-sm">
-                              <Sparkles className="w-2.5 h-2.5" />
-                            </div>
-                          )}
-                        </div>
-                        <div className="flex-1 min-w-0">
-                          <div className="flex items-center justify-between">
-                            <div className="flex items-center space-x-1.5">
-                              <h4 className="font-bold text-sm text-slate-900 truncate">{otherUser?.name || 'Foydalanuvchi'}</h4>
-                              {chat.isAI && <span className="bg-rose-100 text-rose-600 text-[8px] font-black px-1 rounded uppercase tracking-tighter">AI BOT</span>}
-                            </div>
-                            <span className="text-[10px] text-slate-400">
-                              {chat.updatedAt?.toDate ? chat.updatedAt.toDate().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : ''}
-                            </span>
-                          </div>
-                          <div className="flex items-center justify-between mt-0.5">
-                            <p className={cn("text-[11px] truncate flex-1 pr-2", unread > 0 ? "text-slate-900 font-bold" : "text-slate-500")}>
-                              {chat.isTyping?.[otherUid] || (chat.isAI && isAiTyping) ? (
-                                <span className="text-emerald-500 font-bold flex items-center">
-                                  yozmoqda... <motion.span animate={{ opacity: [0, 1, 0] }} transition={{ repeat: Infinity, duration: 1 }}>.</motion.span>
-                                </span>
-                              ) : chat.lastMessage}
-                            </p>
-                            {unread > 0 && (
-                              <span className="bg-[#E8474A] text-white text-[10px] font-bold min-w-[18px] h-[18px] rounded-full flex items-center justify-center px-1 animate-pulse">
-                                {unread}
-                              </span>
-                            )}
-                          </div>
-                        </div>
-                      </motion.div>
-                    );
-                  })}
-                </div>
-              </div>
-            ) : (
-              <div className="flex-1 min-h-0 w-full bg-white flex flex-col overflow-hidden">
-                <div className="shrink-0 z-20 px-3 py-2.5 border-b border-slate-100 flex items-center justify-between bg-white shadow-subtle">
-                  <div className="flex items-center space-x-2 min-w-0">
-                    <button onClick={() => setChatView('list')} className="p-2 rounded-full hover:bg-slate-100 text-slate-700 transition active:scale-90 shrink-0">
-                      <ArrowLeft className="w-5 h-5" />
-                    </button>
-                    {(() => {
-                      const partnerOnline = isUserOnlineStrict(selectedChatUser, onlineUserIds);
-                      const partnerUid = selectedChatUser?.uid || selectedChatUser?.id;
-                      return (
-                        <button
-                          type="button"
-                          onClick={() => partnerUid && openUserProfileByUid(partnerUid, selectedChatUser)}
-                          className="flex items-center space-x-2.5 min-w-0 text-left hover:opacity-85 transition"
-                          title="Profilni ko'rish"
-                        >
-                          <div className="relative shrink-0">
-                            {resolveAvatarUrl(selectedChatUser?.avatar) ? (
-                              <img src={resolveAvatarUrl(selectedChatUser?.avatar)} alt={selectedChatUser?.name || ''} className="w-9 h-9 rounded-full object-cover border border-slate-100" />
-                            ) : (
-                              <div className="w-9 h-9 rounded-full bg-rose-100 text-[#E8474A] font-black text-sm flex items-center justify-center border border-rose-200">
-                                {getSafeUserDisplayName(selectedChatUser, 'F').charAt(0).toUpperCase()}
-                              </div>
-                            )}
-                            {partnerOnline && (
-                              <span className="absolute bottom-0 right-0 w-2.5 h-2.5 bg-[#10B981] border-2 border-white rounded-full"></span>
-                            )}
-                          </div>
-                          <div className="min-w-0">
-                            <h3 className="font-sans font-bold text-sm text-slate-900 leading-none truncate">{selectedChatUser?.name}</h3>
-                            <p className={cn("text-[10px] mt-1", partnerOnline ? "text-emerald-600 font-semibold" : "text-slate-400")}>
-                              {partnerOnline ? 'tarmoqda' : formatLastSeenUz(selectedChatUser?.lastSeen, false)}
-                            </p>
-                          </div>
-                        </button>
-                      );
-                    })()}
-                  </div>
-                  <div className="flex items-center space-x-1">
-                    {(() => {
-                      const myUid = currentUser?.uid || firebaseUser?.uid;
-                      const otherUid = selectedChatUser?.uid || selectedChatUser?.id;
-                      const activeChatId = (myUid && otherUid) ? [myUid, otherUid].sort().join('_') : '';
-                      const isAIBotChat = otherUid === ALOV_AI_USER.uid || otherUid === 'user_kamola_006' || otherUid === 'ALOV-006';
-                      const isFriendActive = Boolean(activeChatId && chatFriendships[activeChatId]);
-                      if (currentUser?.gender === 'female' && !isAIBotChat) {
-                        return (
-                          <button
-                            type="button"
-                            onClick={handleToggleFriendship}
-                            title={isFriendActive ? "Do'stlashishni bekor qilish (5 moneta yechiladi)" : "Do'stlashish — yigitdan moneta yechilmaydi"}
-                            className={cn(
-                              "px-2.5 py-1.5 rounded-full text-[10px] font-bold flex items-center space-x-1 transition active:scale-95 whitespace-nowrap shrink-0",
-                              isFriendActive
-                                ? "bg-emerald-600 text-white shadow-xs"
-                                : "bg-rose-50 hover:bg-rose-100 text-[#E8474A] border border-rose-200"
-                            )}
-                          >
-                            <Handshake className="w-3.5 h-3.5" />
-                            <span>{isFriendActive ? "Do'stlashilgan ✓" : "Do'stlashish"}</span>
-                          </button>
-                        );
-                      }
-                      return null;
-                    })()}
-                    <button 
-                      onClick={() => setShowGiftModal(true)} 
-                      title="Sovg'a yuborish 🎁"
-                      className="p-2 rounded-full hover:bg-amber-50 text-amber-500 transition active:scale-90"
-                    >
-                      <Gift className="w-5 h-5" />
-                    </button>
-                    <button 
-                      onClick={() => {
-                        if (selectedChatUser) {
-                          setActiveCallUser(selectedChatUser);
-                        }
-                      }} 
-                      title="Video qo'ng'iroq va Ekran ulashish 📹"
-                      className="p-2 rounded-full hover:bg-rose-50 text-[#E8474A] transition active:scale-90"
-                    >
-                      <Video className="w-5 h-5" />
-                    </button>
-                  </div>
-                </div>
-
-                {(() => {
-                  const myUid = currentUser?.uid || firebaseUser?.uid;
-                  const otherUid = selectedChatUser?.uid || selectedChatUser?.id;
-                  const activeChatId = (myUid && otherUid) ? [myUid, otherUid].sort().join('_') : '';
-                  const isFriendActive = Boolean(activeChatId && chatFriendships[activeChatId]);
-                  const isAIBotChat = otherUid === ALOV_AI_USER.uid || otherUid === 'user_kamola_006' || otherUid === 'ALOV-006';
-
-                  if (isFriendActive && !isAIBotChat) {
-                    return (
-                      <div className="bg-emerald-600 text-white px-3.5 py-1.5 text-[10px] font-bold flex items-center justify-between shrink-0 shadow-xs">
-                        <span>🤝 Do'stlashish faol — Yigitdan moneta yechilmaydi</span>
-                        <span className="bg-white/20 px-2 py-0.5 rounded-full text-[9px] whitespace-nowrap">Bepul chat</span>
-                      </div>
-                    );
-                  }
-                  if (currentUser?.gender === 'female') {
-                    return (
-                      <div className="bg-gradient-to-r from-emerald-600 to-teal-600 text-white px-3.5 py-1.5 text-[10px] font-bold flex items-center justify-between shrink-0 shadow-xs">
-                        <span>💎 Har bir javobingiz uchun +5 Almaz limitga qo'shiladi</span>
-                        <span className="bg-white/20 px-2 py-0.5 rounded-full text-[9px] uppercase tracking-wider whitespace-nowrap">Wallet: {currentUser?.diamonds ?? 0}</span>
-                      </div>
-                    );
-                  }
-                  if (!isAIBotChat) {
-                    return (
-                      <div className="bg-amber-50 border-b border-amber-200/70 text-amber-900 px-3.5 py-1.5 text-[10px] font-bold flex items-center justify-between shrink-0">
-                        <span>🪙 Har bir xabar narxi: {MESSAGE_COIN_COST} Moneta</span>
-                        <span className="bg-amber-100 px-2 py-0.5 rounded-full text-[9px] whitespace-nowrap">Balans: {currentUser?.coins ?? 100}</span>
-                      </div>
-                    );
-                  }
-                  return null;
-                })()}
-
-                <div ref={chatMessagesContainerRef} className="flex-1 min-h-0 px-3.5 py-3 overflow-y-auto overscroll-y-contain space-y-2.5 bg-[#F8F9FA] [-webkit-overflow-scrolling:touch]">
-                  <AnimatePresence>
-                    {(() => {
-                      const myUid = currentUser?.uid || firebaseUser?.uid;
-                      const otherUid = selectedChatUser?.uid || selectedChatUser?.id;
-                      const activeKey = selectedChatUser?.id || selectedChatUser?.uid;
-                      const activeChatId = (myUid && otherUid) ? [myUid, otherUid].sort().join('_') : null;
-
-                      const msgs = (activeChatId && chatMessages[activeChatId]) ||
-                                   (activeKey && chatMessages[activeKey]) ||
-                                   (selectedChatUser?.uid && chatMessages[selectedChatUser.uid]) ||
-                                   (selectedChatUser?.id && chatMessages[selectedChatUser.id]) ||
-                                   [];
-                      
-                      const sortedMessages = [...msgs].sort((a, b) => 
-                        new Date(a.createdAt || 0).getTime() - new Date(b.createdAt || 0).getTime()
-                      );
-
-                      return sortedMessages.map((msg, idx) => {
-                        const isMe = msg.senderId === 'me' || (myUid && (msg.senderId === myUid || msg.userId === myUid));
-
-                        return (
-                          <motion.div 
-                            key={msg.id ? `${msg.id}_${idx}` : `msg_${idx}`}
-                            initial={{ opacity: 0, y: 10, scale: 0.95 }}
-                            animate={{ opacity: 1, y: 0, scale: 1 }}
-                            className={cn("flex", isMe ? 'justify-end' : 'justify-start')}
-                          >
-                            <div className={cn(
-                              "max-w-[85%] rounded-[18px] px-4 py-2.5 shadow-subtle relative",
-                              isMe 
-                                ? 'bg-[#E8474A] text-white rounded-tr-none' 
-                                : 'bg-white text-slate-900 border border-slate-200/50 rounded-tl-none'
-                            )}>
-                              {msg.type === 'gift' ? (
-                                <div className="flex items-center space-x-2.5 py-1">
-                                  <span className="text-3xl shrink-0">{msg.giftIcon || '🎁'}</span>
-                                  <div>
-                                    <p className="font-extrabold text-xs">{msg.giftName || 'Sovg\'a'} yuborildi!</p>
-                                    <p className="text-[10px] opacity-90 flex items-center space-x-1 mt-0.5">
-                                      <span>🪙 {msg.coinPrice || 10} moneta</span>
-                                    </p>
-                                  </div>
-                                </div>
-                              ) : msg.type === 'meet' ? (
-                                <a href={msg.meetUrl} target="_blank" rel="noreferrer" className="underline font-bold flex items-center space-x-2 py-1">
-                                  <Video className="w-4 h-4" />
-                                  <span>Google Meet Qo'shilish</span>
-                                  <ArrowUpRight className="w-3.5 h-3.5" />
-                                </a>
-                              ) : msg.type === 'image' ? (
-                                <img src={msg.fileUrl} alt="" className="rounded-lg max-h-60 object-cover cursor-zoom-in" onClick={() => window.open(msg.fileUrl)} />
-                              ) : msg.type === 'video' ? (
-                                <VideoPlayer url={msg.fileUrl || ''} />
-                              ) : (msg.type === 'voice' || msg.type === 'audio') ? (
-                                <VoiceMessage url={msg.fileUrl || ''} senderId={isMe ? 'me' : msg.senderId} />
-                              ) : (
-                                <p className="text-[13px] leading-relaxed whitespace-pre-wrap break-words">{msg.text}</p>
-                              )}
-                              <div className="flex items-center justify-end space-x-1 mt-1">
-                                <span className={cn("text-[9px]", isMe ? 'text-rose-100' : 'text-slate-400')}>
-                                  {msg.time}
-                                </span>
-                                {isMe && (
-                                  <div className="flex items-center ml-1 shrink-0">
-                                    {msg.status === 'sending' ? (
-                                      <Clock className="w-3 h-3 text-rose-200/90 animate-pulse" />
-                                    ) : (msg.status === 'read' || msg.read) ? (
-                                      <CheckCheck className="w-3.5 h-3.5 text-blue-300 font-bold" />
-                                    ) : (
-                                      <Check className="w-3.5 h-3.5 text-rose-200" />
-                                    )}
-                                  </div>
-                                )}
-                              </div>
-                            </div>
-                          </motion.div>
-                        );
-                      });
-                    })()}
-                    {/* Auto-scroll effect */}
-                    <div ref={chatBottomRef} />
-
-                    {isOtherTyping || (selectedChatUser?.uid === ALOV_AI_USER.uid && isAiTyping) ? (
-                      <motion.div 
-                        initial={{ opacity: 0, y: 5 }}
-                        animate={{ opacity: 1, y: 0 }}
-                        className="flex justify-start"
-                      >
-                        <div className="bg-slate-100 text-slate-500 rounded-[18px] rounded-tl-none px-4 py-2 shadow-subtle flex items-center space-x-2">
-                          <span className="text-[11px] font-bold">{selectedChatUser?.uid === ALOV_AI_USER.uid ? 'Alov AI yozmoqda' : 'yozmoqda'}</span>
-                          <div className="flex space-x-1">
-                            <motion.div animate={{ opacity: [0.3, 1, 0.3] }} transition={{ repeat: Infinity, duration: 1, delay: 0 }} className="w-1 h-1 bg-slate-400 rounded-full" />
-                            <motion.div animate={{ opacity: [0.3, 1, 0.3] }} transition={{ repeat: Infinity, duration: 1, delay: 0.2 }} className="w-1 h-1 bg-slate-400 rounded-full" />
-                            <motion.div animate={{ opacity: [0.3, 1, 0.3] }} transition={{ repeat: Infinity, duration: 1, delay: 0.4 }} className="w-1 h-1 bg-slate-400 rounded-full" />
-                          </div>
-                        </div>
-                      </motion.div>
-                    ) : null}
-                  </AnimatePresence>
-                </div>
-
-                {/* 0%-100% Diamond Limit Bar + 24h Wallet Credit Timer Above Text Bar */}
-                {(() => {
-                  const progressVal = Number(currentUser?.diamondProgress || 0);
-                  const progressPct = getDiamondProgressPercent(progressVal);
-                  const pendingBatches = Array.isArray(currentUser?.pendingDiamondBatches) ? currentUser.pendingDiamondBatches : [];
-                  const pendingTotal = getPendingDiamondsTotal(pendingBatches);
-                  const nextUnlockAt = getNextUnlockTimestamp(pendingBatches);
-                  const countdown = computeCountdownParts(nextUnlockAt, countdownNow);
-
-                  if (currentUser?.gender === 'female') {
-                    return (
-                      <div className="bg-white border-t border-slate-100 px-3.5 pt-2 pb-1.5 shrink-0 space-y-1">
-                        <div className="flex items-center justify-between text-[10px] font-bold">
-                          <span className="text-slate-700 flex items-center gap-1">
-                            <span>💎 Olmos limiti:</span>
-                            <span className="text-cyan-700 font-black">{progressVal} / {DIAMOND_LIMIT_TARGET}</span>
-                          </span>
-                          <span className="text-emerald-600 font-black">{progressPct}%</span>
-                        </div>
-                        <div className="w-full h-2 bg-slate-100 rounded-full overflow-hidden">
-                          <div
-                            className="h-full bg-gradient-to-r from-cyan-500 to-emerald-500 transition-all duration-500 rounded-full"
-                            style={{ width: `${progressPct}%` }}
-                          />
-                        </div>
-                        {pendingTotal > 0 && (
-                          <div className="flex items-center justify-between text-[10px] font-bold text-amber-700 bg-amber-50 px-2.5 py-1 rounded-lg border border-amber-200/80">
-                            <span className="flex items-center gap-1">
-                              <Clock className="w-3 h-3 shrink-0" />
-                              <span>{pendingTotal} 💎 24 soat ichida hisobga qo'shiladi</span>
-                            </span>
-                            <span className="font-mono font-black text-amber-900">{countdown.formatted}</span>
-                          </div>
-                        )}
-                      </div>
-                    );
-                  }
-                  return null;
-                })()}
-
-                <div className="shrink-0 z-20 px-3 py-2.5 pb-safe bg-white border-t border-slate-100 flex items-end space-x-2">
-                  <label aria-label="Media yuklash" className="p-2.5 rounded-full text-slate-400 hover:bg-slate-50 transition active:scale-90 cursor-pointer shrink-0">
-                    <Plus className="w-5 h-5" />
-                    <input type="file" className="hidden" accept="image/*,video/*,audio/*" onChange={handleMediaUpload} />
-                  </label>
-                  <div className="flex-1 relative">
-                    <textarea 
-                      placeholder="Xabar yozing..." 
-                      rows={1}
-                      value={inputMessage}
-                      onFocus={() => {
-                        setTimeout(() => {
-                          const el = chatMessagesContainerRef.current;
-                          if (el) el.scrollTop = el.scrollHeight;
-                        }, 120);
-                      }}
-                      onChange={(e) => {
-                        setInputMessage(e.target.value);
-                        handleTyping();
-                      }}
-                      onKeyDown={(e) => {
-                        if (e.key === 'Enter' && !e.shiftKey) {
-                          e.preventDefault();
-                          handleSendChatMessage();
-                        }
-                      }}
-                      className="w-full px-4 py-2.5 rounded-[20px] bg-slate-100 text-[13px] text-slate-900 focus:outline-none focus:ring-2 focus:ring-[#E8474A]/10 border-none resize-none max-h-32"
-                    />
-                  </div>
-                  {inputMessage.trim() ? (
-                    <button 
-                      onClick={() => handleSendChatMessage()} 
-                      className="bg-[#E8474A] text-white p-3 rounded-full shadow-lg hover:bg-[#CB2E31] transition-all active:scale-95 flex items-center justify-center"
-                    >
-                      <Send className="w-4.5 h-4.5" />
-                    </button>
-                  ) : (
-                    <button 
-                      onMouseDown={startRecording}
-                      onMouseUp={stopRecording}
-                      onTouchStart={startRecording}
-                      onTouchEnd={stopRecording}
-                      className={cn(
-                        "p-3 rounded-full transition-all active:scale-95 flex items-center justify-center",
-                        isRecording ? "bg-red-500 text-white animate-pulse" : "bg-slate-100 text-slate-500 hover:bg-slate-200"
-                      )}
-                    >
-                      <Mic className="w-5 h-5" />
-                    </button>
-                  )}
-                </div>
-              </div>
-            )}
-          </div>
-        )}
-
-        {/* --- PROFILE TAB (Editorial Luxury Dating Profile) --- */}
-        {activeTab === 'profile' && (() => {
-          const profileAvatar = resolveAvatarUrl(currentUser?.avatar || firebaseUser?.photoURL);
-          const profileName = getSafeUserDisplayName(currentUser, firebaseUser?.displayName || 'Profil');
-          const isAdmin = isAdminTelegramUser(currentUser);
-          const locationText = [currentUser?.district, currentUser?.region].filter(Boolean).join(', ') || "O'zbekiston";
-          const profileBanner = resolveAvatarUrl(currentUser?.banner);
-          const followersCount = Array.isArray(currentUser?.followers)
-            ? currentUser.followers.length
-            : (currentUser?.followersCount ?? 0);
-          const followingCount = Array.isArray(currentUser?.following)
-            ? currentUser.following.length
-            : (currentUser?.followingCount ?? 0);
-          const totalLikesCount = Math.max(
-            Number(currentUser?.likesCount || 0),
-            computeAuthorTotalLikes(postsList, currentUser?.uid)
-          );
-          const openEditProfileModal = () => {
-            setErrorMsg('');
-            setRegName(currentUser?.name || '');
-            setRegUsername(currentUser?.username || '');
-            setRegBirthDate(currentUser?.birthDate || '2002-05-15');
-            setRegAge(String(currentUser?.age || calculateAge(currentUser?.birthDate, 22)));
-            setRegGender(currentUser?.gender || 'female');
-            setRegRegion(currentUser?.region || 'Toshkent shahri');
-            setRegDistrict(currentUser?.district || 'Yunusobod tumani');
-            setRegNeighborhood(currentUser?.neighborhood || '');
-            setRegPhone(formatPhoneNumberPretty(currentUser?.phone || '+998 '));
-            setRegTelegram(currentUser?.telegram || '');
-            setRegInstagram(currentUser?.instagram || '');
-            setRegBio(currentUser?.bio || '');
-            setRegAvatar(currentUser?.avatar || '');
-            setRegBanner(currentUser?.banner || '');
-            setRegLocationVisibility(currentUser?.locationVisibility || 'everyone');
-            setShowProfileModal(true);
-          };
-
-          return (
-            <div className="space-y-4">
-              {/* Editorial Profile Hero Card */}
-              <div className="bg-white rounded-[28px] border border-[rgba(166,36,51,0.11)] shadow-[0_10px_35px_rgba(34,23,25,0.05)] overflow-hidden">
-                {/* Expanded Cover Banner (h-40 sm:h-56) with Upload Control */}
-                <div className="relative h-40 sm:h-56 bg-gradient-to-br from-[#FBE7EB] via-[#F7DDD6] to-[#EED5DC] border-b border-[rgba(166,36,51,0.1)] overflow-hidden">
-                  {profileBanner ? (
-                    <img
-                      src={profileBanner}
-                      alt={`${profileName} banneri`}
-                      className="w-full h-full object-cover object-center"
-                      onError={(e: any) => {
-                        e.currentTarget.style.display = 'none';
-                      }}
-                    />
-                  ) : (
-                    <div className="w-full h-full flex items-center justify-center pointer-events-none">
-                      <div className="text-center opacity-55">
-                        <ImageIcon className="w-8 h-8 text-[#A62433] mx-auto mb-1" />
-                        <p className="text-[11px] font-bold text-[#7A4A53]">Profil banneri uchun joy</p>
-                      </div>
-                    </div>
-                  )}
-                  <div className="absolute inset-0 bg-gradient-to-t from-black/35 via-transparent to-black/15 pointer-events-none" />
-
-                  <div className="absolute top-3.5 left-4 right-4 flex items-center justify-between gap-2">
-                    <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-emerald-600/90 backdrop-blur-md text-white text-[10px] font-bold border border-white/25 shadow-xs">
-                      <span className="w-1.5 h-1.5 rounded-full bg-white animate-pulse" />
-                      <span>Onlayn</span>
-                    </span>
-
-                    <div className="flex items-center gap-2">
-                      <label className="cursor-pointer inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-white/95 hover:bg-white text-[#221719] border border-[rgba(166,36,51,0.14)] text-[11px] font-bold shadow-sm transition active:scale-95">
-                        <Camera className="w-3.5 h-3.5 text-[#C93545]" />
-                        <span>{isUploadingBanner ? 'Yuklanmoqda...' : 'Banner yuklash'}</span>
-                        <input
-                          type="file"
-                          accept="image/*"
-                          disabled={isUploadingBanner}
-                          onChange={(e) => handleBannerFileChange(e, true)}
-                          className="hidden"
-                        />
-                      </label>
-                      <button
-                        type="button"
-                        onClick={openEditProfileModal}
-                        className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-white/95 hover:bg-white text-[#221719] border border-[rgba(166,36,51,0.14)] text-[11px] font-bold shadow-sm transition active:scale-95"
-                      >
-                        <Edit3 className="w-3.5 h-3.5 text-[#C93545]" />
-                        <span>Tahrirlash</span>
-                      </button>
-                    </div>
-                  </div>
-                </div>
-
-                <div className="px-5 sm:px-7 pb-6">
-                  <div className="flex flex-col sm:flex-row sm:items-end gap-4 -mt-12 sm:-mt-14 relative z-10">
-                    <div className="relative shrink-0 self-start">
-                      {profileAvatar ? (
-                        <img
-                          src={profileAvatar}
-                          alt={profileName}
-                          className="w-24 h-24 sm:w-28 sm:h-28 rounded-full object-cover border-4 border-white shadow-[0_10px_28px_rgba(166,36,51,0.16)] bg-[#FAF4F2]"
-                          onError={(e: any) => {
-                            e.currentTarget.style.display = 'none';
-                            const fallbackEl = e.currentTarget.nextElementSibling as HTMLElement | null;
-                            if (fallbackEl) fallbackEl.style.display = 'flex';
-                          }}
-                        />
-                      ) : null}
-                      <div
-                        className={cn(
-                          "w-24 h-24 sm:w-28 sm:h-28 rounded-full bg-[#FAF4F2] text-[#C93545] font-editorial font-black text-3xl items-center justify-center border-4 border-white shadow-[0_10px_28px_rgba(166,36,51,0.16)]",
-                          profileAvatar ? "hidden" : "flex"
-                        )}
-                      >
-                        {profileName.charAt(0).toUpperCase()}
-                      </div>
-                      {currentUser?.faceId?.verified && (
-                        <span
-                          title="Face ID Tasdiqlangan"
-                          className="absolute bottom-1 right-1 w-6 h-6 rounded-full bg-emerald-600 text-white border-2 border-white flex items-center justify-center shadow-sm"
-                        >
-                          <Check className="w-3.5 h-3.5" />
-                        </span>
-                      )}
-                    </div>
-
-                    <div className="flex-1 min-w-0 sm:pb-1">
-                      <div className="flex items-center gap-2 flex-wrap">
-                        <h1 className="text-2xl sm:text-[28px] font-editorial font-bold text-[#221719] leading-tight truncate">
-                          {profileName}
-                        </h1>
-                        {currentUser?.username && (
-                          <span className="font-mono text-xs font-bold text-[#C93545] bg-[#FDF2F3] px-2.5 py-0.5 rounded-lg border border-[#F2D5D9] shrink-0">
-                            {formatUsernameDisplay(currentUser.username)}
-                          </span>
-                        )}
-                        {isAdmin ? (
-                          <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full bg-[#221719] text-[#F5D28E] text-[10px] font-bold tracking-wide shrink-0">
-                            <Crown className="w-3 h-3" />
-                            <span>Platforma Admini</span>
-                          </span>
-                        ) : currentUser?.faceId?.verified ? (
-                          <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full bg-emerald-50 text-emerald-800 border border-emerald-200 text-[10px] font-bold shrink-0">
-                            <ShieldCheck className="w-3 h-3 text-emerald-600" />
-                            <span>Face ID Tasdiqlangan</span>
-                          </span>
-                        ) : null}
-                      </div>
-
-                      <div className="mt-1 flex flex-wrap items-center gap-x-2.5 gap-y-1 text-xs text-[#6B5B5E]">
-                        <span className="inline-flex items-center gap-1">
-                          <MapPin className="w-3.5 h-3.5 text-[#C93545]" />
-                          <span>{locationText}</span>
-                        </span>
-                        <span className="text-[#D4C3C6]">·</span>
-                        <span>{genderToUzLabel(currentUser?.faceId?.detectedGender || currentUser?.gender || 'female')}</span>
-                        <span className="text-[#D4C3C6]">·</span>
-                        <span className="font-mono text-[11px] tabular-nums text-[#8B7A7E]">ID: {currentUser?.id}</span>
-                      </div>
-                    </div>
-                  </div>
-
-                  {/* Clean unboxed editorial bio */}
-                  <p className="mt-4 text-[13px] sm:text-sm text-[#4A3B3D] leading-relaxed max-w-2xl">
-                    {currentUser?.bio || "Alov.uz platformasida samimiy tanishuvlar va yangi suhbatlar."}
-                  </p>
-
-                  {/* Hairline-divided Interactive Stats Row */}
-                  <div className="mt-5 pt-4 border-t border-[rgba(166,36,51,0.09)] grid grid-cols-3 divide-x divide-[rgba(166,36,51,0.09)] text-center">
-                    <button
-                      type="button"
-                      onClick={() => setFollowModalState({ user: currentUser, tab: 'followers' })}
-                      className="px-2 py-1 rounded-xl hover:bg-[#FAF4F2] transition group"
-                    >
-                      <p className="text-lg sm:text-xl font-black tabular-nums text-[#221719] group-hover:text-[#C93545] transition">{followersCount}</p>
-                      <p className="text-[11px] font-semibold text-[#7A686C] mt-0.5">Obunachilar</p>
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => setFollowModalState({ user: currentUser, tab: 'following' })}
-                      className="px-2 py-1 rounded-xl hover:bg-[#FAF4F2] transition group"
-                    >
-                      <p className="text-lg sm:text-xl font-black tabular-nums text-[#221719] group-hover:text-[#C93545] transition">{followingCount}</p>
-                      <p className="text-[11px] font-semibold text-[#7A686C] mt-0.5">Obunalar</p>
-                    </button>
-                    <div className="px-2 py-1">
-                      <p className="text-lg sm:text-xl font-black tabular-nums text-[#C93545]">{totalLikesCount}</p>
-                      <p className="text-[11px] font-semibold text-[#7A686C] mt-0.5">Laiklar</p>
-                    </div>
-                  </div>
-                </div>
-              </div>
-
-              {/* Balanced 2-Column Account & Privacy Grid */}
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                {/* Left Card: Balans & Biometrik Tasdiq */}
-                <div className="bg-white rounded-[24px] border border-[rgba(166,36,51,0.1)] shadow-subtle p-5 flex flex-col justify-between gap-4">
-                  <div className="space-y-3.5">
-                    <div className="flex items-center justify-between">
-                      <h2 className="text-xs font-bold uppercase tracking-[0.12em] text-[#8E7C80]">
-                        Balans va Biometrik Tasdiq
-                      </h2>
-                      {isAdmin && (
-                        <span className="text-[10px] font-bold text-[#9A6F2B] bg-[#FBF4E6] px-2 py-0.5 rounded-full border border-[#C89B54]/30">
-                          Cheksiz
-                        </span>
-                      )}
-                    </div>
-
-                    {isAdmin ? (
-                      <div className="rounded-2xl bg-gradient-to-br from-[#221719] to-[#3A2226] text-white p-4 space-y-3 border border-[#C89B54]/30">
-                        <div className="grid grid-cols-2 gap-3 divide-x divide-white/15">
-                          <div>
-                            <p className="text-[10px] font-bold uppercase tracking-wider text-[#F5D28E]">Almaz Wallet</p>
-                            <p className="text-base font-black tabular-nums mt-0.5">
-                              💎 Full
-                            </p>
-                            <p className="text-[10.5px] text-white/70 font-mono tabular-nums">
-                              {(currentUser?.diamonds ?? ADMIN_FULL_DIAMONDS).toLocaleString()}
-                            </p>
-                          </div>
-                          <div className="pl-3">
-                            <p className="text-[10px] font-bold uppercase tracking-wider text-[#F5D28E]">Moneta</p>
-                            <p className="text-base font-black tabular-nums mt-0.5">
-                              🪙 Full
-                            </p>
-                            <p className="text-[10.5px] text-white/70 font-mono tabular-nums">
-                              {(currentUser?.coins ?? ADMIN_FULL_COINS).toLocaleString()}
-                            </p>
-                          </div>
-                        </div>
-                        <div className="pt-2.5 border-t border-white/10 flex items-center justify-between text-[11px] text-white/80">
-                          <span className="inline-flex items-center gap-1.5">
-                            <Crown className="w-3.5 h-3.5 text-[#F5D28E]" />
-                            <span>Admin tezkor kirishi faol</span>
-                          </span>
-                        </div>
-                      </div>
-                    ) : (
-                      <div className="space-y-3">
-                        <div className="flex items-center justify-between py-2 border-b border-[rgba(166,36,51,0.08)]">
-                          <div className="flex items-center gap-2.5">
-                            <div className="w-9 h-9 rounded-xl bg-[#FAF4F2] text-[#C93545] flex items-center justify-center shrink-0">
-                              <Wallet className="w-4 h-4" />
-                            </div>
-                            <div>
-                              <p className="text-xs font-bold text-[#221719]">
-                                {currentUser?.gender === 'female' ? 'Almaz Wallet' : 'Moneta Balansi'}
-                              </p>
-                              <p className="text-[11px] text-[#7A686C] tabular-nums">
-                                {currentUser?.gender === 'female'
-                                  ? `${currentUser?.diamonds ?? 0} olmos mavjud`
-                                  : `${currentUser?.coins ?? 100} moneta mavjud`}
-                              </p>
-                            </div>
-                          </div>
-                          <button
-                            type="button"
-                            onClick={() =>
-                              currentUser?.gender === 'female' ? setShowWithdrawModal(true) : setShowTopUpModal(true)
-                            }
-                            className="px-3 py-1.5 rounded-full bg-[#FAF4F2] hover:bg-[#F3E5E1] text-[#C93545] text-[11px] font-bold transition"
-                          >
-                            {currentUser?.gender === 'female' ? 'Chiqarish' : "To'ldirish"}
-                          </button>
-                        </div>
-
-                        {currentUser?.gender === 'female' && (() => {
-                          const progressVal = Number(currentUser?.diamondProgress || 0);
-                          const progressPct = getDiamondProgressPercent(progressVal);
-                          const pendingTotal = getPendingDiamondsTotal(currentUser?.pendingDiamondBatches);
-                          const nextUnlockAt = getNextUnlockTimestamp(currentUser?.pendingDiamondBatches);
-                          const countdown = computeCountdownParts(nextUnlockAt, countdownNow);
-                          return (
-                            <div className="space-y-1.5 pb-2 border-b border-[rgba(166,36,51,0.08)]">
-                              <div className="flex items-center justify-between text-[11px] font-bold text-[#221719]">
-                                <span>Olmos limiti</span>
-                                <span className="tabular-nums text-[#0E7490]">{progressVal} / {DIAMOND_LIMIT_TARGET} ({progressPct}%)</span>
-                              </div>
-                              <div className="w-full h-1.5 bg-[#FAF4F2] rounded-full overflow-hidden">
-                                <div
-                                  className="h-full bg-gradient-to-r from-cyan-500 to-emerald-500 transition-all duration-500"
-                                  style={{ width: `${progressPct}%` }}
-                                />
-                              </div>
-                              {pendingTotal > 0 && (
-                                <p className="text-[10.5px] font-semibold text-amber-800 flex items-center justify-between">
-                                  <span>Walletga qo'shilish vaqti ({pendingTotal} olmos):</span>
-                                  <span className="font-mono font-bold tabular-nums">{countdown.formatted}</span>
-                                </p>
-                              )}
-                            </div>
-                          );
-                        })()}
-
-                        {/* Face ID Biometric Status Row */}
-                        {currentUser?.faceId?.verified ? (
-                          <div className="flex items-center justify-between gap-2 pt-0.5">
-                            <div className="flex items-center gap-2.5 min-w-0">
-                              <div className="w-9 h-9 rounded-xl bg-emerald-50 text-emerald-700 flex items-center justify-center shrink-0">
-                                <ScanFace className="w-4 h-4" />
-                              </div>
-                              <div className="min-w-0">
-                                <p className="text-xs font-bold text-[#221719]">Face ID Tasdiqlangan</p>
-                                <p className="text-[11px] text-[#6B5B5E] truncate">
-                                  {genderToUzLabel(currentUser.faceId.detectedGender || currentUser.gender)} · {currentUser.faceId.confidence ?? 95}%
-                                  {currentUser.faceId.verifiedAt ? ` · ${formatFaceIdDateUz(currentUser.faceId.verifiedAt)}` : ''}
-                                </p>
-                              </div>
-                            </div>
-                            <span className="px-2.5 py-1 rounded-full bg-emerald-50 text-emerald-700 border border-emerald-200 text-[10px] font-bold shrink-0">
-                              Faol
-                            </span>
-                          </div>
-                        ) : (
-                          <div className="flex items-center justify-between gap-2 pt-0.5">
-                            <div className="flex items-center gap-2.5 min-w-0">
-                              <div className="w-9 h-9 rounded-xl bg-rose-50 text-[#C93545] flex items-center justify-center shrink-0">
-                                <ScanFace className="w-4 h-4" />
-                              </div>
-                              <div className="min-w-0">
-                                <p className="text-xs font-bold text-[#221719]">Face ID kutilmoqda</p>
-                                <p className="text-[11px] text-[#6B5B5E]">Haqiqiy surat va jinsni tasdiqlang</p>
-                              </div>
-                            </div>
-                            <button
-                              type="button"
-                              onClick={() => setShowProfileFaceIdModal(true)}
-                              className="px-3 py-1.5 rounded-full bg-[#C93545] hover:bg-[#A62433] text-white text-[11px] font-bold transition shrink-0"
-                            >
-                              Tasdiqlash
-                            </button>
-                          </div>
-                        )}
-                      </div>
-                    )}
-                  </div>
-
-                  {isAdmin && (
-                    <button
-                      type="button"
-                      onClick={() => setShowAdminPanel(true)}
-                      className="w-full py-2.5 px-4 rounded-xl bg-[#221719] hover:bg-[#352427] text-[#F5D28E] font-bold text-xs shadow-sm flex items-center justify-center gap-2 transition active:scale-[0.98]"
-                    >
-                      <Crown className="w-3.5 h-3.5" />
-                      <span>Admin Panelni Ochish (@Salikh_07)</span>
-                    </button>
-                  )}
-                </div>
-
-                {/* Right Card: Maxfiylik va Lokatsiya */}
-                <div className="bg-white rounded-[24px] border border-[rgba(166,36,51,0.1)] shadow-subtle p-5 flex flex-col justify-between gap-3">
-                  <div>
-                    <h2 className="text-xs font-bold uppercase tracking-[0.12em] text-[#8E7C80] mb-3">
-                      Maxfiylik va Lokatsiya
-                    </h2>
-
-                    <div className="divide-y divide-[rgba(166,36,51,0.08)]">
-                      {/* Row 1: Live GPS Toggle */}
-                      <div className="py-2.5 flex items-center justify-between gap-3">
-                        <div className="min-w-0">
-                          <p className="text-xs font-bold text-[#221719] flex items-center gap-1.5">
-                            <span className={`w-2 h-2 rounded-full ${isLocationEnabled ? 'bg-emerald-500' : 'bg-slate-300'}`} />
-                            <span>Jonli GPS Lokatsiya</span>
-                          </p>
-                          <p className="text-[11px] text-[#6B5B5E] mt-0.5">
-                            {isLocationEnabled ? 'Koordinatalaringiz real vaqtda faol' : 'Xaritada vaqtincha yashirilgan'}
-                          </p>
-                        </div>
-                        <button
-                          type="button"
-                          role="switch"
-                          aria-checked={isLocationEnabled}
-                          aria-label="Jonli GPS lokatsiya"
-                          onClick={() => handleToggleLocation(!isLocationEnabled)}
-                          className={`w-11 h-6 rounded-full transition-colors duration-200 p-0.5 flex items-center shrink-0 ${
-                            isLocationEnabled ? 'bg-[#C93545] justify-end' : 'bg-slate-200 justify-start'
-                          }`}
-                        >
-                          <span className="w-5 h-5 rounded-full bg-white shadow-xs" />
-                        </button>
-                      </div>
-
-                      {/* Row 2: Privacy Visibility */}
-                      <div className="py-2.5 flex items-center justify-between gap-3">
-                        <div className="min-w-0">
-                          <p className="text-xs font-bold text-[#221719]">Kimlarga ko'rinadi</p>
-                          <p className="text-[11px] text-[#6B5B5E] mt-0.5">
-                            {regLocationVisibility === 'mutual'
-                              ? 'Faqat obunachilarga'
-                              : regLocationVisibility === 'everyone'
-                              ? 'Barcha foydalanuvchilarga'
-                              : 'Hech kimga (Yashirin)'}
-                          </p>
-                        </div>
-                        <select
-                          aria-label="Lokatsiya maxfiyligi"
-                          value={regLocationVisibility}
-                          onChange={(e) => handleLocationVisibilityChange(e.target.value as any)}
-                          className="px-2.5 py-1.5 rounded-xl bg-[#FAF4F2] border border-[rgba(166,36,51,0.12)] text-[11px] font-bold text-[#221719] outline-none focus:border-[#C93545] cursor-pointer"
-                        >
-                          <option value="everyone">Barchaga ochiq</option>
-                          <option value="mutual">Faqat tanishlar</option>
-                          <option value="ghost">Yashirin</option>
-                        </select>
-                      </div>
-                    </div>
-                  </div>
-
-                  <button
-                    type="button"
-                    onClick={openEditProfileModal}
-                    className="w-full py-2.5 px-4 rounded-xl bg-[#FAF4F2] hover:bg-[#F3E5E1] text-[#221719] border border-[rgba(166,36,51,0.12)] font-bold text-xs flex items-center justify-center gap-2 transition active:scale-[0.98]"
-                  >
-                    <Edit3 className="w-3.5 h-3.5 text-[#C93545]" />
-                    <span>Anketa ma'lumotlarini tahrirlash</span>
-                  </button>
-                </div>
-              </div>
-
-              {/* Own Posts Section */}
-              <div className="space-y-3 pt-1">
-                <div className="flex items-center justify-between px-1">
-                  <h2 className="text-base sm:text-lg font-editorial font-bold text-[#221719]">
-                    Mening postlarim
-                  </h2>
-                  <span className="text-[11px] font-semibold text-[#7A686C]">
-                    Rasm, video va musiqa ulashing
-                  </span>
-                </div>
-                <PostsFeed
-                  posts={postsList}
-                  currentUser={currentUser}
-                  usersList={usersList}
-                  onlineUserIds={onlineUserIds}
-                  authorUid={currentUser?.uid}
-                  allowCompose={true}
-                  onPostCreated={(post) =>
-                    setPostsList((prev) => (prev.some((p) => p.id === post.id) ? prev : [post, ...prev]))
-                  }
-                  onPostUpdated={(post) =>
-                    setPostsList((prev) => prev.map((p) => (p.id === post.id ? post : p)))
-                  }
-                  onPostDeleted={(postId) =>
-                    setPostsList((prev) => prev.filter((p) => p.id !== postId))
-                  }
-                  onOpenProfile={openUserProfileByUid}
-                  onOpenAuth={() => openAuthModalClean('login')}
-                  onNotify={showToast}
-                />
-              </div>
-            </div>
-          );
-        })()}
-
-        {/* --- MAP / XARITA TAB (Unified Standard Map + Smooth In-Bounds Markers) --- */}
+        {/* --- MAP / XARITA TAB (Unified Standard Map + Fixed Routing & Dark Glass Overlays) --- */}
         {activeTab === 'map' && (
-          <div className="absolute inset-0 z-30 bg-white flex flex-col overflow-hidden">
-            {/* Ghost Mode Notification Banner */}
+          <div className="absolute inset-0 z-30 bg-[#0B0D13] flex flex-col overflow-hidden" data-testid="map-view-container">
             {!isLocationEnabled && !activeRouteUser && (
-              <div className="bg-amber-50 border-b border-amber-200 p-2 px-3 flex items-center justify-between shrink-0 z-30 text-amber-900 text-xs shadow-sm">
+              <div className="bg-[#151824] border-b border-amber-400/20 p-2 px-3 flex items-center justify-between shrink-0 z-30 text-amber-200 text-xs">
                 <div className="flex items-center space-x-2 min-w-0">
-                  <span className="text-sm">👻</span>
+                  <EyeOff className="w-3.5 h-3.5 text-amber-400 shrink-0" />
                   <p className="truncate text-[11px] font-medium">Jonli lokatsiyangiz o'chirilgan (Ghost Mode).</p>
                 </div>
-                <button 
+                <button
+                  type="button"
+                  data-testid="map-enable-gps-btn"
                   onClick={() => handleToggleLocation(true)}
-                  className="bg-[#E8474A] text-white px-3 py-1 rounded-full text-[10px] font-bold shrink-0 ml-2 shadow-sm"
+                  className="bg-[#E11D48] hover:bg-[#BE123C] text-white px-3 py-1 rounded-lg text-[10.5px] font-bold shrink-0 ml-2 transition cursor-pointer"
                 >
                   GPS yoqish
                 </button>
@@ -4576,48 +4756,84 @@ export default function App() {
             )}
 
             {gpsStatusMsg && (
-              <div className="bg-rose-50 border-b border-rose-200 p-2 px-3 text-[#E8474A] text-[10px] font-semibold flex items-center justify-between shrink-0 z-30 gap-2">
+              <div className="bg-rose-950/70 border-b border-rose-500/30 p-2 px-3 text-rose-200 text-[10.5px] font-medium flex items-center justify-between shrink-0 z-30 gap-2">
                 <div className="flex items-center space-x-1.5 min-w-0">
-                  <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
+                  <AlertTriangle className="w-3.5 h-3.5 text-rose-400 shrink-0" />
                   <span className="truncate">{gpsStatusMsg}</span>
                 </div>
-                <button onClick={() => handleToggleLocation(true)} className="underline text-[10px] font-bold shrink-0">
+                <button
+                  type="button"
+                  onClick={() => handleToggleLocation(true)}
+                  className="underline text-[10.5px] font-bold text-white shrink-0 cursor-pointer"
+                >
                   Qayta urinish
                 </button>
               </div>
             )}
 
-            {/* Map Viewport Wrapper with overlay controls inside map bounds */}
+            {/* Map Viewport Wrapper */}
             <div className="relative flex-1 min-h-0 w-full overflow-hidden">
+              {/* Top-left Map Users & Active Filter Pill */}
+              {!activeRouteUser && (
+                <div className="pointer-events-none absolute top-3 left-14 z-40">
+                  <div className="pointer-events-auto inline-flex items-center gap-2 px-3 py-1.5 rounded-full bg-[#11131C]/90 backdrop-blur-md border border-white/10 text-[11px] font-semibold text-zinc-200 shadow-lg">
+                    <MapPin className="w-3.5 h-3.5 text-rose-400" />
+                    <span className="tabular-nums">
+                      {usersList.filter((u) => {
+                        const myUid = currentUser?.uid || firebaseUser?.uid;
+                        if (myUid && (u.uid === myUid || u.id === myUid)) return false;
+                        if (filterRegion !== 'Barchasi' && u.region !== filterRegion) return false;
+                        if (filterDistrict !== 'Barchasi' && u.district !== filterDistrict) return false;
+                        return u.location?.lat != null && u.location?.lng != null && u.locationVisibility !== 'ghost' && u.isLocationEnabled !== false;
+                      }).length} ta foydalanuvchi xaritada
+                    </span>
+                    {(filterRegion !== 'Barchasi' || filterDistrict !== 'Barchasi') && (
+                      <span className="text-rose-400 font-bold truncate max-w-[120px]">
+                        · {filterDistrict !== 'Barchasi' ? filterDistrict : filterRegion}
+                      </span>
+                    )}
+                  </div>
+                </div>
+              )}
+
               {/* Active Route Info Floating Banner */}
-              {activeRouteUser && routeInfo && (
-                <div className="absolute top-3 left-3 right-3 z-40 bg-white/95 backdrop-blur-md rounded-[20px] p-3 shadow-xl border border-rose-100 flex items-center justify-between animate-fadeIn">
+              {activeRouteUser && (routeInfo || isCalculatingRoute) && (
+                <div className="absolute top-3 left-3 right-3 z-40 bg-[#12141E]/95 backdrop-blur-xl rounded-[20px] p-3 shadow-2xl border border-rose-500/25 flex items-center justify-between gap-2 animate-fadeIn">
                   <div className="flex items-center space-x-2.5 min-w-0">
-                    {resolveAvatarUrl(activeRouteUser.avatar) ? (
-                      <img src={resolveAvatarUrl(activeRouteUser.avatar)} alt={activeRouteUser.name} className="w-10 h-10 rounded-full object-cover border-2 border-[#E8474A] shrink-0" />
+                    {resolveAvatarUrl(resolveEffectiveProfileAvatar(activeRouteUser)) ? (
+                      <img src={resolveAvatarUrl(resolveEffectiveProfileAvatar(activeRouteUser))} alt={activeRouteUser.name} className="w-10 h-10 rounded-full object-cover border-2 border-rose-500 shrink-0" />
                     ) : (
-                      <div className="w-10 h-10 rounded-full bg-rose-100 text-[#E8474A] font-black text-sm flex items-center justify-center border-2 border-[#E8474A] shrink-0">
+                      <div className="w-10 h-10 rounded-full bg-rose-500/20 text-rose-300 font-bold text-sm flex items-center justify-center border-2 border-rose-500 shrink-0">
                         {getSafeUserDisplayName(activeRouteUser, 'F').charAt(0).toUpperCase()}
                       </div>
                     )}
                     <div className="min-w-0">
-                      <h4 className="font-bold text-xs text-slate-900 truncate max-w-[130px]">{activeRouteUser.name} bilan marshrut</h4>
-                      <p className="text-[10px] text-[#E8474A] font-extrabold flex items-center space-x-1">
-                        <Car className="w-3 h-3 inline mr-0.5" />
-                        <span>{routeInfo.distanceKm} km • ~{routeInfo.durationMin} daqiqa</span>
+                      <h4 className="font-bold text-xs text-white truncate max-w-[160px]">{activeRouteUser.name} bilan marshrut</h4>
+                      <p className="text-[10.5px] text-rose-400 font-bold flex items-center space-x-1 tabular-nums">
+                        <Car className="w-3 h-3 inline mr-0.5 shrink-0" />
+                        {isCalculatingRoute ? (
+                          <span>Marshrut hisoblanmoqda...</span>
+                        ) : routeInfo ? (
+                          <span>
+                            {routeInfo.distanceKm} km · ~{routeInfo.durationMin} daqiqa
+                            {routeInfo.isFallback ? ' (taxminiy)' : ''}
+                          </span>
+                        ) : null}
                       </p>
                     </div>
                   </div>
-                  <button 
+                  <button
+                    type="button"
                     onClick={() => {
                       setActiveRouteUser(null);
                       setRouteInfo(null);
+                      setIsCalculatingRoute(false);
                       if (mapPolylineRef.current) {
                         mapPolylineRef.current.remove();
                         mapPolylineRef.current = null;
                       }
                     }}
-                    className="p-1.5 px-3 rounded-full bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-bold shadow-subtle shrink-0"
+                    className="p-1.5 px-3 rounded-xl bg-white/[0.08] hover:bg-white/[0.15] text-zinc-200 text-xs font-bold shrink-0 cursor-pointer"
                   >
                     Yopish
                   </button>
@@ -4626,6 +4842,7 @@ export default function App() {
 
               {/* Live Stream Go Live Button on Map */}
               <button
+                type="button"
                 onClick={() => {
                   if (!firebaseUser && !currentUser) {
                     openAuthModalClean('login');
@@ -4634,7 +4851,7 @@ export default function App() {
                   setLiveModalMode('broadcaster');
                   setShowLiveModal(true);
                 }}
-                className="absolute top-3 right-3 z-40 bg-gradient-to-r from-red-600 to-rose-600 hover:from-red-500 hover:to-rose-500 text-white shadow-xl px-3.5 py-2 rounded-full flex items-center space-x-1.5 font-bold text-xs transition transform active:scale-95 border border-white/20"
+                className="absolute top-3 right-3 z-40 bg-gradient-to-r from-[#E11D48] to-[#BE123C] hover:brightness-110 text-white shadow-xl px-3.5 py-2 rounded-full flex items-center space-x-1.5 font-bold text-xs transition transform active:scale-95 border border-white/15 cursor-pointer"
               >
                 <span className="w-2 h-2 rounded-full bg-white animate-ping" />
                 <Radio className="w-4 h-4" />
@@ -4643,46 +4860,116 @@ export default function App() {
 
               {/* Filter Button */}
               <button
+                type="button"
+                data-testid="map-filter-btn"
                 onClick={() => setShowFilterModal(!showFilterModal)}
                 title="Hudud bo'yicha filtr"
-                className="absolute top-14 right-3 z-40 bg-white shadow-lg p-2.5 rounded-full flex items-center space-x-2 border border-slate-200"
+                aria-label="Hudud bo'yicha filtr"
+                className="absolute top-14 right-3 z-40 bg-[#12141E]/92 hover:bg-[#1B1F30] text-zinc-100 shadow-lg p-2.5 rounded-full flex items-center justify-center border border-white/15 transition cursor-pointer"
               >
-                <div className="w-5 h-5 flex items-center justify-center bg-[#E8474A] rounded-full text-white font-bold text-[10px]">F</div>
+                <SlidersHorizontal className="w-4 h-4 text-rose-400" />
+                {(filterRegion !== 'Barchasi' || filterDistrict !== 'Barchasi') && (
+                  <span className="absolute -top-0.5 -right-0.5 w-2.5 h-2.5 rounded-full bg-rose-500 border border-[#12141E]" />
+                )}
               </button>
 
               {/* Re-center on My Location Button */}
               <button
                 type="button"
+                data-testid="map-recenter-btn"
                 onClick={() => {
                   if (mapInstanceRef.current && userCoords?.lat && userCoords?.lng) {
                     mapInstanceRef.current.setView([userCoords.lat, userCoords.lng], 14, { animate: true });
+                    showToast("Xarita joylashuvingizga markazlashtirildi");
                   } else {
                     handleToggleLocation(true);
                   }
                 }}
                 title="Mening joylashuvim"
-                className="absolute bottom-4 right-3 z-40 bg-white hover:bg-slate-50 text-[#E8474A] shadow-lg p-3 rounded-full border border-slate-200 transition active:scale-95"
+                aria-label="Mening joylashuvim"
+                className="absolute bottom-24 right-3 z-40 bg-[#12141E]/95 hover:bg-[#1B1F30] text-rose-400 shadow-xl p-3 rounded-full border border-white/15 transition active:scale-95 cursor-pointer"
               >
                 <Navigation className="w-4 h-4" />
               </button>
 
-              {/* Filter Modal */}
+              {/* Filter Modal (Dark Obsidian, Proper Contrast) */}
               {showFilterModal && (
-                <div className="absolute inset-0 z-50 bg-black/50 backdrop-blur-sm flex items-center justify-center p-4">
-                  <div className="bg-white rounded-3xl p-6 w-full space-y-4 shadow-2xl">
-                      <h3 className="font-bold text-lg">Hudud bo'yicha filtr</h3>
-                      <select value={filterRegion} onChange={(e) => { setFilterRegion(e.target.value); setFilterDistrict('Barchasi'); }} className="w-full p-3 rounded-xl border">
-                          <option value="Barchasi">Barcha viloyatlar</option>
-                          {Object.keys(UZ_LOCATIONS).map((reg, idx) => <option key={`filter_modal_reg_${reg}_${idx}`} value={reg}>{reg}</option>)}
-                      </select>
-                      <select value={filterDistrict} onChange={(e) => setFilterDistrict(e.target.value)} className="w-full p-3 rounded-xl border">
-                          <option value="Barchasi">Barcha tumanlar</option>
-                          {UZ_LOCATIONS[filterRegion]?.map((dist, idx) => <option key={`filter_modal_dist_${dist}_${idx}`} value={dist}>{dist}</option>)}
-                      </select>
-                      <div className="flex space-x-2 pt-2">
-                          <button onClick={() => setShowFilterModal(false)} className="flex-1 p-3 rounded-xl bg-gray-100 font-bold">Yopish</button>
-                          <button onClick={() => { setShowFilterModal(false); }} className="flex-1 p-3 rounded-xl bg-[#E8474A] text-white font-bold">Qidirish</button>
+                <div
+                  className="absolute inset-0 z-50 bg-black/70 backdrop-blur-sm flex items-center justify-center p-4 animate-fadeIn"
+                  data-testid="map-filter-modal"
+                  onClick={() => setShowFilterModal(false)}
+                >
+                  <div
+                    onClick={(e) => e.stopPropagation()}
+                    className="bg-[#12141E] text-zinc-100 rounded-[24px] p-5 sm:p-6 w-full max-w-sm space-y-4 shadow-2xl border border-white/12"
+                  >
+                    <div className="flex items-center justify-between">
+                      <div>
+                        <h3 className="font-editorial font-bold text-xl text-white">Hudud bo'yicha filtr</h3>
+                        <p className="text-[11px] text-zinc-400 mt-0.5">Viloyat yoki tumanni tanlang</p>
                       </div>
+                      <button
+                        type="button"
+                        onClick={() => setShowFilterModal(false)}
+                        aria-label="Filtrni yopish"
+                        className="w-8 h-8 rounded-xl bg-white/[0.06] hover:bg-rose-600 text-zinc-300 hover:text-white flex items-center justify-center transition cursor-pointer"
+                      >
+                        <X className="w-4 h-4" />
+                      </button>
+                    </div>
+
+                    <div className="space-y-3">
+                      <div>
+                        <label className="block text-[11px] font-bold uppercase tracking-wider text-zinc-400 mb-1.5">Viloyat</label>
+                        <select
+                          data-testid="map-filter-region"
+                          value={filterRegion}
+                          onChange={(e) => { setFilterRegion(e.target.value); setFilterDistrict('Barchasi'); }}
+                          className="w-full p-3 rounded-xl bg-[#181B29] border border-white/12 text-xs font-semibold text-white outline-none focus:border-rose-500 cursor-pointer"
+                        >
+                          <option value="Barchasi" className="bg-[#12141E] text-white">Barcha viloyatlar</option>
+                          {Object.keys(UZ_LOCATIONS).map((reg, idx) => (
+                            <option key={`filter_modal_reg_${reg}_${idx}`} value={reg} className="bg-[#12141E] text-white">{reg}</option>
+                          ))}
+                        </select>
+                      </div>
+
+                      <div>
+                        <label className="block text-[11px] font-bold uppercase tracking-wider text-zinc-400 mb-1.5">Tuman / Shahar</label>
+                        <select
+                          data-testid="map-filter-district"
+                          value={filterDistrict}
+                          onChange={(e) => setFilterDistrict(e.target.value)}
+                          className="w-full p-3 rounded-xl bg-[#181B29] border border-white/12 text-xs font-semibold text-white outline-none focus:border-rose-500 cursor-pointer"
+                        >
+                          <option value="Barchasi" className="bg-[#12141E] text-white">Barcha tumanlar</option>
+                          {UZ_LOCATIONS[filterRegion]?.map((dist, idx) => (
+                            <option key={`filter_modal_dist_${dist}_${idx}`} value={dist} className="bg-[#12141E] text-white">{dist}</option>
+                          ))}
+                        </select>
+                      </div>
+                    </div>
+
+                    <div className="flex gap-2 pt-2">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setFilterRegion('Barchasi');
+                          setFilterDistrict('Barchasi');
+                          setShowFilterModal(false);
+                        }}
+                        className="px-4 py-2.5 rounded-xl bg-white/[0.06] hover:bg-white/[0.12] text-zinc-300 text-xs font-bold transition cursor-pointer"
+                      >
+                        Tozalash
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setShowFilterModal(false)}
+                        className="flex-1 py-2.5 rounded-xl bg-[#E11D48] hover:bg-[#BE123C] text-white text-xs font-bold transition cursor-pointer"
+                      >
+                        Qo'llash
+                      </button>
+                    </div>
                   </div>
                 </div>
               )}
@@ -4691,15 +4978,13 @@ export default function App() {
               <div className="relative z-10 w-full h-full overflow-hidden" id="alov-leaflet-map" ref={mapContainerRef}></div>
             </div>
           </div>
-
         )}
-
       </div>
 
-      {/* Sticky Bottom Navigation - 6 Luxury Glassmorphic Tabs */}
+      {/* Sticky Bottom Navigation Dock with Animated Active Pill */}
       {activeTab !== 'reels' && !(activeTab === 'chats' && chatView === 'conversation') && (
-        <div className="sticky bottom-0 left-0 right-0 z-50 shrink-0 pointer-events-none pb-2 pt-1 px-2 sm:px-4">
-          <nav className="pointer-events-auto max-w-lg mx-auto bg-white/95 backdrop-blur-2xl border border-[rgba(166,36,51,0.14)] rounded-2xl sm:rounded-full px-1.5 py-1.5 flex items-center justify-around shadow-[0_12px_36px_rgba(34,23,25,0.08)]">
+        <div className="sticky bottom-0 left-0 right-0 z-50 shrink-0 pointer-events-none pb-2.5 pt-1 px-2 sm:px-4">
+          <nav className="pointer-events-auto max-w-lg mx-auto bg-[#11131C]/92 backdrop-blur-2xl border border-white/[0.1] rounded-2xl sm:rounded-full px-1.5 py-1.5 flex items-center justify-around shadow-[0_16px_42px_rgba(0,0,0,0.65)]">
             {[
               { id: 'discover', label: 'Nomzodlar', icon: Users, onClick: () => setActiveTab('discover') },
               { id: 'posts', label: 'Postlar', icon: Newspaper, onClick: () => setActiveTab('posts') },
@@ -4715,66 +5000,72 @@ export default function App() {
                   key={tab.id}
                   onClick={tab.onClick}
                   data-testid={`tab-${tab.id}`}
-                  className={`relative flex flex-col items-center justify-center px-2 sm:px-3 py-1.5 rounded-xl sm:rounded-full transition-all duration-200 cursor-pointer min-w-0 ${
-                    isActive
-                      ? 'text-[#C93545] font-bold bg-[#FDF2F3] shadow-xs'
-                      : 'text-[#6B5B5E] hover:text-[#221719] hover:bg-[#FAF4F2]'
+                  className={`relative flex flex-col items-center justify-center px-2.5 sm:px-3.5 py-1.5 rounded-xl sm:rounded-full transition-colors duration-150 cursor-pointer min-w-0 ${
+                    isActive ? 'text-white font-bold' : 'text-zinc-400 hover:text-zinc-200'
                   }`}
                 >
-                  <Icon className={`w-4 h-4 sm:w-4.5 sm:h-4.5 transition-transform duration-200 ${isActive ? 'scale-110' : ''}`} />
-                  <span className="text-[9.5px] sm:text-[10px] truncate mt-0.5 font-medium">{tab.label}</span>
+                  {isActive && (
+                    <motion.span
+                      layoutId="activeDockPill"
+                      transition={{ type: 'spring', stiffness: 420, damping: 34 }}
+                      className="absolute inset-0 rounded-xl sm:rounded-full bg-[#E11D48]/22 border border-rose-500/35"
+                    />
+                  )}
+                  <Icon className={`relative z-10 w-4 h-4 sm:w-4.5 sm:h-4.5 transition-transform duration-150 ${isActive ? 'text-rose-400 scale-105' : ''}`} />
+                  <span className="relative z-10 text-[9.5px] sm:text-[10px] truncate mt-0.5">{tab.label}</span>
                 </button>
               );
             })}
           </nav>
         </div>
       )}
-
     </div>
   );
 
   if (isAuthChecking) {
     return (
-      <div className="min-h-screen bg-[#FDFBF9] flex flex-col items-center justify-center space-y-4">
+      <div className="min-h-screen bg-[#09090D] flex flex-col items-center justify-center space-y-4">
         <div className="relative">
-          <div className="w-12 h-12 rounded-full border-4 border-rose-200 border-t-[#C93545] animate-spin" />
-          <Flame className="w-5 h-5 text-[#C93545] absolute inset-0 m-auto animate-pulse" />
+          <div className="w-12 h-12 rounded-full border-4 border-rose-500/20 border-t-rose-500 animate-spin" />
+          <Flame className="w-5 h-5 text-rose-500 absolute inset-0 m-auto animate-pulse" />
         </div>
-        <div className="text-2xl font-editorial font-black tracking-tight text-[#221719]">
-          alov<span className="text-[#C93545]">.uz</span>
+        <div className="text-2xl font-editorial font-black tracking-tight text-white">
+          alov<span className="text-rose-500">.uz</span>
         </div>
-        <p className="text-xs text-[#6B5B5E] font-medium">Sessiya tiklanmoqda...</p>
+        <p className="text-xs text-zinc-400 font-medium">Sessiya tiklanmoqda...</p>
       </div>
     );
   }
 
   return (
-    <div className="min-h-screen bg-[#FDFBF9] text-[#221719] font-sans selection:bg-[#C93545] selection:text-white">
-      
+    <MotionConfig reducedMotion="user">
+    <div className="min-h-screen bg-[#09090D] text-[#F4F4F6] font-sans selection:bg-rose-600 selection:text-white">
+
       {/* Landing Page */}
       {(!firebaseUser && !currentUser) || activeTab === 'landing' ? (
         <LandingPage onLogin={() => openAuthModalClean('login')} />
       ) : (
-        <div className="min-h-screen bg-gradient-to-br from-[#FBF5F2] via-[#F6ECE7] to-[#EFE1D9] flex flex-col items-center justify-center p-0 md:p-4 overflow-hidden">
+        <div className="min-h-screen bg-[#09090D] flex flex-col items-center justify-center p-0 md:p-4 overflow-hidden relative">
+          <div className="pointer-events-none fixed inset-0 bg-[radial-gradient(ellipse_at_top,rgba(225,29,72,0.12),transparent_55%)]" />
           {showUpdateBanner && (
-            <motion.div 
+            <motion.div
               initial={{ y: -50, opacity: 0 }}
               animate={{ y: 0, opacity: 1 }}
-              className="w-full max-w-[1040px] bg-amber-50 border-b border-amber-200 p-3 flex items-center justify-between z-[60] shadow-md mb-2 rounded-xl"
+              className="w-full max-w-[1060px] bg-amber-500/15 border border-amber-400/30 p-3 flex items-center justify-between z-[60] shadow-md mb-2 rounded-xl"
             >
               <div className="flex items-center space-x-2">
-                <RefreshCw className="w-4 h-4 text-amber-600 animate-spin" />
-                <span className="text-[11px] font-bold text-amber-900">Yangi versiya mavjud! Iltimos, ilovani yangilang.</span>
+                <RefreshCw className="w-4 h-4 text-amber-400 animate-spin" />
+                <span className="text-[11px] font-bold text-amber-200">Yangi versiya mavjud! Iltimos, ilovani yangilang.</span>
               </div>
-              <button 
+              <button
                 onClick={() => window.location.reload()}
-                className="bg-amber-600 text-white px-3 py-1 rounded-full text-[10px] font-black shadow-sm"
+                className="bg-amber-500 text-black px-3 py-1 rounded-full text-[10px] font-black shadow-sm cursor-pointer"
               >
                 YANGILASH
               </button>
             </motion.div>
           )}
-          <div className="w-full md:max-w-[1040px] h-[100dvh] md:h-[calc(100dvh-2rem)] bg-[#FDFBF9] md:rounded-[28px] md:shadow-[0_24px_70px_rgba(34,23,25,0.1)] md:border md:border-[rgba(166,36,51,0.12)] relative overflow-hidden flex flex-col">
+          <div className="w-full md:max-w-[1060px] h-[100dvh] md:h-[calc(100dvh-2rem)] bg-[#09090D] md:rounded-[28px] md:shadow-[0_28px_80px_rgba(0,0,0,0.8)] md:border md:border-white/[0.09] relative overflow-hidden flex flex-col z-10">
             {dashboardContent}
           </div>
         </div>
@@ -4782,11 +5073,22 @@ export default function App() {
 
       {/* --- AUTHENTICATION MODAL --- */}
       {showAuthModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-[#221719]/60 backdrop-blur-md animate-fadeIn">
-          <div className={cn(
-            "bg-[#FDFBF9] rounded-[32px] w-full p-6 text-left space-y-4 relative shadow-2xl border border-[rgba(166,36,51,0.14)] max-h-[92vh] overflow-y-auto",
-            (authMode === 'google_face_id' || authMode === 'register_face_id' || (authMode === 'telegram' && telegramStep === 'face_id')) ? "max-w-md" : "max-w-sm"
-          )}>
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-[#06060A]/80 backdrop-blur-xl"
+          data-testid="auth-modal-backdrop"
+        >
+          <motion.div
+            initial={{ opacity: 0, scale: 0.96, y: 14 }}
+            animate={{ opacity: 1, scale: 1, y: 0 }}
+            transition={{ duration: 0.22, ease: [0.22, 1, 0.36, 1] }}
+            data-testid="auth-modal"
+            className={cn(
+              "bg-[#11131C] text-zinc-100 rounded-[28px] w-full p-6 sm:p-7 text-left space-y-4 relative shadow-[0_32px_90px_rgba(0,0,0,0.85)] border border-white/10 max-h-[92vh] overflow-y-auto",
+              (authMode === 'google_face_id' || authMode === 'register_face_id' || (authMode === 'telegram' && telegramStep === 'face_id')) ? "max-w-md" : "max-w-sm"
+            )}
+          >
+            <div className="pointer-events-none absolute -top-20 inset-x-10 h-32 bg-rose-600/15 blur-3xl rounded-full" />
+
             {!(authMode === 'google_face_id' || authMode === 'register_face_id' || (authMode === 'telegram' && telegramStep === 'face_id')) && (
               <button 
                 onClick={() => {
@@ -4796,7 +5098,7 @@ export default function App() {
                   setTelegramStep('input_phone');
                 }} 
                 aria-label="Oynani yopish"
-                className="absolute top-5 right-5 p-1.5 rounded-full text-[#6B5B5E] hover:text-[#221719] hover:bg-[#FAF4F2] transition z-10"
+                className="absolute top-5 right-5 w-8 h-8 rounded-full bg-white/[0.06] hover:bg-rose-500/20 text-zinc-400 hover:text-white flex items-center justify-center transition z-10 cursor-pointer"
               >
                 <X className="w-4 h-4" />
               </button>
@@ -4835,61 +5137,70 @@ export default function App() {
                 }}
               />
             ) : authMode === 'google_setup' ? (
-              <div className="space-y-4">
+              <div className="space-y-4 relative z-10">
                 <div className="space-y-1 text-center">
-                  <h2 className="text-xl font-editorial font-black text-[#221719] tracking-tight">Profilni yakunlash</h2>
-                  <p className="text-xs text-[#6B5B5E] font-medium">Face ID tasdiqlandi. Ma'lumotlaringizni tekshiring va to'ldiring:</p>
+                  <h2 className="text-xl font-editorial font-bold text-white tracking-tight">Profilni yakunlash</h2>
+                  <p className="text-xs text-zinc-400 font-medium">
+                    {pendingFaceId?.verified
+                      ? "Face ID tasdiqlandi. Ma'lumotlaringizni tekshiring va to'ldiring:"
+                      : "Profilingizni yakunlash uchun ma'lumotlaringizni kiriting:"}
+                  </p>
                 </div>
 
-                {/* Face ID captured avatar & detected gender banner */}
-                <div className="p-3.5 bg-emerald-50 border border-emerald-200 rounded-2xl flex items-center space-x-3">
-                  <div className="w-14 h-14 rounded-full bg-white shadow-sm overflow-hidden shrink-0 border-2 border-emerald-500 flex items-center justify-center">
-                    {resolveAvatarUrl(regAvatar) ? (
-                      <img src={resolveAvatarUrl(regAvatar)} alt="Face ID" className="w-full h-full object-cover" />
-                    ) : (
-                      <ScanFace className="w-6 h-6 text-emerald-600" />
-                    )}
+                {pendingFaceId?.verified ? (
+                  <div className="p-3.5 bg-emerald-500/10 border border-emerald-500/25 rounded-2xl flex items-center space-x-3">
+                    <div className="w-14 h-14 rounded-full bg-[#171A26] shadow-sm overflow-hidden shrink-0 border-2 border-emerald-500 flex items-center justify-center">
+                      {resolveAvatarUrl(regAvatar) ? (
+                        <img src={resolveAvatarUrl(regAvatar)} alt="Face ID" className="w-full h-full object-cover" />
+                      ) : (
+                        <ScanFace className="w-6 h-6 text-emerald-400" />
+                      )}
+                    </div>
+                    <div className="min-w-0 flex-1">
+                      <p className="text-[10px] text-emerald-300 font-bold uppercase tracking-wider flex items-center gap-1">
+                        <ShieldCheck className="w-3.5 h-3.5" />
+                        <span>Face ID Tasdiqlandi</span>
+                      </p>
+                      <p className="text-xs font-bold text-white mt-0.5">
+                        Jins: {genderToUzLabel(regGender)} ({pendingFaceId?.confidence ?? 95}%)
+                      </p>
+                      <p className="text-[10px] text-emerald-300/80 font-medium">Real kamera suratingiz profilga o'rnatiladi</p>
+                    </div>
                   </div>
-                  <div className="min-w-0 flex-1">
-                    <p className="text-[10px] text-emerald-700 font-bold uppercase tracking-wider flex items-center gap-1">
-                      <ShieldCheck className="w-3.5 h-3.5" />
-                      <span>Face ID Tasdiqlandi</span>
-                    </p>
-                    <p className="text-xs font-black text-[#221719] mt-0.5">
-                      Jins: {genderToUzLabel(regGender)} ({pendingFaceId?.confidence ?? 95}%)
-                    </p>
-                    <p className="text-[10px] text-emerald-700 font-medium">Profil surati Face ID kamerasidan olindi</p>
+                ) : (
+                  <div className="p-3.5 bg-[#171A26] border border-white/10 rounded-2xl text-xs text-zinc-300">
+                    Profilingiz uchun hudud, tug'ilgan sana va jins ma'lumotlarini kiriting.
                   </div>
-                </div>
+                )}
 
                 {errorMsg && (
-                  <div className="p-3 bg-rose-50 border border-rose-200 rounded-xl text-rose-600 text-xs font-semibold">
+                  <div className="p-3 bg-rose-500/15 border border-rose-500/30 rounded-xl text-rose-300 text-xs font-semibold">
                     {errorMsg}
                   </div>
                 )}
 
                 <form onSubmit={handleCompleteGoogleRegistration} className="space-y-3" data-testid="google-setup-form">
                   <div>
-                    <label className="block text-[11px] font-bold text-[#221719] mb-1">Ism va Familiya</label>
+                    <label className="block text-[11px] font-bold text-zinc-300 mb-1">Ism va Familiya</label>
                     <input 
                       type="text" 
                       value={regName}
                       onChange={(e) => setRegName(e.target.value)}
                       required
-                      className="w-full px-3.5 py-2.5 rounded-xl bg-white border border-[rgba(166,36,51,0.15)] text-xs font-semibold text-[#221719] focus:border-[#C93545] outline-none"
+                      className="w-full px-3.5 py-2.5 rounded-xl bg-[#171A26] border border-white/10 text-xs font-semibold text-white placeholder:text-zinc-500 focus:border-rose-500 outline-none"
                       placeholder="Ismingiz..."
                     />
                   </div>
 
                   <div>
                     <div className="flex items-center justify-between mb-1">
-                      <label className="block text-[11px] font-bold text-[#221719]">
+                      <label className="block text-[11px] font-bold text-zinc-300">
                         Foydalanuvchi nomi (@username)
                       </label>
-                      <span className="text-[10px] text-[#A62433] font-bold">Probel mumkin emas</span>
+                      <span className="text-[10px] text-rose-400 font-bold">Probel mumkin emas</span>
                     </div>
                     <div className="relative">
-                      <span className="absolute left-3.5 top-1/2 -translate-y-1/2 text-xs font-mono font-bold text-[#837275]">@</span>
+                      <span className="absolute left-3.5 top-1/2 -translate-y-1/2 text-xs font-mono font-bold text-zinc-500">@</span>
                       <input 
                         type="text" 
                         value={regUsername}
@@ -4897,17 +5208,16 @@ export default function App() {
                           const clean = e.target.value.replace(/\s+/g, '').replace(/^@+/, '');
                           setRegUsername(clean);
                         }}
-                        className="w-full pl-8 pr-3.5 py-2.5 rounded-xl bg-white border border-[rgba(166,36,51,0.15)] text-xs font-mono font-bold text-[#221719] focus:border-[#C93545] outline-none"
+                        className="w-full pl-8 pr-3.5 py-2.5 rounded-xl bg-[#171A26] border border-white/10 text-xs font-mono font-bold text-white placeholder:text-zinc-500 focus:border-rose-500 outline-none"
                         placeholder="username"
                       />
                     </div>
                   </div>
 
-                  {/* Gender selector (editable here in case Face ID misclassified) */}
                   <div>
                     <div className="flex items-center justify-between mb-1">
-                      <label className="block text-[11px] font-bold text-[#221719]">Jinsingiz (Birlamchi)</label>
-                      <span className="text-[10px] text-[#6B5B5E]">Xato bo'lsa to'g'rilang</span>
+                      <label className="block text-[11px] font-bold text-zinc-300">Jinsingiz (Birlamchi)</label>
+                      <span className="text-[10px] text-zinc-500">Xato bo'lsa to'g'rilang</span>
                     </div>
                     <div className="grid grid-cols-2 gap-2">
                       <button
@@ -4916,8 +5226,8 @@ export default function App() {
                         onClick={() => setRegGender('female')}
                         className={`py-2.5 px-3 rounded-xl text-xs font-bold border transition cursor-pointer ${
                           regGender === 'female'
-                            ? 'bg-[#C93545] text-white border-[#C93545] shadow-xs'
-                            : 'bg-white text-[#36272A] border-[rgba(166,36,51,0.18)] hover:border-[#C93545]'
+                            ? 'bg-gradient-to-r from-[#E11D48] to-rose-600 text-white border-rose-500 shadow-xs'
+                            : 'bg-[#171A26] text-zinc-300 border-white/10 hover:border-rose-500/50'
                         }`}
                       >
                         Ayol / Qiz
@@ -4928,8 +5238,8 @@ export default function App() {
                         onClick={() => setRegGender('male')}
                         className={`py-2.5 px-3 rounded-xl text-xs font-bold border transition cursor-pointer ${
                           regGender === 'male'
-                            ? 'bg-[#221719] text-white border-[#221719] shadow-xs'
-                            : 'bg-white text-[#36272A] border-[rgba(166,36,51,0.18)] hover:border-[#221719]'
+                            ? 'bg-white text-zinc-950 border-white shadow-xs'
+                            : 'bg-[#171A26] text-zinc-300 border-white/10 hover:border-white/30'
                         }`}
                       >
                         Erkak / Yigit
@@ -4939,8 +5249,8 @@ export default function App() {
 
                   <div>
                     <div className="flex items-center justify-between mb-1">
-                      <label className="block text-[11px] font-bold text-[#221719]">Tug'ilgan sana / yili (Birlamchi)</label>
-                      <span className="text-[11px] font-bold text-[#A62433] tabular-nums">
+                      <label className="block text-[11px] font-bold text-zinc-300">Tug'ilgan sana / yili (Birlamchi)</label>
+                      <span className="text-[11px] font-bold text-rose-400 tabular-nums">
                         {calculateAge(regBirthDate, Number(regAge))} yosh
                       </span>
                     </div>
@@ -4955,13 +5265,13 @@ export default function App() {
                         setRegAge(String(calculateAge(bDate)));
                       }}
                       required
-                      className="w-full px-3.5 py-2.5 rounded-xl bg-white border border-[rgba(166,36,51,0.15)] text-xs font-semibold text-[#221719] focus:border-[#C93545] outline-none"
+                      className="w-full px-3.5 py-2.5 rounded-xl bg-[#171A26] border border-white/10 text-xs font-semibold text-white focus:border-rose-500 outline-none"
                     />
                   </div>
 
                   <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
                     <div>
-                      <label className="block text-[11px] font-bold text-[#221719] mb-1">Viloyat</label>
+                      <label className="block text-[11px] font-bold text-zinc-300 mb-1">Viloyat</label>
                       <select 
                         value={regRegion}
                         onChange={(e) => {
@@ -4970,39 +5280,39 @@ export default function App() {
                           const dists = UZ_LOCATIONS[reg] || [];
                           if (dists.length > 0) setRegDistrict(dists[0]);
                         }}
-                        className="w-full px-3 py-2.5 rounded-xl bg-white border border-[rgba(166,36,51,0.15)] text-xs font-semibold text-[#221719] focus:border-[#C93545] outline-none"
+                        className="w-full px-3 py-2.5 rounded-xl bg-[#171A26] border border-white/10 text-xs font-semibold text-white focus:border-rose-500 outline-none"
                       >
                         {Object.keys(UZ_LOCATIONS).map((reg) => (
-                          <option key={reg} value={reg}>{reg}</option>
+                          <option key={reg} value={reg} className="bg-[#11131C] text-white">{reg}</option>
                         ))}
                       </select>
                     </div>
                     <div>
-                      <label className="block text-[11px] font-bold text-[#221719] mb-1">Tuman / Shahar</label>
+                      <label className="block text-[11px] font-bold text-zinc-300 mb-1">Tuman / Shahar</label>
                       <select 
                         value={regDistrict}
                         onChange={(e) => setRegDistrict(e.target.value)}
-                        className="w-full px-3 py-2.5 rounded-xl bg-white border border-[rgba(166,36,51,0.15)] text-xs font-semibold text-[#221719] focus:border-[#C93545] outline-none"
+                        className="w-full px-3 py-2.5 rounded-xl bg-[#171A26] border border-white/10 text-xs font-semibold text-white focus:border-rose-500 outline-none"
                       >
                         {UZ_LOCATIONS[regRegion]?.map((dist) => (
-                          <option key={dist} value={dist}>{dist}</option>
+                          <option key={dist} value={dist} className="bg-[#11131C] text-white">{dist}</option>
                         ))}
                       </select>
                     </div>
                     <div>
-                      <label className="block text-[11px] font-bold text-[#221719] mb-1">Mahalla / Manzil</label>
+                      <label className="block text-[11px] font-bold text-zinc-300 mb-1">Mahalla / Manzil</label>
                       <input
                         type="text"
                         value={regNeighborhood}
                         onChange={(e) => setRegNeighborhood(e.target.value)}
                         placeholder="Mahalla"
-                        className="w-full px-3 py-2.5 rounded-xl bg-white border border-[rgba(166,36,51,0.15)] text-xs font-semibold text-[#221719] focus:border-[#C93545] outline-none"
+                        className="w-full px-3 py-2.5 rounded-xl bg-[#171A26] border border-white/10 text-xs font-semibold text-white placeholder:text-zinc-500 focus:border-rose-500 outline-none"
                       />
                     </div>
                   </div>
 
                   <div>
-                    <label className="block text-[11px] font-bold text-[#221719] mb-1">Telefon raqam</label>
+                    <label className="block text-[11px] font-bold text-zinc-300 mb-1">Telefon raqam</label>
                     <SmartPhoneInput
                       value={regPhone}
                       onChange={setRegPhone}
@@ -5011,68 +5321,81 @@ export default function App() {
                   </div>
 
                   <div>
-                    <label className="block text-[11px] font-bold text-[#221719] mb-1">Telegram (ixtiyoriy)</label>
+                    <label className="block text-[11px] font-bold text-zinc-300 mb-1">Telegram (ixtiyoriy)</label>
                     <input 
                       type="text" 
                       value={regTelegram}
                       onChange={(e) => setRegTelegram(e.target.value)}
-                      className="w-full px-3.5 py-2.5 rounded-xl bg-white border border-[rgba(166,36,51,0.15)] text-xs font-semibold text-[#221719] focus:border-[#C93545] outline-none"
+                      className="w-full px-3.5 py-2.5 rounded-xl bg-[#171A26] border border-white/10 text-xs font-semibold text-white placeholder:text-zinc-500 focus:border-rose-500 outline-none"
                       placeholder="@username"
                     />
                   </div>
 
                   <div>
-                    <label className="block text-[11px] font-bold text-[#221719] mb-1">O'zingiz haqingizda (Bio)</label>
+                    <label className="block text-[11px] font-bold text-zinc-300 mb-1">O'zingiz haqingizda (Bio)</label>
                     <textarea 
                       value={regBio}
                       onChange={(e) => setRegBio(e.target.value)}
                       rows={2}
                       data-testid="setup-bio-input"
-                      className="w-full px-3.5 py-2 rounded-xl bg-white border border-[rgba(166,36,51,0.15)] text-xs font-semibold text-[#221719] focus:border-[#C93545] outline-none resize-none"
+                      className="w-full px-3.5 py-2 rounded-xl bg-[#171A26] border border-white/10 text-xs font-semibold text-white placeholder:text-zinc-500 focus:border-rose-500 outline-none resize-none"
                       placeholder="Qiziqishlaringiz, fe'l-atvoringiz va qanday inson izlayotganingiz..."
                     />
                   </div>
 
                   <div>
-                    <label className="block text-[11px] font-bold text-[#221719] mb-1">Akkaunt uchun Parol (Kirish uchun)</label>
-                    <input 
-                      type="password" 
-                      value={authPassword}
-                      onChange={(e) => setAuthPassword(e.target.value)}
-                      required
-                      className="w-full px-3.5 py-2.5 rounded-xl bg-white border border-[rgba(166,36,51,0.15)] text-xs font-semibold text-[#221719] focus:border-[#C93545] outline-none"
-                      placeholder="••••••••"
-                    />
+                    <label className="block text-[11px] font-bold text-zinc-300 mb-1">Akkaunt uchun Parol (Kirish uchun)</label>
+                    <div className="relative">
+                      <input 
+                        type={showAuthPassword ? 'text' : 'password'} 
+                        value={authPassword}
+                        onChange={(e) => setAuthPassword(e.target.value)}
+                        required
+                        className="w-full pl-3.5 pr-10 py-2.5 rounded-xl bg-[#171A26] border border-white/10 text-xs font-semibold text-white placeholder:text-zinc-500 focus:border-rose-500 outline-none"
+                        placeholder="••••••••"
+                      />
+                      <button
+                        type="button"
+                        onClick={() => setShowAuthPassword((p) => !p)}
+                        aria-label="Parolni ko'rsatish"
+                        className="absolute right-3 top-1/2 -translate-y-1/2 text-zinc-400 hover:text-white transition cursor-pointer"
+                      >
+                        {showAuthPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                      </button>
+                    </div>
                   </div>
 
                   <button 
                     type="submit"
                     disabled={isLoggingIn}
-                    className="w-full py-3 px-4 rounded-2xl bg-[#C93545] text-white font-bold text-sm shadow-md hover:bg-[#A62433] transition disabled:opacity-60"
+                    className="w-full py-3.5 px-4 rounded-2xl bg-gradient-to-r from-[#E11D48] to-rose-600 text-white font-bold text-sm shadow-[0_12px_28px_rgba(225,29,72,0.35)] hover:brightness-110 transition disabled:opacity-60 cursor-pointer"
                   >
                     {isLoggingIn ? "Saqlanmoqda..." : "Profilni yaratish va boshlash"}
                   </button>
                 </form>
               </div>
             ) : telegramStep === 'input_phone' && authMode === 'telegram' ? (
-              <div className="space-y-4">
-                <div className="space-y-1 text-center">
-                  <h2 className="text-xl font-black text-slate-900 tracking-tight">Telegram orqali kirish</h2>
-                  <p className="text-xs text-slate-500 font-medium">Telefon raqamingiz yoki @username'ingizni kiriting:</p>
+              <div className="space-y-4 relative z-10">
+                <div className="space-y-1.5 text-center pt-1">
+                  <div className="w-11 h-11 rounded-2xl bg-[#229ED9]/15 border border-[#229ED9]/30 text-[#38BDF8] flex items-center justify-center mx-auto">
+                    <Send className="w-5 h-5" />
+                  </div>
+                  <h2 className="text-xl font-editorial font-bold text-white tracking-tight">Telegram orqali kirish</h2>
+                  <p className="text-xs text-zinc-400 font-medium">Telefon raqamingiz yoki @username'ingizni kiriting:</p>
                 </div>
 
                 {errorMsg && (
-                  <div className="p-3 bg-rose-50 border border-rose-200 rounded-xl text-rose-600 text-xs font-semibold">
+                  <div className="p-3 bg-rose-500/15 border border-rose-500/30 rounded-xl text-rose-300 text-xs font-semibold">
                     {errorMsg}
                   </div>
                 )}
 
                 {hasStartedBotError && (
-                  <div className="p-3.5 bg-amber-50 border border-amber-200 rounded-2xl space-y-3 text-left">
+                  <div className="p-3.5 bg-amber-500/10 border border-amber-400/25 rounded-2xl space-y-3 text-left">
                     <div className="flex items-start space-x-2">
-                      <AlertTriangle className="w-5 h-5 text-amber-600 shrink-0 mt-0.5" />
-                      <div className="text-xs text-amber-900 font-medium leading-relaxed">
-                        <p className="font-bold text-amber-950">Botimizga ruxsat berilmagan!</p>
+                      <AlertTriangle className="w-5 h-5 text-amber-400 shrink-0 mt-0.5" />
+                      <div className="text-xs text-amber-200 font-medium leading-relaxed">
+                        <p className="font-bold text-amber-100">Botimizga ruxsat berilmagan!</p>
                         <p className="mt-1">Kodni Telegram xabarnomasida olish uchun avval rasmiy botimizga kirib <b>/start</b> tugmasini bosing:</p>
                       </div>
                     </div>
@@ -5096,7 +5419,7 @@ export default function App() {
                       <svg className="w-4 h-4 fill-current" viewBox="0 0 24 24">
                         <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm4.64 6.8c-.15 1.58-.8 5.42-1.13 7.19-.14.75-.42 1-.68 1.03-.58.05-1.02-.38-1.58-.75-.88-.58-1.38-.94-2.23-1.5-.99-.65-.35-1.01.22-1.59.15-.15 2.71-2.48 2.76-2.69.01-.03.01-.14-.07-.2-.08-.06-.19-.04-.27 0-.12.05-1.98 1.26-5.6 3.7-.53.36-1.01.54-1.44.53-.47-.01-1.38-.26-2.06-.48-.83-.27-1.49-.42-1.43-.88.03-.24.37-.49 1.02-.75 3.99-1.74 6.65-2.89 7.98-3.45 3.8-1.6 4.59-1.88 5.1-1.89.11 0 .37.03.54.17.14.12.18.28.2.4-.02.07-.02.13-.04.2z"/>
                       </svg>
-                      <span>🤖 Botga o'tish (@alovuz_bot)</span>
+                      <span>Botga o'tish (@alovuz_bot)</span>
                       <ArrowUpRight className="w-3.5 h-3.5" />
                     </a>
                   </div>
@@ -5104,7 +5427,7 @@ export default function App() {
 
                 <form onSubmit={handleStartTelegramAuth} className="space-y-3">
                   <div>
-                    <label className="block text-[11px] font-bold text-slate-700 mb-1">Telefon raqam yoki Username</label>
+                    <label className="block text-[11px] font-bold text-zinc-300 mb-1">Telefon raqam yoki Username</label>
                     <input 
                       type="text" 
                       name="alov_tg_identifier"
@@ -5115,7 +5438,7 @@ export default function App() {
                         if (hasStartedBotError) setHasStartedBotError(false);
                       }}
                       required
-                      className="w-full px-3.5 py-2.5 rounded-xl bg-slate-50 border border-slate-200 text-xs font-semibold text-slate-900 focus:border-red-500 focus:bg-white outline-none"
+                      className="w-full px-3.5 py-3 rounded-xl bg-[#171A26] border border-white/10 text-xs font-semibold text-white placeholder:text-zinc-500 focus:border-[#38BDF8] outline-none"
                       placeholder="+998901234567 yoki @username"
                     />
                   </div>
@@ -5123,26 +5446,30 @@ export default function App() {
                   <button 
                     type="submit"
                     disabled={isLoggingIn}
-                    className="w-full py-3 px-4 rounded-2xl bg-[#229ED9] text-white font-bold text-sm shadow-md hover:bg-[#1f8fc6] transition disabled:opacity-60"
+                    className="w-full py-3.5 px-4 rounded-2xl bg-[#229ED9] text-white font-bold text-sm shadow-lg shadow-sky-950/40 hover:bg-[#1f8fc6] transition disabled:opacity-60 flex items-center justify-center gap-2 cursor-pointer"
                   >
-                    {isLoggingIn ? "Tekshirilmoqda..." : hasStartedBotError ? "🔄 Botni yoqdim (Kodni yuborish)" : "Tasdiqlash kodi olish 📨"}
+                    {hasStartedBotError ? <RefreshCw className="w-4 h-4" /> : <Send className="w-4 h-4" />}
+                    <span>{isLoggingIn ? "Tekshirilmoqda..." : hasStartedBotError ? "Botni yoqdim (Kodni yuborish)" : "Tasdiqlash kodi olish"}</span>
                   </button>
 
                   <button 
                     type="button"
                     onClick={() => { resetAuthFormState(); setAuthMode('login'); setTelegramStep('input_phone'); }}
-                    className="w-full text-center text-xs font-bold text-slate-500 hover:text-slate-800 pt-1"
+                    className="w-full text-center text-xs font-bold text-zinc-400 hover:text-white pt-1 cursor-pointer"
                   >
                     Orqaga qaytish
                   </button>
                 </form>
               </div>
             ) : telegramStep === 'input_code' ? (
-              <div className="space-y-4 text-center">
-                <div className="space-y-1">
-                  <h2 className="text-xl font-black text-slate-900 tracking-tight">Tasdiqlash Kodini Kiriting 🔐</h2>
-                  <p className="text-xs text-slate-500 font-medium">
-                    Kodingiz Telegram botimiz (<b>@alovuz_bot</b>) chatiga yuborildi:
+              <div className="space-y-4 text-center relative z-10">
+                <div className="space-y-1.5 pt-1">
+                  <div className="w-11 h-11 rounded-2xl bg-rose-500/15 border border-rose-500/25 text-rose-400 flex items-center justify-center mx-auto">
+                    <Lock className="w-5 h-5" />
+                  </div>
+                  <h2 className="text-xl font-editorial font-bold text-white tracking-tight">Tasdiqlash kodini kiriting</h2>
+                  <p className="text-xs text-zinc-400 font-medium">
+                    Kodingiz Telegram botimiz (<b className="text-zinc-200">@alovuz_bot</b>) chatiga yuborildi:
                   </p>
                 </div>
 
@@ -5155,19 +5482,19 @@ export default function App() {
                   <svg className="w-4 h-4 fill-current shrink-0" viewBox="0 0 24 24">
                     <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm4.64 6.8c-.15 1.58-.8 5.42-1.13 7.19-.14.75-.42 1-.68 1.03-.58.05-1.02-.38-1.58-.75-.88-.58-1.38-.94-2.23-1.5-.99-.65-.35-1.01.22-1.59.15-.15 2.71-2.48 2.76-2.69.01-.03.01-.14-.07-.2-.08-.06-.19-.04-.27 0-.12.05-1.98 1.26-5.6 3.7-.53.36-1.01.54-1.44.53-.47-.01-1.38-.26-2.06-.48-.83-.27-1.49-.42-1.43-.88.03-.24.37-.49 1.02-.75 3.99-1.74 6.65-2.89 7.98-3.45 3.8-1.6 4.59-1.88 5.1-1.89.11 0 .37.03.54.17.14.12.18.28.2.4-.02.07-.02.13-.04.2z"/>
                   </svg>
-                  <span>🤖 Botga o'tish va kodni ko'rish (@alovuz_bot)</span>
+                  <span>Botga o'tish va kodni ko'rish (@alovuz_bot)</span>
                   <ArrowUpRight className="w-4 h-4" />
                 </a>
 
                 {errorMsg && (
-                  <div className="p-3 bg-rose-50 border border-rose-200 rounded-xl text-rose-600 text-xs font-semibold text-left">
+                  <div className="p-3 bg-rose-500/15 border border-rose-500/30 rounded-xl text-rose-300 text-xs font-semibold text-left">
                     {errorMsg}
                   </div>
                 )}
 
                 <form onSubmit={handleVerifyTelegramCode} className="space-y-3 text-left">
                   <div>
-                    <label className="block text-[11px] font-bold text-slate-700 mb-1">6 xonali tasdiqlash kodi</label>
+                    <label className="block text-[11px] font-bold text-zinc-300 mb-1">6 xonali tasdiqlash kodi</label>
                     <input 
                       type="text" 
                       name="alov_tg_otp_code"
@@ -5176,7 +5503,7 @@ export default function App() {
                       value={enteredTgCode}
                       onChange={(e) => setEnteredTgCode(e.target.value)}
                       required
-                      className="w-full px-4 py-3 rounded-xl bg-slate-50 border border-slate-200 text-center text-xl font-black tracking-widest text-slate-900 focus:border-red-500 focus:bg-white outline-none"
+                      className="w-full px-4 py-3 rounded-xl bg-[#171A26] border border-white/10 text-center text-xl font-mono font-bold tracking-widest text-white placeholder:text-zinc-600 focus:border-rose-500 outline-none"
                       placeholder="123456"
                     />
                   </div>
@@ -5184,40 +5511,40 @@ export default function App() {
                   <button 
                     type="submit"
                     disabled={isLoggingIn}
-                    className="w-full py-3 px-4 rounded-2xl bg-[#E8474A] text-white font-bold text-sm shadow-md hover:bg-[#cb2e31] transition disabled:opacity-60"
+                    className="w-full py-3.5 px-4 rounded-2xl bg-gradient-to-r from-[#E11D48] to-rose-600 text-white font-bold text-sm shadow-[0_12px_28px_rgba(225,29,72,0.35)] hover:brightness-110 transition disabled:opacity-60 cursor-pointer"
                   >
-                    {isLoggingIn ? "Tekshirilmoqda..." : "Tasdiqlash va kirish 🚀"}
+                    {isLoggingIn ? "Tekshirilmoqda..." : "Tasdiqlash va kirish"}
                   </button>
 
                   <button 
                     type="button"
                     onClick={() => { setTelegramStep('input_phone'); setEnteredTgCode(''); setGeneratedTgCode(''); setPendingTgUser(null); setErrorMsg(''); }}
-                    className="w-full text-center text-xs font-bold text-slate-500 hover:text-slate-800 pt-1"
+                    className="w-full text-center text-xs font-bold text-zinc-400 hover:text-white pt-1 cursor-pointer"
                   >
                     Raqamni qayta kiritish
                   </button>
                 </form>
               </div>
             ) : telegramStep === 'profile_setup' ? (
-              <div className="space-y-4">
+              <div className="space-y-4 relative z-10">
                 <div className="space-y-1 text-center">
-                  <h2 className="text-xl font-editorial font-black text-[#221719] tracking-tight">Profilni yakunlash</h2>
-                  <p className="text-xs text-[#6B5B5E] font-medium">Face ID surati saqlandi. Ismingiz Telegramdan olindi, qolgan ma'lumotlarni to'ldiring.</p>
+                  <h2 className="text-xl font-editorial font-bold text-white tracking-tight">Profilni yakunlash</h2>
+                  <p className="text-xs text-zinc-400 font-medium">Face ID surati saqlandi. Ismingiz Telegramdan olindi, qolgan ma'lumotlarni to'ldiring.</p>
                 </div>
 
                 {errorMsg && (
-                  <div className="p-3 bg-rose-50 border border-rose-200 rounded-xl text-rose-600 text-xs font-semibold">
+                  <div className="p-3 bg-rose-500/15 border border-rose-500/30 rounded-xl text-rose-300 text-xs font-semibold">
                     {errorMsg}
                   </div>
                 )}
 
-                <div className="p-3.5 bg-emerald-50 border border-emerald-200 rounded-2xl flex items-center space-x-3 mb-1">
+                <div className="p-3.5 bg-emerald-500/10 border border-emerald-500/25 rounded-2xl flex items-center space-x-3 mb-1">
                   {(() => {
                     const setupAvatar = resolveAvatarUrl(regAvatar);
                     const setupDisplayName = regName.trim() || 'Ismingizni kiriting';
                     return (
                       <>
-                        <div className="w-14 h-14 rounded-full bg-white shadow-sm overflow-hidden shrink-0 border-2 border-emerald-500 flex items-center justify-center">
+                        <div className="w-14 h-14 rounded-full bg-[#171A26] shadow-sm overflow-hidden shrink-0 border-2 border-emerald-500 flex items-center justify-center">
                           {setupAvatar ? (
                             <img
                               src={setupAvatar}
@@ -5232,7 +5559,7 @@ export default function App() {
                           ) : null}
                           <div
                             className={cn(
-                              "w-full h-full items-center justify-center bg-emerald-100 text-emerald-600 font-black text-lg",
+                              "w-full h-full items-center justify-center bg-emerald-500/20 text-emerald-300 font-bold text-lg",
                               setupAvatar ? "hidden" : "flex"
                             )}
                           >
@@ -5240,12 +5567,12 @@ export default function App() {
                           </div>
                         </div>
                         <div className="min-w-0 flex-1">
-                          <p className="text-[10px] text-emerald-700 font-bold uppercase tracking-wider flex items-center gap-1">
+                          <p className="text-[10px] text-emerald-300 font-bold uppercase tracking-wider flex items-center gap-1">
                             <ShieldCheck className="w-3.5 h-3.5" />
                             <span>Face ID Tasdiqlangan Surat</span>
                           </p>
-                          <p className="text-sm font-black text-[#221719] truncate">{setupDisplayName}</p>
-                          <p className="text-[10.5px] font-bold text-emerald-800">
+                          <p className="text-sm font-bold text-white truncate">{setupDisplayName}</p>
+                          <p className="text-[10.5px] font-semibold text-emerald-300/85">
                             Jins: {genderToUzLabel(regGender)} ({pendingFaceId?.confidence ?? 95}%)
                           </p>
                         </div>
@@ -5256,7 +5583,7 @@ export default function App() {
 
                 <form onSubmit={handleCompleteTelegramRegistration} className="space-y-3" data-testid="telegram-setup-form">
                   <div>
-                    <label className="block text-[11px] font-bold text-[#221719] mb-1">
+                    <label className="block text-[11px] font-bold text-zinc-300 mb-1">
                       Ism va Familiya (Telegramdan olindi)
                     </label>
                     <input 
@@ -5264,19 +5591,19 @@ export default function App() {
                       value={regName}
                       onChange={(e) => setRegName(e.target.value)}
                       required
-                      className="w-full px-3.5 py-2.5 rounded-xl bg-white border border-[rgba(166,36,51,0.15)] text-xs font-semibold text-[#221719] focus:border-[#C93545] outline-none transition-all shadow-xs"
+                      className="w-full px-3.5 py-2.5 rounded-xl bg-[#171A26] border border-white/10 text-xs font-semibold text-white placeholder:text-zinc-500 focus:border-rose-500 outline-none transition-all"
                       placeholder="Ismingiz..."
                     />
                   </div>
                   <div>
                     <div className="flex items-center justify-between mb-1">
-                      <label className="block text-[11px] font-bold text-[#221719]">
+                      <label className="block text-[11px] font-bold text-zinc-300">
                         Foydalanuvchi nomi (@username)
                       </label>
-                      <span className="text-[10px] text-[#A62433] font-bold">Probel mumkin emas</span>
+                      <span className="text-[10px] text-rose-400 font-bold">Probel mumkin emas</span>
                     </div>
                     <div className="relative">
-                      <span className="absolute left-3.5 top-1/2 -translate-y-1/2 text-xs font-mono font-bold text-[#837275]">@</span>
+                      <span className="absolute left-3.5 top-1/2 -translate-y-1/2 text-xs font-mono font-bold text-zinc-500">@</span>
                       <input 
                         type="text" 
                         value={regUsername}
@@ -5284,17 +5611,16 @@ export default function App() {
                           const clean = e.target.value.replace(/\s+/g, '').replace(/^@+/, '');
                           setRegUsername(clean);
                         }}
-                        className="w-full pl-8 pr-3.5 py-2.5 rounded-xl bg-white border border-[rgba(166,36,51,0.15)] text-xs font-mono font-bold text-[#221719] focus:border-[#C93545] outline-none transition-all shadow-xs"
+                        className="w-full pl-8 pr-3.5 py-2.5 rounded-xl bg-[#171A26] border border-white/10 text-xs font-mono font-bold text-white placeholder:text-zinc-500 focus:border-rose-500 outline-none transition-all"
                         placeholder="username (masalan: dilnoza_9)"
                       />
                     </div>
                   </div>
 
-                  {/* Gender correction selector after Face ID */}
                   <div>
                     <div className="flex items-center justify-between mb-1">
-                      <label className="block text-[11px] font-bold text-[#221719]">Jinsingiz (Birlamchi)</label>
-                      <span className="text-[10px] text-[#6B5B5E]">Face ID xato tanlagan bo'lsa o'zgartiring</span>
+                      <label className="block text-[11px] font-bold text-zinc-300">Jinsingiz (Birlamchi)</label>
+                      <span className="text-[10px] text-zinc-500">Face ID xato tanlagan bo'lsa o'zgartiring</span>
                     </div>
                     <div className="grid grid-cols-2 gap-2">
                       <button
@@ -5303,8 +5629,8 @@ export default function App() {
                         onClick={() => setRegGender('female')}
                         className={`py-2.5 px-3 rounded-xl text-xs font-bold border transition cursor-pointer ${
                           regGender === 'female'
-                            ? 'bg-[#C93545] text-white border-[#C93545] shadow-xs'
-                            : 'bg-white text-[#36272A] border-[#E5D9D6] hover:border-[#C93545]'
+                            ? 'bg-gradient-to-r from-[#E11D48] to-rose-600 text-white border-rose-500 shadow-xs'
+                            : 'bg-[#171A26] text-zinc-300 border-white/10 hover:border-rose-500/50'
                         }`}
                       >
                         Ayol / Qiz
@@ -5315,8 +5641,8 @@ export default function App() {
                         onClick={() => setRegGender('male')}
                         className={`py-2.5 px-3 rounded-xl text-xs font-bold border transition cursor-pointer ${
                           regGender === 'male'
-                            ? 'bg-[#221719] text-white border-[#221719] shadow-xs'
-                            : 'bg-white text-[#36272A] border-[#E5D9D6] hover:border-[#221719]'
+                            ? 'bg-white text-zinc-950 border-white shadow-xs'
+                            : 'bg-[#171A26] text-zinc-300 border-white/10 hover:border-white/30'
                         }`}
                       >
                         Erkak / Yigit
@@ -5326,8 +5652,8 @@ export default function App() {
 
                   <div>
                     <div className="flex items-center justify-between mb-1">
-                      <label className="block text-[11px] font-bold text-[#221719]">Tug'ilgan sana / yili (Birlamchi)</label>
-                      <span className="text-[11px] font-bold text-[#A62433] tabular-nums">
+                      <label className="block text-[11px] font-bold text-zinc-300">Tug'ilgan sana / yili (Birlamchi)</label>
+                      <span className="text-[11px] font-bold text-rose-400 tabular-nums">
                         {calculateAge(regBirthDate, Number(regAge))} yosh
                       </span>
                     </div>
@@ -5342,52 +5668,52 @@ export default function App() {
                         setRegAge(String(calculateAge(bDate)));
                       }}
                       required
-                      className="w-full px-3.5 py-2.5 rounded-xl bg-white border border-[rgba(166,36,51,0.15)] text-xs font-semibold text-[#221719] focus:border-[#C93545] outline-none"
+                      className="w-full px-3.5 py-2.5 rounded-xl bg-[#171A26] border border-white/10 text-xs font-semibold text-white focus:border-rose-500 outline-none"
                     />
                   </div>
 
                   <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
                     <div>
-                      <label className="block text-[11px] font-bold text-[#221719] mb-1">Viloyat</label>
+                      <label className="block text-[11px] font-bold text-zinc-300 mb-1">Viloyat</label>
                       <select 
                         value={regRegion}
                         onChange={(e) => {
                           setRegRegion(e.target.value);
                           setRegDistrict(UZ_LOCATIONS[e.target.value]?.[0] || '');
                         }}
-                        className="w-full px-3 py-2.5 rounded-xl bg-white border border-[rgba(166,36,51,0.15)] text-xs font-semibold text-[#221719] focus:border-[#C93545] outline-none"
+                        className="w-full px-3 py-2.5 rounded-xl bg-[#171A26] border border-white/10 text-xs font-semibold text-white focus:border-rose-500 outline-none"
                       >
                         {Object.keys(UZ_LOCATIONS).map((reg) => (
-                          <option key={`reg_setup_${reg}`} value={reg}>{reg}</option>
+                          <option key={`reg_setup_${reg}`} value={reg} className="bg-[#11131C] text-white">{reg}</option>
                         ))}
                       </select>
                     </div>
                     <div>
-                      <label className="block text-[11px] font-bold text-[#221719] mb-1">Tuman / Shahar</label>
+                      <label className="block text-[11px] font-bold text-zinc-300 mb-1">Tuman / Shahar</label>
                       <select 
                         value={regDistrict}
                         onChange={(e) => setRegDistrict(e.target.value)}
-                        className="w-full px-3 py-2.5 rounded-xl bg-white border border-[rgba(166,36,51,0.15)] text-xs font-semibold text-[#221719] focus:border-[#C93545] outline-none"
+                        className="w-full px-3 py-2.5 rounded-xl bg-[#171A26] border border-white/10 text-xs font-semibold text-white focus:border-rose-500 outline-none"
                       >
                         {UZ_LOCATIONS[regRegion]?.map((dist) => (
-                          <option key={`dist_setup_${dist}`} value={dist}>{dist}</option>
+                          <option key={`dist_setup_${dist}`} value={dist} className="bg-[#11131C] text-white">{dist}</option>
                         ))}
                       </select>
                     </div>
                     <div>
-                      <label className="block text-[11px] font-bold text-[#221719] mb-1">Mahalla</label>
+                      <label className="block text-[11px] font-bold text-zinc-300 mb-1">Mahalla</label>
                       <input
                         type="text"
                         value={regNeighborhood}
                         onChange={(e) => setRegNeighborhood(e.target.value)}
                         placeholder="Mahalla"
-                        className="w-full px-3 py-2.5 rounded-xl bg-white border border-[rgba(166,36,51,0.15)] text-xs font-semibold text-[#221719] focus:border-[#C93545] outline-none"
+                        className="w-full px-3 py-2.5 rounded-xl bg-[#171A26] border border-white/10 text-xs font-semibold text-white placeholder:text-zinc-500 focus:border-rose-500 outline-none"
                       />
                     </div>
                   </div>
 
                   <div>
-                    <label className="block text-[11px] font-bold text-[#221719] mb-1">Telefon raqam</label>
+                    <label className="block text-[11px] font-bold text-zinc-300 mb-1">Telefon raqam</label>
                     <SmartPhoneInput
                       value={regPhone}
                       onChange={setRegPhone}
@@ -5396,31 +5722,41 @@ export default function App() {
                   </div>
 
                   <div>
-                    <label className="block text-[11px] font-bold text-[#221719] mb-1">O'zingiz haqingizda (Bio)</label>
+                    <label className="block text-[11px] font-bold text-zinc-300 mb-1">O'zingiz haqingizda (Bio)</label>
                     <textarea
                       value={regBio}
                       onChange={(e) => setRegBio(e.target.value)}
                       rows={2}
                       data-testid="tg-setup-bio-input"
                       placeholder="O'zingiz va qiziqishlaringiz haqida yozing..."
-                      className="w-full px-3.5 py-2 rounded-xl bg-white border border-[rgba(166,36,51,0.15)] text-xs font-semibold text-[#221719] focus:border-[#C93545] outline-none resize-none"
+                      className="w-full px-3.5 py-2 rounded-xl bg-[#171A26] border border-white/10 text-xs font-semibold text-white placeholder:text-zinc-500 focus:border-rose-500 outline-none resize-none"
                     />
                   </div>
 
                   <div>
-                    <label className="block text-[11px] font-bold text-[#221719] mb-1 flex items-center justify-between">
+                    <label className="block text-[11px] font-bold text-zinc-300 mb-1 flex items-center justify-between">
                       <span>Akkaunt uchun Parol</span>
-                      <span className="text-[10px] text-rose-500 font-medium">* Majburiy</span>
+                      <span className="text-[10px] text-rose-400 font-medium">* Majburiy</span>
                     </label>
-                    <input 
-                      type="password" 
-                      value={authPassword}
-                      onChange={(e) => setAuthPassword(e.target.value)}
-                      required
-                      className="w-full px-3.5 py-2.5 rounded-xl bg-white border border-[rgba(166,36,51,0.15)] text-xs font-semibold text-[#221719] focus:border-[#C93545] outline-none transition-all shadow-xs"
-                      placeholder="••••••••"
-                    />
-                    <p className="mt-1.5 text-[10px] text-slate-400 leading-relaxed px-1">
+                    <div className="relative">
+                      <input 
+                        type={showAuthPassword ? 'text' : 'password'} 
+                        value={authPassword}
+                        onChange={(e) => setAuthPassword(e.target.value)}
+                        required
+                        className="w-full pl-3.5 pr-10 py-2.5 rounded-xl bg-[#171A26] border border-white/10 text-xs font-semibold text-white placeholder:text-zinc-500 focus:border-rose-500 outline-none transition-all"
+                        placeholder="••••••••"
+                      />
+                      <button
+                        type="button"
+                        onClick={() => setShowAuthPassword((p) => !p)}
+                        aria-label="Parolni ko'rsatish"
+                        className="absolute right-3 top-1/2 -translate-y-1/2 text-zinc-400 hover:text-white transition cursor-pointer"
+                      >
+                        {showAuthPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                      </button>
+                    </div>
+                    <p className="mt-1.5 text-[10px] text-zinc-500 leading-relaxed px-1">
                       Kelajakda boshqa qurilmalardan kirish uchun ushbu paroldan foydalanasiz.
                     </p>
                   </div>
@@ -5428,7 +5764,7 @@ export default function App() {
                   <button 
                     type="submit"
                     disabled={isLoggingIn}
-                    className="w-full py-3.5 px-4 rounded-2xl bg-[#C93545] text-white font-bold text-sm shadow-lg shadow-rose-500/20 hover:bg-[#A62433] transition-all active:scale-[0.98] disabled:opacity-60 flex items-center justify-center space-x-2"
+                    className="w-full py-3.5 px-4 rounded-2xl bg-gradient-to-r from-[#E11D48] to-rose-600 text-white font-bold text-sm shadow-[0_12px_28px_rgba(225,29,72,0.35)] hover:brightness-110 transition-all active:scale-[0.98] disabled:opacity-60 flex items-center justify-center space-x-2 cursor-pointer"
                   >
                     {isLoggingIn ? (
                       <>
@@ -5442,126 +5778,189 @@ export default function App() {
                 </form>
               </div>
             ) : (
-              <div className="space-y-4 text-center">
-                <div className="space-y-1">
-                  <h2 className="text-xl font-black text-slate-900 tracking-tight">Alov.uz ga xush kelibsiz</h2>
-                  <p className="text-xs text-slate-500 font-medium">Tanishuv va muloqot dunyosiga kiring</p>
+              <div className="space-y-4 text-center relative z-10">
+                <div className="space-y-2">
+                  <div className="w-11 h-11 rounded-2xl bg-gradient-to-br from-[#E11D48] to-rose-700 text-white flex items-center justify-center mx-auto shadow-[0_8px_24px_rgba(225,29,72,0.4)]">
+                    <Flame className="w-5 h-5" />
+                  </div>
+                  <div>
+                    <h2 className="text-2xl font-editorial font-bold text-white tracking-tight">Alov.uz ga xush kelibsiz</h2>
+                    <p className="text-xs text-zinc-400 font-medium mt-0.5">Tanishuv va jonli muloqot dunyosiga kiring</p>
+                  </div>
                 </div>
 
-                {/* Tab Switcher */}
-                <div className="grid grid-cols-2 p-1 bg-slate-100 rounded-2xl">
+                {/* Animated Tab Switcher */}
+                <div className="grid grid-cols-2 p-1 bg-[#171A26] border border-white/[0.08] rounded-2xl relative">
                   <button 
                     type="button"
+                    data-testid="auth-tab-login"
                     onClick={() => { resetAuthFormState(); setAuthMode('login'); }}
-                    className={`py-2 rounded-xl text-xs font-bold transition ${authMode === 'login' ? 'bg-white text-slate-900 shadow-sm' : 'text-slate-500 hover:text-slate-900'}`}
+                    className={`relative py-2.5 rounded-xl text-xs font-bold transition-colors z-10 cursor-pointer ${authMode === 'login' ? 'text-white' : 'text-zinc-400 hover:text-white'}`}
                   >
-                    Kirish (Login)
+                    {authMode === 'login' && (
+                      <motion.span
+                        layoutId="authModePill"
+                        transition={{ type: 'spring', stiffness: 420, damping: 32 }}
+                        className="absolute inset-0 rounded-xl bg-gradient-to-r from-[#E11D48] to-rose-600 shadow-sm -z-10"
+                      />
+                    )}
+                    Kirish
                   </button>
                   <button 
                     type="button"
+                    data-testid="auth-tab-register"
                     onClick={() => { resetAuthFormState(); setAuthMode('register'); }}
-                    className={`py-2 rounded-xl text-xs font-bold transition ${authMode === 'register' ? 'bg-white text-slate-900 shadow-sm' : 'text-slate-500 hover:text-slate-900'}`}
+                    className={`relative py-2.5 rounded-xl text-xs font-bold transition-colors z-10 cursor-pointer ${authMode === 'register' ? 'text-white' : 'text-zinc-400 hover:text-white'}`}
                   >
+                    {authMode === 'register' && (
+                      <motion.span
+                        layoutId="authModePill"
+                        transition={{ type: 'spring', stiffness: 420, damping: 32 }}
+                        className="absolute inset-0 rounded-xl bg-gradient-to-r from-[#E11D48] to-rose-600 shadow-sm -z-10"
+                      />
+                    )}
                     Ro'yxatdan o'tish
                   </button>
                 </div>
 
                 {errorMsg && (
-                  <div className="p-3 bg-rose-50 border border-rose-200 rounded-xl text-rose-600 text-xs font-semibold text-left">
+                  <div className="p-3 bg-rose-500/15 border border-rose-500/30 rounded-xl text-rose-300 text-xs font-semibold text-left">
                     {errorMsg}
                   </div>
                 )}
 
-                {authMode === 'login' ? (
-                  <form onSubmit={handleEmailLogin} className="space-y-3 text-left">
-                    <div>
-                      <label className="block text-[11px] font-bold text-slate-700 mb-1">Username, Email yoki Telefon</label>
-                      <input 
-                        type="text" 
-                        value={authEmail}
-                        onChange={(e) => setAuthEmail(e.target.value)}
-                        required
-                        className="w-full px-3.5 py-2.5 rounded-xl bg-slate-50 border border-slate-200 text-xs font-semibold text-slate-900 focus:border-red-500 focus:bg-white outline-none"
-                        placeholder="@username, email yoki telefon..."
-                      />
-                    </div>
-                    <div>
-                      <label className="block text-[11px] font-bold text-slate-700 mb-1">Parol</label>
-                      <input 
-                        type="password" 
-                        value={authPassword}
-                        onChange={(e) => setAuthPassword(e.target.value)}
-                        required
-                        className="w-full px-3.5 py-2.5 rounded-xl bg-slate-50 border border-slate-200 text-xs font-semibold text-slate-900 focus:border-red-500 focus:bg-white outline-none"
-                        placeholder="••••••••"
-                      />
-                    </div>
-                    <button 
-                      type="submit"
-                      disabled={isLoggingIn}
-                      className="w-full py-3 px-4 rounded-2xl bg-[#E8474A] text-white font-bold text-sm shadow-md hover:bg-[#cb2e31] transition disabled:opacity-60"
+                <AnimatePresence mode="wait">
+                  {authMode === 'login' ? (
+                    <motion.form
+                      key="login-form"
+                      initial={{ opacity: 0, x: -8 }}
+                      animate={{ opacity: 1, x: 0 }}
+                      exit={{ opacity: 0, x: 8 }}
+                      transition={{ duration: 0.16 }}
+                      onSubmit={handleEmailLogin}
+                      className="space-y-3 text-left"
                     >
-                      {isLoggingIn ? "Kirilmoqda..." : "Kirish 🚀"}
-                    </button>
-                  </form>
-                ) : (
-                  <form onSubmit={handleEmailRegister} className="space-y-3 text-left">
-                    <div>
-                      <label className="block text-[11px] font-bold text-slate-700 mb-1">Ism va Familiya</label>
-                      <input 
-                        type="text" 
-                        value={regName}
-                        onChange={(e) => setRegName(e.target.value)}
-                        required
-                        className="w-full px-3.5 py-2.5 rounded-xl bg-slate-50 border border-slate-200 text-xs font-semibold text-slate-900 focus:border-red-500 focus:bg-white outline-none"
-                        placeholder="Ismingiz..."
-                      />
-                    </div>
-                    <div>
-                      <label className="block text-[11px] font-bold text-slate-700 mb-1">Email</label>
-                      <input 
-                        type="email" 
-                        value={authEmail}
-                        onChange={(e) => setAuthEmail(e.target.value)}
-                        required
-                        className="w-full px-3.5 py-2.5 rounded-xl bg-slate-50 border border-slate-200 text-xs font-semibold text-slate-900 focus:border-red-500 focus:bg-white outline-none"
-                        placeholder="example@gmail.com"
-                      />
-                    </div>
-                    <div>
-                      <label className="block text-[11px] font-bold text-slate-700 mb-1">Parol</label>
-                      <input 
-                        type="password" 
-                        value={authPassword}
-                        onChange={(e) => setAuthPassword(e.target.value)}
-                        required
-                        className="w-full px-3.5 py-2.5 rounded-xl bg-slate-50 border border-slate-200 text-xs font-semibold text-slate-900 focus:border-red-500 focus:bg-white outline-none"
-                        placeholder="••••••••"
-                      />
-                    </div>
-                    <button 
-                      type="submit"
-                      disabled={isLoggingIn}
-                      className="w-full py-3 px-4 rounded-2xl bg-[#E8474A] text-white font-bold text-sm shadow-md hover:bg-[#cb2e31] transition disabled:opacity-60"
+                      <div>
+                        <label className="block text-[11px] font-bold text-zinc-300 mb-1.5">Username, Email yoki Telefon</label>
+                        <input 
+                          type="text" 
+                          value={authEmail}
+                          onChange={(e) => setAuthEmail(e.target.value)}
+                          required
+                          data-testid="auth-login-identifier"
+                          className="w-full px-3.5 py-2.5 min-h-[44px] rounded-xl bg-[#171A26] border border-white/10 text-xs font-semibold text-white placeholder:text-zinc-500 focus:border-rose-500 focus:ring-1 focus:ring-rose-500/30 outline-none transition"
+                          placeholder="@username, email yoki telefon..."
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-[11px] font-bold text-zinc-300 mb-1.5">Parol</label>
+                        <div className="relative">
+                          <input 
+                            type={showAuthPassword ? 'text' : 'password'} 
+                            value={authPassword}
+                            onChange={(e) => setAuthPassword(e.target.value)}
+                            required
+                            data-testid="auth-login-password"
+                            className="w-full pl-3.5 pr-10 py-2.5 min-h-[44px] rounded-xl bg-[#171A26] border border-white/10 text-xs font-semibold text-white placeholder:text-zinc-500 focus:border-rose-500 focus:ring-1 focus:ring-rose-500/30 outline-none transition"
+                            placeholder="••••••••"
+                          />
+                          <button
+                            type="button"
+                            data-testid="auth-password-toggle"
+                            onClick={() => setShowAuthPassword((p) => !p)}
+                            aria-label={showAuthPassword ? "Parolni yashirish" : "Parolni ko'rsatish"}
+                            className="absolute right-3 top-1/2 -translate-y-1/2 text-zinc-400 hover:text-white transition cursor-pointer"
+                          >
+                            {showAuthPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                          </button>
+                        </div>
+                      </div>
+                      <button 
+                        type="submit"
+                        disabled={isLoggingIn}
+                        data-testid="auth-login-submit"
+                        className="w-full py-3.5 px-4 rounded-2xl bg-gradient-to-r from-[#E11D48] to-rose-600 text-white font-bold text-sm shadow-[0_12px_28px_rgba(225,29,72,0.35)] hover:brightness-110 active:scale-[0.99] transition disabled:opacity-60 cursor-pointer"
+                      >
+                        {isLoggingIn ? "Kirilmoqda..." : "Kirish"}
+                      </button>
+                    </motion.form>
+                  ) : (
+                    <motion.form
+                      key="register-form"
+                      initial={{ opacity: 0, x: 8 }}
+                      animate={{ opacity: 1, x: 0 }}
+                      exit={{ opacity: 0, x: -8 }}
+                      transition={{ duration: 0.16 }}
+                      onSubmit={handleEmailRegister}
+                      className="space-y-3 text-left"
                     >
-                      {isLoggingIn ? "Ro'yxatdan o'tmoqda..." : "Ro'yxatdan o'tish ✨"}
-                    </button>
-                  </form>
-                )}
+                      <div>
+                        <label className="block text-[11px] font-bold text-zinc-300 mb-1.5">Ism va Familiya</label>
+                        <input 
+                          type="text" 
+                          value={regName}
+                          onChange={(e) => setRegName(e.target.value)}
+                          required
+                          className="w-full px-3.5 py-2.5 min-h-[44px] rounded-xl bg-[#171A26] border border-white/10 text-xs font-semibold text-white placeholder:text-zinc-500 focus:border-rose-500 focus:ring-1 focus:ring-rose-500/30 outline-none transition"
+                          placeholder="Ismingiz..."
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-[11px] font-bold text-zinc-300 mb-1.5">Email</label>
+                        <input 
+                          type="email" 
+                          value={authEmail}
+                          onChange={(e) => setAuthEmail(e.target.value)}
+                          required
+                          className="w-full px-3.5 py-2.5 min-h-[44px] rounded-xl bg-[#171A26] border border-white/10 text-xs font-semibold text-white placeholder:text-zinc-500 focus:border-rose-500 focus:ring-1 focus:ring-rose-500/30 outline-none transition"
+                          placeholder="example@gmail.com"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-[11px] font-bold text-zinc-300 mb-1.5">Parol</label>
+                        <div className="relative">
+                          <input 
+                            type={showAuthPassword ? 'text' : 'password'} 
+                            value={authPassword}
+                            onChange={(e) => setAuthPassword(e.target.value)}
+                            required
+                            className="w-full pl-3.5 pr-10 py-2.5 min-h-[44px] rounded-xl bg-[#171A26] border border-white/10 text-xs font-semibold text-white placeholder:text-zinc-500 focus:border-rose-500 focus:ring-1 focus:ring-rose-500/30 outline-none transition"
+                            placeholder="••••••••"
+                          />
+                          <button
+                            type="button"
+                            onClick={() => setShowAuthPassword((p) => !p)}
+                            aria-label={showAuthPassword ? "Parolni yashirish" : "Parolni ko'rsatish"}
+                            className="absolute right-3 top-1/2 -translate-y-1/2 text-zinc-400 hover:text-white transition cursor-pointer"
+                          >
+                            {showAuthPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                          </button>
+                        </div>
+                      </div>
+                      <button 
+                        type="submit"
+                        disabled={isLoggingIn}
+                        className="w-full py-3.5 px-4 rounded-2xl bg-gradient-to-r from-[#E11D48] to-rose-600 text-white font-bold text-sm shadow-[0_12px_28px_rgba(225,29,72,0.35)] hover:brightness-110 active:scale-[0.99] transition disabled:opacity-60 cursor-pointer"
+                      >
+                        {isLoggingIn ? "Ro'yxatdan o'tmoqda..." : "Ro'yxatdan o'tish"}
+                      </button>
+                    </motion.form>
+                  )}
+                </AnimatePresence>
 
-                <div className="relative flex py-2 items-center">
-                  <div className="flex-grow border-t border-slate-200"></div>
-                  <span className="flex-shrink mx-4 text-[10px] font-bold text-slate-400 uppercase">yoki</span>
-                  <div className="flex-grow border-t border-slate-200"></div>
+                <div className="relative flex py-1.5 items-center">
+                  <div className="flex-grow border-t border-white/10"></div>
+                  <span className="flex-shrink mx-4 text-[10px] font-bold text-zinc-500 uppercase tracking-widest">yoki</span>
+                  <div className="flex-grow border-t border-white/10"></div>
                 </div>
 
-                <div className="space-y-2">
+                <div className="space-y-2.5">
                   <button 
                     onClick={handleGoogleLogin}
                     disabled={isLoggingIn}
-                    className="w-full flex items-center justify-center space-x-3 py-3.5 px-4 rounded-2xl border border-slate-200 hover:border-slate-300 hover:bg-slate-50 font-bold text-sm shadow-xs bg-white text-slate-800 active:scale-98 transition duration-200 disabled:opacity-60 disabled:cursor-not-allowed"
+                    className="w-full flex items-center justify-center space-x-3 py-3.5 px-4 rounded-2xl border border-white/12 hover:border-white/25 hover:bg-[#1B1F2E] font-bold text-sm bg-[#171A26] text-white active:scale-[0.99] transition duration-200 disabled:opacity-60 disabled:cursor-not-allowed cursor-pointer"
                   >
-                    <svg className="w-5 h-5 shrink-0" viewBox="0 0 24 24">
+                    <svg className="w-4 h-4 shrink-0" viewBox="0 0 24 24">
                       <path fill="#4285F4" d="M23.745 12.27c0-.7-.06-1.4-.19-2.07H12v4.51h6.6c-.29 1.52-1.14 2.82-2.4 3.68v3.05h3.88c2.27-2.09 3.665-5.17 3.665-9.17z"/>
                       <path fill="#34A853" d="M12 24c3.24 0 5.95-1.08 7.93-2.91l-3.88-3.05c-1.08.72-2.45 1.16-4.05 1.16-3.13 0-5.78-2.11-6.73-4.96H1.18v3.15C3.165 21.33 7.21 24 12 24z"/>
                       <path fill="#FBBC05" d="M5.27 14.24c-.25-.72-.38-1.49-.38-2.24s.13-1.52.38-2.24V6.61H1.18C.43 8.13 0 9.87 0 12s.43 3.87 1.18 5.39l4.09-3.15z"/>
@@ -5572,9 +5971,9 @@ export default function App() {
 
                   <button 
                     onClick={() => { setAuthMode('telegram'); setTelegramStep('input_phone'); }}
-                    className="w-full flex items-center justify-center space-x-3 py-3.5 px-4 rounded-2xl bg-[#229ED9] hover:bg-[#1f8fc6] font-bold text-sm shadow-sm text-white active:scale-98 transition duration-200"
+                    className="w-full flex items-center justify-center space-x-3 py-3.5 px-4 rounded-2xl bg-[#229ED9] hover:bg-[#1f8fc6] font-bold text-sm shadow-sm text-white active:scale-[0.99] transition duration-200 cursor-pointer"
                   >
-                    <svg className="w-5 h-5 shrink-0 fill-current" viewBox="0 0 24 24">
+                    <svg className="w-4 h-4 shrink-0 fill-current" viewBox="0 0 24 24">
                       <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm4.64 6.8c-.15 1.58-.8 5.42-1.13 7.19-.14.75-.42 1-.68 1.03-.58.05-1.02-.38-1.58-.75-.88-.58-1.38-.94-2.23-1.5-.99-.65-.35-1.01.22-1.59.15-.15 2.71-2.48 2.76-2.69.01-.03.01-.14-.07-.2-.08-.06-.19-.04-.27 0-.12.05-1.98 1.26-5.6 3.7-.53.36-1.01.54-1.44.53-.47-.01-1.38-.26-2.06-.48-.83-.27-1.49-.42-1.43-.88.03-.24.37-.49 1.02-.75 3.99-1.74 6.65-2.89 7.98-3.45 3.8-1.6 4.59-1.88 5.1-1.89.11 0 .37.03.54.17.14.12.18.28.2.4-.02.07-.02.13-.04.2z"/>
                     </svg>
                     <span>Telegram orqali davom etish</span>
@@ -5582,32 +5981,35 @@ export default function App() {
                 </div>
               </div>
             )}
-          </div>
+          </motion.div>
         </div>
       )}
 
       {/* --- PROFILE QUESTIONNAIRE / EDIT MODAL --- */}
       {showProfileModal && (
         <div
-          className="fixed inset-0 z-[130] flex items-end sm:items-center justify-center p-0 sm:p-4 bg-black/55 backdrop-blur-sm animate-fadeIn"
+          className="fixed inset-0 z-[130] flex items-end sm:items-center justify-center p-0 sm:p-4 bg-black/75 backdrop-blur-md"
           onClick={() => setShowProfileModal(false)}
           data-testid="edit-profile-modal-backdrop"
         >
-          <div
+          <motion.div
+            initial={{ opacity: 0, y: 20, scale: 0.97 }}
+            animate={{ opacity: 1, y: 0, scale: 1 }}
+            transition={{ duration: 0.22, ease: [0.22, 1, 0.36, 1] }}
             onClick={(e) => e.stopPropagation()}
             data-testid="edit-profile-modal"
-            className="bg-[#FDFBF9] rounded-t-[28px] sm:rounded-[28px] max-w-2xl w-full max-h-[92vh] flex flex-col overflow-hidden shadow-2xl border border-[rgba(166,36,51,0.12)] text-[#221719]"
+            className="bg-[#11131C] rounded-t-[28px] sm:rounded-[28px] max-w-2xl w-full max-h-[92vh] flex flex-col overflow-hidden shadow-[0_28px_80px_rgba(0,0,0,0.8)] border border-white/10 text-zinc-100"
           >
             {/* Mobile Drag Handle */}
-            <div className="w-10 h-1 rounded-full bg-[#D9C8C4] mx-auto mt-2.5 mb-0.5 sm:hidden shrink-0" />
+            <div className="w-10 h-1 rounded-full bg-white/20 mx-auto mt-2.5 mb-0.5 sm:hidden shrink-0" />
 
             {/* Sticky Modal Header */}
-            <div className="shrink-0 bg-white border-b border-[#F2E8E6] px-5 sm:px-7 py-4 flex items-center justify-between gap-4">
+            <div className="shrink-0 bg-[#141724] border-b border-white/[0.08] px-5 sm:px-7 py-4 flex items-center justify-between gap-4">
               <div className="min-w-0">
-                <h2 className="font-editorial text-xl sm:text-2xl font-bold tracking-tight text-[#221719] leading-tight">
+                <h2 className="font-editorial text-xl sm:text-2xl font-bold tracking-tight text-white leading-tight">
                   {currentUser?.isProfileCompleted ? 'Profilni tahrirlash' : "Anketani to'ldirish"}
                 </h2>
-                <p className="text-xs text-[#6B5B5E] mt-0.5">
+                <p className="text-xs text-zinc-400 mt-0.5">
                   Shaxsiy ma'lumotlar, media va maxfiylik sozlamalari
                 </p>
               </div>
@@ -5616,7 +6018,7 @@ export default function App() {
                 onClick={() => setShowProfileModal(false)}
                 aria-label="Oynani yopish"
                 data-testid="edit-profile-close-btn"
-                className="w-10 h-10 rounded-full bg-[#FAF4F2] hover:bg-[#F2E8E6] text-[#57484B] flex items-center justify-center transition-colors shrink-0 cursor-pointer"
+                className="w-10 h-10 rounded-full bg-white/[0.06] hover:bg-rose-500/20 text-zinc-300 hover:text-white flex items-center justify-center transition-colors shrink-0 cursor-pointer"
               >
                 <X className="w-4 h-4" />
               </button>
@@ -5626,7 +6028,7 @@ export default function App() {
             <form onSubmit={handleSaveProfile} className="flex flex-col flex-1 min-h-0 overflow-hidden">
               <div className="flex-1 overflow-y-auto px-5 sm:px-7 py-5 space-y-6">
                 {errorMsg && (
-                  <div className="p-3.5 bg-rose-50 border border-rose-200 rounded-2xl text-[#A62433] text-xs font-semibold flex items-center gap-2">
+                  <div className="p-3.5 bg-rose-500/15 border border-rose-500/30 rounded-2xl text-rose-300 text-xs font-semibold flex items-center gap-2">
                     <AlertTriangle className="w-4 h-4 shrink-0" />
                     <span>{errorMsg}</span>
                   </div>
@@ -5634,13 +6036,13 @@ export default function App() {
 
                 {/* Section 1: Profil surati va banner */}
                 <div className="space-y-3">
-                  <h3 className="text-[11px] font-bold uppercase tracking-[0.12em] text-[#8E7C80]">
+                  <h3 className="text-[11px] font-bold uppercase tracking-[0.12em] text-zinc-500">
                     Profil surati va muqova
                   </h3>
                   <div className="flex flex-col sm:flex-row items-center sm:items-stretch gap-4">
                     {/* Avatar Column */}
-                    <div className="flex sm:flex-col items-center justify-center gap-3 sm:gap-2.5 shrink-0 sm:w-36 bg-white rounded-2xl border border-[#EFE5E2] p-3.5 w-full">
-                      <div className="w-20 h-20 rounded-full overflow-hidden border-2 border-white shadow-md bg-[#FAF4F2] flex items-center justify-center shrink-0">
+                    <div className="flex sm:flex-col items-center justify-center gap-3 sm:gap-2.5 shrink-0 sm:w-36 bg-[#171A26] rounded-2xl border border-white/[0.08] p-3.5 w-full">
+                      <div className="w-20 h-20 rounded-full overflow-hidden border-2 border-white/15 shadow-md bg-[#0E1018] flex items-center justify-center shrink-0">
                         {resolveAvatarUrl(regAvatar) ? (
                           <img
                             src={resolveAvatarUrl(regAvatar)}
@@ -5651,23 +6053,23 @@ export default function App() {
                             }}
                           />
                         ) : (
-                          <span className="text-2xl font-editorial font-bold text-[#C93545]">
+                          <span className="text-2xl font-editorial font-bold text-rose-400">
                             {(regName?.trim().charAt(0) || 'A').toUpperCase()}
                           </span>
                         )}
                       </div>
-                      <label className="cursor-pointer inline-flex items-center justify-center gap-1.5 px-3.5 py-2 min-h-[36px] rounded-xl bg-[#FAF4F2] hover:bg-[#F3E5E1] border border-[rgba(166,36,51,0.14)] text-[#221719] text-xs font-bold transition whitespace-nowrap">
-                        <Camera className="w-3.5 h-3.5 text-[#C93545]" />
+                      <label className="cursor-pointer inline-flex items-center justify-center gap-1.5 px-3.5 py-2 min-h-[36px] rounded-xl bg-white/[0.06] hover:bg-white/[0.12] border border-white/10 text-zinc-200 text-xs font-bold transition whitespace-nowrap">
+                        <Camera className="w-3.5 h-3.5 text-rose-400" />
                         <span>Rasm yuklash</span>
                         <input type="file" accept="image/*" onChange={handleImageUpload} className="hidden" />
                       </label>
                     </div>
 
                     {/* Cover Banner Column */}
-                    <div className="flex-1 w-full bg-white rounded-2xl border border-[#EFE5E2] p-3.5 flex flex-col justify-between gap-2.5">
+                    <div className="flex-1 w-full bg-[#171A26] rounded-2xl border border-white/[0.08] p-3.5 flex flex-col justify-between gap-2.5">
                       <div className="flex items-center justify-between gap-2">
-                        <span className="text-xs font-bold text-[#221719] flex items-center gap-1.5">
-                          <ImageIcon className="w-3.5 h-3.5 text-[#C93545]" />
+                        <span className="text-xs font-bold text-white flex items-center gap-1.5">
+                          <ImageIcon className="w-3.5 h-3.5 text-rose-400" />
                           <span>Profil banneri</span>
                         </span>
                         <div className="flex items-center gap-2">
@@ -5675,12 +6077,12 @@ export default function App() {
                             <button
                               type="button"
                               onClick={() => setRegBanner('')}
-                              className="px-2.5 py-1 rounded-lg bg-[#FAF4F2] hover:bg-rose-50 text-[11px] font-bold text-[#A62433] border border-[#F2D5D9] transition cursor-pointer"
+                              className="px-2.5 py-1 rounded-lg bg-rose-500/15 hover:bg-rose-500/25 text-[11px] font-bold text-rose-300 border border-rose-500/25 transition cursor-pointer"
                             >
                               Olib tashlash
                             </button>
                           )}
-                          <label className="cursor-pointer px-3 py-1 rounded-lg bg-[#C93545] hover:bg-[#A62433] text-white text-[11px] font-bold transition">
+                          <label className="cursor-pointer px-3 py-1 rounded-lg bg-gradient-to-r from-[#E11D48] to-rose-600 hover:brightness-110 text-white text-[11px] font-bold transition">
                             {isUploadingBanner ? 'Yuklanmoqda...' : 'Banner yuklash'}
                             <input
                               type="file"
@@ -5692,7 +6094,7 @@ export default function App() {
                           </label>
                         </div>
                       </div>
-                      <div className="h-24 sm:h-28 rounded-xl overflow-hidden bg-gradient-to-r from-[#FBE7EB] via-[#F7DDD6] to-[#EED5DC] border border-[#F2E8E6] flex items-center justify-center">
+                      <div className="h-24 sm:h-28 rounded-xl overflow-hidden bg-gradient-to-r from-[#1A1320] via-[#261423] to-[#171A26] border border-white/[0.08] flex items-center justify-center">
                         {resolveAvatarUrl(regBanner) ? (
                           <img
                             src={resolveAvatarUrl(regBanner)}
@@ -5700,7 +6102,7 @@ export default function App() {
                             className="w-full h-full object-cover"
                           />
                         ) : (
-                          <span className="text-xs font-medium text-[#7A686C]">Hali banner tanlanmagan</span>
+                          <span className="text-xs font-medium text-zinc-500">Hali banner tanlanmagan</span>
                         )}
                       </div>
                     </div>
@@ -5708,13 +6110,13 @@ export default function App() {
                 </div>
 
                 {/* Section 2: Asosiy ma'lumotlar */}
-                <div className="border-t border-[#EFE5E2] pt-5 space-y-3.5">
-                  <h3 className="text-[11px] font-bold uppercase tracking-[0.12em] text-[#8E7C80]">
+                <div className="border-t border-white/[0.08] pt-5 space-y-3.5">
+                  <h3 className="text-[11px] font-bold uppercase tracking-[0.12em] text-zinc-500">
                     Asosiy ma'lumotlar
                   </h3>
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-3.5">
                     <div>
-                      <label htmlFor="edit-profile-name" className="block text-xs font-bold text-[#36272A] mb-1.5">
+                      <label htmlFor="edit-profile-name" className="block text-xs font-bold text-zinc-300 mb-1.5">
                         Ism va familiya
                       </label>
                       <input
@@ -5722,20 +6124,20 @@ export default function App() {
                         type="text"
                         value={regName}
                         onChange={(e) => setRegName(e.target.value)}
-                        className="w-full px-3.5 py-2.5 min-h-[44px] rounded-xl bg-white border border-[#E5D9D6] text-xs font-semibold text-[#221719] focus:border-[#C93545] focus:ring-1 focus:ring-[#C93545] transition-all outline-none placeholder:text-[#9D8C90]"
+                        className="w-full px-3.5 py-2.5 min-h-[44px] rounded-xl bg-[#171A26] border border-white/10 text-xs font-semibold text-white focus:border-rose-500 focus:ring-1 focus:ring-rose-500/40 transition-all outline-none placeholder:text-zinc-500"
                         placeholder="Ismingiz..."
                       />
                     </div>
 
                     <div>
                       <div className="flex items-center justify-between gap-2 mb-1.5">
-                        <label htmlFor="edit-profile-username" className="text-xs font-bold text-[#36272A]">
+                        <label htmlFor="edit-profile-username" className="text-xs font-bold text-zinc-300">
                           Foydalanuvchi nomi
                         </label>
-                        <span className="text-[10px] font-semibold text-[#A62433]">Probel mumkin emas</span>
+                        <span className="text-[10px] font-semibold text-rose-400">Probel mumkin emas</span>
                       </div>
                       <div className="relative">
-                        <span className="absolute left-3.5 top-1/2 -translate-y-1/2 text-xs font-mono font-bold text-[#8E7C80]">@</span>
+                        <span className="absolute left-3.5 top-1/2 -translate-y-1/2 text-xs font-mono font-bold text-zinc-500">@</span>
                         <input
                           id="edit-profile-username"
                           type="text"
@@ -5744,22 +6146,22 @@ export default function App() {
                             const clean = e.target.value.replace(/\s+/g, '').replace(/^@+/, '');
                             setRegUsername(clean);
                           }}
-                          className="w-full pl-8 pr-3.5 py-2.5 min-h-[44px] rounded-xl bg-white border border-[#E5D9D6] text-xs font-mono font-bold text-[#221719] focus:border-[#C93545] focus:ring-1 focus:ring-[#C93545] transition-all outline-none placeholder:text-[#9D8C90]"
+                          className="w-full pl-8 pr-3.5 py-2.5 min-h-[44px] rounded-xl bg-[#171A26] border border-white/10 text-xs font-mono font-bold text-white focus:border-rose-500 focus:ring-1 focus:ring-rose-500/40 transition-all outline-none placeholder:text-zinc-500"
                           placeholder="alisher_01"
                         />
                       </div>
-                      <p className="text-[10.5px] text-[#7A686C] mt-1">
+                      <p className="text-[10.5px] text-zinc-500 mt-1">
                         3-20 belgi, lotin harflari va raqamlar, noyob bo'lishi shart.
                       </p>
                     </div>
 
                     <div>
                       <div className="flex items-center justify-between gap-2 mb-1.5">
-                        <label htmlFor="edit-profile-birthdate" className="text-xs font-bold text-[#36272A] flex items-center gap-1">
+                        <label htmlFor="edit-profile-birthdate" className="text-xs font-bold text-zinc-300 flex items-center gap-1">
                           <span>Tug'ilgan sana</span>
-                          {currentUser?.isProfileCompleted && <Lock className="w-3 h-3 text-[#8E7C80]" />}
+                          {currentUser?.isProfileCompleted && <Lock className="w-3 h-3 text-zinc-500" />}
                         </label>
-                        <span className="text-[11px] font-bold text-[#A62433] tabular-nums">
+                        <span className="text-[11px] font-bold text-rose-400 tabular-nums">
                           {calculateAge(regBirthDate, Number(regAge))} yosh
                         </span>
                       </div>
@@ -5775,21 +6177,21 @@ export default function App() {
                           setRegAge(String(computedAge));
                         }}
                         max={new Date().toISOString().split('T')[0]}
-                        className="w-full px-3.5 py-2.5 min-h-[44px] rounded-xl bg-white border border-[#E5D9D6] text-xs font-semibold text-[#221719] focus:border-[#C93545] focus:ring-1 focus:ring-[#C93545] transition-all outline-none cursor-pointer disabled:bg-[#FAF4F2] disabled:text-[#6B5B5E] disabled:cursor-not-allowed"
+                        className="w-full px-3.5 py-2.5 min-h-[44px] rounded-xl bg-[#171A26] border border-white/10 text-xs font-semibold text-white focus:border-rose-500 focus:ring-1 focus:ring-rose-500/40 transition-all outline-none cursor-pointer disabled:bg-[#0E1018] disabled:text-zinc-500 disabled:cursor-not-allowed"
                       />
                       {currentUser?.isProfileCompleted && (
-                        <p className="text-[10.5px] text-[#7A686C] mt-1">Birlamchi tug'ilgan yil o'zgartirilmaydi.</p>
+                        <p className="text-[10.5px] text-zinc-500 mt-1">Birlamchi tug'ilgan yil o'zgartirilmaydi.</p>
                       )}
                     </div>
 
                     <div>
                       <div className="flex items-center justify-between gap-2 mb-1.5">
-                        <label htmlFor="edit-profile-gender" className="text-xs font-bold text-[#36272A] flex items-center gap-1">
+                        <label htmlFor="edit-profile-gender" className="text-xs font-bold text-zinc-300 flex items-center gap-1">
                           <span>Jins</span>
-                          {currentUser?.isProfileCompleted && <Lock className="w-3 h-3 text-[#8E7C80]" />}
+                          {currentUser?.isProfileCompleted && <Lock className="w-3 h-3 text-zinc-500" />}
                         </label>
                         {currentUser?.isProfileCompleted && (
-                          <span className="text-[10.5px] text-emerald-700 font-bold">Birlamchi (o'zgarmas)</span>
+                          <span className="text-[10.5px] text-emerald-400 font-bold">Birlamchi (o'zgarmas)</span>
                         )}
                       </div>
                       <select
@@ -5797,23 +6199,23 @@ export default function App() {
                         value={regGender}
                         onChange={(e) => setRegGender(e.target.value as any)}
                         disabled={Boolean(currentUser?.isProfileCompleted)}
-                        className="w-full px-3.5 py-2.5 min-h-[44px] rounded-xl bg-white border border-[#E5D9D6] text-xs font-semibold text-[#221719] focus:border-[#C93545] focus:ring-1 focus:ring-[#C93545] transition-all outline-none disabled:bg-[#FAF4F2] disabled:text-[#6B5B5E] disabled:cursor-not-allowed"
+                        className="w-full px-3.5 py-2.5 min-h-[44px] rounded-xl bg-[#171A26] border border-white/10 text-xs font-semibold text-white focus:border-rose-500 focus:ring-1 focus:ring-rose-500/40 transition-all outline-none disabled:bg-[#0E1018] disabled:text-zinc-500 disabled:cursor-not-allowed"
                       >
-                        <option value="female">Ayol / Qiz</option>
-                        <option value="male">Erkak / Yigit</option>
+                        <option value="female" className="bg-[#11131C] text-white">Ayol / Qiz</option>
+                        <option value="male" className="bg-[#11131C] text-white">Erkak / Yigit</option>
                       </select>
                     </div>
                   </div>
                 </div>
 
                 {/* Section 3: Hudud va lokatsiya maxfiyligi */}
-                <div className="border-t border-[#EFE5E2] pt-5 space-y-3.5">
-                  <h3 className="text-[11px] font-bold uppercase tracking-[0.12em] text-[#8E7C80]">
+                <div className="border-t border-white/[0.08] pt-5 space-y-3.5">
+                  <h3 className="text-[11px] font-bold uppercase tracking-[0.12em] text-zinc-500">
                     Hudud va lokatsiya maxfiyligi
                   </h3>
                   <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
                     <div>
-                      <label htmlFor="edit-profile-region" className="block text-xs font-bold text-[#36272A] mb-1.5">
+                      <label htmlFor="edit-profile-region" className="block text-xs font-bold text-zinc-300 mb-1.5">
                         Viloyat
                       </label>
                       <select
@@ -5824,32 +6226,32 @@ export default function App() {
                           setRegRegion(reg);
                           setRegDistrict(UZ_LOCATIONS[reg]?.[0] || '');
                         }}
-                        className="w-full px-3.5 py-2.5 min-h-[44px] rounded-xl bg-white border border-[#E5D9D6] text-xs font-semibold text-[#221719] focus:border-[#C93545] focus:ring-1 focus:ring-[#C93545] transition-all outline-none"
+                        className="w-full px-3.5 py-2.5 min-h-[44px] rounded-xl bg-[#171A26] border border-white/10 text-xs font-semibold text-white focus:border-rose-500 focus:ring-1 focus:ring-rose-500/40 transition-all outline-none"
                       >
                         {Object.keys(UZ_LOCATIONS).map((reg, idx) => (
-                          <option key={`prof_reg_${reg}_${idx}`} value={reg}>{reg}</option>
+                          <option key={`prof_reg_${reg}_${idx}`} value={reg} className="bg-[#11131C] text-white">{reg}</option>
                         ))}
                       </select>
                     </div>
 
                     <div>
-                      <label htmlFor="edit-profile-district" className="block text-xs font-bold text-[#36272A] mb-1.5">
+                      <label htmlFor="edit-profile-district" className="block text-xs font-bold text-zinc-300 mb-1.5">
                         Tuman / Shahar
                       </label>
                       <select
                         id="edit-profile-district"
                         value={regDistrict}
                         onChange={(e) => setRegDistrict(e.target.value)}
-                        className="w-full px-3.5 py-2.5 min-h-[44px] rounded-xl bg-white border border-[#E5D9D6] text-xs font-semibold text-[#221719] focus:border-[#C93545] focus:ring-1 focus:ring-[#C93545] transition-all outline-none"
+                        className="w-full px-3.5 py-2.5 min-h-[44px] rounded-xl bg-[#171A26] border border-white/10 text-xs font-semibold text-white focus:border-rose-500 focus:ring-1 focus:ring-rose-500/40 transition-all outline-none"
                       >
                         {UZ_LOCATIONS[regRegion]?.map((dist, idx) => (
-                          <option key={`prof_dist_${dist}_${idx}`} value={dist}>{dist}</option>
+                          <option key={`prof_dist_${dist}_${idx}`} value={dist} className="bg-[#11131C] text-white">{dist}</option>
                         ))}
                       </select>
                     </div>
 
                     <div>
-                      <label htmlFor="edit-profile-neighborhood" className="block text-xs font-bold text-[#36272A] mb-1.5">
+                      <label htmlFor="edit-profile-neighborhood" className="block text-xs font-bold text-zinc-300 mb-1.5">
                         Mahalla / Ko'cha
                       </label>
                       <input
@@ -5858,20 +6260,20 @@ export default function App() {
                         placeholder="Mahalla"
                         value={regNeighborhood}
                         onChange={(e) => setRegNeighborhood(e.target.value)}
-                        className="w-full px-3.5 py-2.5 min-h-[44px] rounded-xl bg-white border border-[#E5D9D6] text-xs font-semibold text-[#221719] focus:border-[#C93545] focus:ring-1 focus:ring-[#C93545] transition-all outline-none placeholder:text-[#9D8C90]"
+                        className="w-full px-3.5 py-2.5 min-h-[44px] rounded-xl bg-[#171A26] border border-white/10 text-xs font-semibold text-white focus:border-rose-500 focus:ring-1 focus:ring-rose-500/40 transition-all outline-none placeholder:text-zinc-500"
                       />
                     </div>
                   </div>
 
                   {/* Clean Combined Location & Privacy Control */}
-                  <div className="bg-white rounded-2xl border border-[#EFE5E2] divide-y divide-[#F2E8E6]">
+                  <div className="bg-[#171A26] rounded-2xl border border-white/[0.08] divide-y divide-white/[0.06]">
                     <div className="p-3.5 sm:px-4 flex items-center justify-between gap-3">
                       <div className="min-w-0">
-                        <p className="text-xs font-bold text-[#221719] flex items-center gap-1.5">
-                          <MapPin className="w-3.5 h-3.5 text-[#C93545] shrink-0" />
+                        <p className="text-xs font-bold text-white flex items-center gap-1.5">
+                          <MapPin className="w-3.5 h-3.5 text-rose-400 shrink-0" />
                           <span>Jonli GPS lokatsiya</span>
                         </p>
-                        <p className="text-[11px] text-[#6B5B5E] mt-0.5">
+                        <p className="text-[11px] text-zinc-400 mt-0.5">
                           Yaqin atrofdagi foydalanuvchilarga xaritada ko'rinish
                         </p>
                       </div>
@@ -5882,7 +6284,7 @@ export default function App() {
                         aria-label="Jonli GPS lokatsiyani yoqish"
                         onClick={() => handleToggleLocation(!isLocationEnabled)}
                         className={`w-12 h-7 rounded-full transition-colors duration-200 p-1 flex items-center shrink-0 cursor-pointer ${
-                          isLocationEnabled ? 'bg-[#C93545] justify-end' : 'bg-[#D9CECB] justify-start'
+                          isLocationEnabled ? 'bg-rose-600 justify-end' : 'bg-white/15 justify-start'
                         }`}
                       >
                         <span className="w-5 h-5 rounded-full bg-white shadow-xs" />
@@ -5890,32 +6292,32 @@ export default function App() {
                     </div>
 
                     <div className="p-3.5 sm:px-4 space-y-1.5">
-                      <label htmlFor="edit-profile-privacy" className="text-xs font-bold text-[#221719] flex items-center gap-1.5">
-                        <Shield className="w-3.5 h-3.5 text-[#C93545] shrink-0" />
+                      <label htmlFor="edit-profile-privacy" className="text-xs font-bold text-white flex items-center gap-1.5">
+                        <Shield className="w-3.5 h-3.5 text-rose-400 shrink-0" />
                         <span>Lokatsiya maxfiyligi</span>
                       </label>
                       <select
                         id="edit-profile-privacy"
                         value={regLocationVisibility}
                         onChange={(e) => handleLocationVisibilityChange(e.target.value as any)}
-                        className="w-full px-3.5 py-2.5 min-h-[42px] rounded-xl bg-[#FAF4F2] border border-[#E5D9D6] text-xs font-semibold text-[#221719] focus:border-[#C93545] outline-none cursor-pointer"
+                        className="w-full px-3.5 py-2.5 min-h-[42px] rounded-xl bg-[#11131C] border border-white/10 text-xs font-semibold text-white focus:border-rose-500 outline-none cursor-pointer"
                       >
-                        <option value="mutual">Faqat obunachilarim va tanishlarimga (Tavsiya etiladi)</option>
-                        <option value="everyone">Barchaga ko'rinsin</option>
-                        <option value="ghost">Hech kimga ko'rsatmaslik (Yashirin rejim)</option>
+                        <option value="mutual" className="bg-[#11131C] text-white">Faqat obunachilarim va tanishlarimga (Tavsiya etiladi)</option>
+                        <option value="everyone" className="bg-[#11131C] text-white">Barchaga ko'rinsin</option>
+                        <option value="ghost" className="bg-[#11131C] text-white">Hech kimga ko'rsatmaslik (Yashirin rejim)</option>
                       </select>
                     </div>
                   </div>
                 </div>
 
                 {/* Section 4: Aloqa va bio */}
-                <div className="border-t border-[#EFE5E2] pt-5 space-y-3.5">
-                  <h3 className="text-[11px] font-bold uppercase tracking-[0.12em] text-[#8E7C80]">
+                <div className="border-t border-white/[0.08] pt-5 space-y-3.5">
+                  <h3 className="text-[11px] font-bold uppercase tracking-[0.12em] text-zinc-500">
                     Aloqa va o'zingiz haqingizda
                   </h3>
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                     <div className="sm:col-span-2">
-                      <label htmlFor="edit-profile-phone" className="block text-xs font-bold text-[#36272A] mb-1.5">
+                      <label htmlFor="edit-profile-phone" className="block text-xs font-bold text-zinc-300 mb-1.5">
                         Telefon raqam
                       </label>
                       <SmartPhoneInput
@@ -5926,7 +6328,7 @@ export default function App() {
                       />
                     </div>
                     <div>
-                      <label htmlFor="edit-profile-telegram" className="block text-xs font-bold text-[#36272A] mb-1.5">
+                      <label htmlFor="edit-profile-telegram" className="block text-xs font-bold text-zinc-300 mb-1.5">
                         Telegram
                       </label>
                       <input
@@ -5935,11 +6337,11 @@ export default function App() {
                         placeholder="@username"
                         value={regTelegram}
                         onChange={(e) => setRegTelegram(e.target.value)}
-                        className="w-full px-3.5 py-2.5 min-h-[44px] rounded-xl bg-white border border-[#E5D9D6] text-xs font-semibold text-[#221719] focus:border-[#C93545] focus:ring-1 focus:ring-[#C93545] transition-all outline-none placeholder:text-[#9D8C90]"
+                        className="w-full px-3.5 py-2.5 min-h-[44px] rounded-xl bg-[#171A26] border border-white/10 text-xs font-semibold text-white focus:border-rose-500 focus:ring-1 focus:ring-rose-500/40 transition-all outline-none placeholder:text-zinc-500"
                       />
                     </div>
                     <div>
-                      <label htmlFor="edit-profile-instagram" className="block text-xs font-bold text-[#36272A] mb-1.5">
+                      <label htmlFor="edit-profile-instagram" className="block text-xs font-bold text-zinc-300 mb-1.5">
                         Instagram
                       </label>
                       <input
@@ -5948,13 +6350,13 @@ export default function App() {
                         placeholder="@handle"
                         value={regInstagram}
                         onChange={(e) => setRegInstagram(e.target.value)}
-                        className="w-full px-3.5 py-2.5 min-h-[44px] rounded-xl bg-white border border-[#E5D9D6] text-xs font-semibold text-[#221719] focus:border-[#C93545] focus:ring-1 focus:ring-[#C93545] transition-all outline-none placeholder:text-[#9D8C90]"
+                        className="w-full px-3.5 py-2.5 min-h-[44px] rounded-xl bg-[#171A26] border border-white/10 text-xs font-semibold text-white focus:border-rose-500 focus:ring-1 focus:ring-rose-500/40 transition-all outline-none placeholder:text-zinc-500"
                       />
                     </div>
                   </div>
 
                   <div>
-                    <label htmlFor="edit-profile-bio" className="block text-xs font-bold text-[#36272A] mb-1.5">
+                    <label htmlFor="edit-profile-bio" className="block text-xs font-bold text-zinc-300 mb-1.5">
                       O'zingiz haqingizda (Bio)
                     </label>
                     <textarea
@@ -5963,18 +6365,18 @@ export default function App() {
                       value={regBio}
                       onChange={(e) => setRegBio(e.target.value)}
                       placeholder="Qiziqishlaringiz va o'zingiz haqingizda qisqacha yozing..."
-                      className="w-full px-3.5 py-2.5 rounded-xl bg-white border border-[#E5D9D6] text-xs font-medium text-[#221719] focus:border-[#C93545] focus:ring-1 focus:ring-[#C93545] transition-all outline-none placeholder:text-[#9D8C90] resize-none leading-relaxed"
+                      className="w-full px-3.5 py-2.5 rounded-xl bg-[#171A26] border border-white/10 text-xs font-medium text-white focus:border-rose-500 focus:ring-1 focus:ring-rose-500/40 transition-all outline-none placeholder:text-zinc-500 resize-none leading-relaxed"
                     />
                   </div>
                 </div>
               </div>
 
               {/* Sticky Modal Footer */}
-              <div className="shrink-0 bg-white border-t border-[#F2E8E6] px-5 sm:px-7 py-4 flex items-center justify-end gap-3">
+              <div className="shrink-0 bg-[#141724] border-t border-white/[0.08] px-5 sm:px-7 py-4 flex items-center justify-end gap-3">
                 <button
                   type="button"
                   onClick={() => setShowProfileModal(false)}
-                  className="px-5 min-h-[44px] rounded-xl bg-[#FAF4F2] hover:bg-[#F2E8E6] text-[#57484B] font-bold text-xs transition cursor-pointer"
+                  className="px-5 min-h-[44px] rounded-xl bg-white/[0.06] hover:bg-white/[0.12] text-zinc-300 font-bold text-xs transition cursor-pointer"
                 >
                   Bekor qilish
                 </button>
@@ -5982,53 +6384,55 @@ export default function App() {
                   type="submit"
                   disabled={isSavingProfile || isUploadingBanner}
                   data-testid="edit-profile-submit-btn"
-                  className="px-7 min-h-[44px] rounded-xl bg-gradient-to-r from-[#C93545] to-[#A62433] hover:opacity-95 text-white font-bold text-xs shadow-md transition disabled:opacity-50 cursor-pointer"
+                  className="px-7 min-h-[44px] rounded-xl bg-gradient-to-r from-[#E11D48] to-rose-600 hover:brightness-110 text-white font-bold text-xs shadow-md shadow-rose-950/40 transition disabled:opacity-50 cursor-pointer"
                 >
                   {isSavingProfile ? 'Saqlanmoqda...' : 'Saqlash'}
                 </button>
               </div>
             </form>
-          </div>
+          </motion.div>
         </div>
       )}
 
       {/* --- PUBLIC LOCATION SAFETY LIABILITY NOTICE MODAL (10s Countdown Timer - NO INNER SCROLL) --- */}
       {showLiabilityModal && (
-        <div className="fixed inset-0 z-[120] flex items-center justify-center p-4 bg-black/80 backdrop-blur-xl animate-fadeIn">
-          <div className="bg-white rounded-[32px] max-w-md w-full p-6 sm:p-7 space-y-4 relative select-none shadow-2xl border border-rose-100">
-            
-            <div className="flex items-center space-x-2.5 text-[#E8474A]">
-              <div className="p-2 rounded-2xl bg-rose-100">
-                <AlertTriangle className="w-6 h-6 shrink-0 animate-bounce text-[#E8474A]" />
+        <div className="fixed inset-0 z-[120] flex items-center justify-center p-4 bg-black/80 backdrop-blur-xl">
+          <motion.div
+            initial={{ opacity: 0, scale: 0.96, y: 12 }}
+            animate={{ opacity: 1, scale: 1, y: 0 }}
+            className="bg-[#11131C] rounded-[28px] max-w-md w-full p-6 sm:p-7 space-y-4 relative select-none shadow-[0_28px_80px_rgba(0,0,0,0.8)] border border-white/10 text-zinc-100"
+          >
+            <div className="flex items-center space-x-2.5 text-rose-400">
+              <div className="p-2 rounded-2xl bg-rose-500/15 border border-rose-500/25">
+                <AlertTriangle className="w-6 h-6 shrink-0 text-rose-400" />
               </div>
-              <h3 className="font-extrabold text-base text-slate-900">Xavfsizlik va Mas'uliyat Omonati</h3>
+              <h3 className="font-bold text-base text-white">Xavfsizlik va Mas'uliyat Omonati</h3>
             </div>
 
-            {/* Expands dynamically without inner text scrollbar */}
-            <div className="space-y-3 text-xs text-slate-700 bg-rose-50 p-4 rounded-2xl border border-rose-200 leading-relaxed">
-              <p className="font-extrabold text-[#E8474A] flex items-center space-x-1">
-                <span>⚠️ DIQQAT! Lokatsiyangizni barchaga ochiq rejimga o'tkazmoqdasiz!</span>
+            <div className="space-y-3 text-xs text-zinc-300 bg-rose-500/10 p-4 rounded-2xl border border-rose-500/25 leading-relaxed">
+              <p className="font-bold text-rose-300">
+                DIQQAT! Lokatsiyangizni barchaga ochiq rejimga o'tkazmoqdasiz!
               </p>
               <p>
                 Ushbu rejim yoqilganda platformadagi barcha foydalanuvchilar sizning xaritadagi jonli GPS joylashuvingizni ko'ra oladilar va siz tomonga ko'chalar bo'ylab marshrut chizishlari mumkin bo'ladi.
               </p>
-              <p className="font-bold text-slate-900">
+              <p className="font-bold text-white">
                 Xavfsizlik qoidalari buzilsa, noxush holatlar yoki shaxsiy xavfsizlik bilan bog'liq har qanday muammo yuzaga kelsa, Alov.uz platformasi va Ma'muriyati mutlaqo javobgar emas va hech qanday mas'uliyatni o'z zimmasiga olmaydi.
               </p>
-              <p className="text-[11px] text-slate-600 italic">
+              <p className="text-[11px] text-zinc-400 italic">
                 Ushbu qaror va uning oqibatlari uchun barcha mas'uliyat hamda xavf-xatarlarni to'liq va shaxsan o'z zimmasiga olasiz.
               </p>
             </div>
 
             <div className="text-center">
               {liabilityCountdown > 0 ? (
-                <span className="inline-flex items-center space-x-1.5 px-3.5 py-1.5 rounded-full bg-amber-100 text-amber-800 text-[11px] font-bold shadow-xs">
-                  <span className="w-2 h-2 rounded-full bg-amber-500 animate-ping mr-1" />
+                <span className="inline-flex items-center space-x-1.5 px-3.5 py-1.5 rounded-full bg-amber-500/15 border border-amber-400/25 text-amber-300 text-[11px] font-bold">
+                  <span className="w-2 h-2 rounded-full bg-amber-400 animate-ping mr-1" />
                   Iltimos, diqqat bilan o'qing: {liabilityCountdown} soniya
                 </span>
               ) : (
-                <span className="inline-flex items-center space-x-1.5 px-3.5 py-1.5 rounded-full bg-emerald-100 text-emerald-800 text-[11px] font-bold shadow-xs">
-                  ✓ O'qib chiqildi. Barcha shartlarni qabul qilishingiz mumkin.
+                <span className="inline-flex items-center space-x-1.5 px-3.5 py-1.5 rounded-full bg-emerald-500/15 border border-emerald-400/25 text-emerald-300 text-[11px] font-bold">
+                  O'qib chiqildi. Barcha shartlarni qabul qilishingiz mumkin.
                 </span>
               )}
             </div>
@@ -6041,7 +6445,7 @@ export default function App() {
                   setShowLiabilityModal(false);
                   if (timerRef.current) clearInterval(timerRef.current);
                 }}
-                className="px-4 py-3.5 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold text-xs transition duration-200 shrink-0"
+                className="px-4 py-3.5 rounded-xl bg-white/[0.06] hover:bg-white/[0.12] text-zinc-300 font-bold text-xs transition duration-200 shrink-0 cursor-pointer"
               >
                 Bekor qilish
               </button>
@@ -6056,39 +6460,42 @@ export default function App() {
                 }}
                 className={`flex-1 py-3.5 rounded-xl font-bold text-xs shadow-md transition duration-200 ${
                   liabilityCountdown > 0 
-                    ? 'bg-slate-300 text-slate-500 cursor-not-allowed' 
-                    : 'bg-gradient-to-r from-red-500 via-pink-500 to-rose-600 hover:from-red-600 hover:to-pink-600 text-white shadow-pink-500/25 hover:scale-[1.02] active:scale-95 cursor-pointer'
+                    ? 'bg-white/10 text-zinc-500 cursor-not-allowed' 
+                    : 'bg-gradient-to-r from-[#E11D48] to-rose-600 hover:brightness-110 text-white shadow-rose-950/40 active:scale-[0.98] cursor-pointer'
                 }`}
               >
-                {liabilityCountdown > 0 ? `Kutib turing (${liabilityCountdown}s)` : 'Roziman va Tasdiqlayman ✨'}
+                {liabilityCountdown > 0 ? `Kutib turing (${liabilityCountdown}s)` : 'Roziman va Tasdiqlayman'}
               </button>
             </div>
-
-          </div>
+          </motion.div>
         </div>
       )}
 
       {/* --- IMAGE CROP & ZOOM EDITING MODAL (Renders ON TOP with z-[100]) --- */}
       {showCropModal && cropImageSrc && (
-        <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/80 backdrop-blur-md animate-fadeIn">
-          <div className="bg-white rounded-[28px] max-w-sm w-full p-5 space-y-4 relative card-shadow select-none shadow-2xl border border-slate-100">
+        <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/80 backdrop-blur-md">
+          <motion.div
+            initial={{ opacity: 0, scale: 0.96, y: 10 }}
+            animate={{ opacity: 1, scale: 1, y: 0 }}
+            className="bg-[#11131C] rounded-[28px] max-w-sm w-full p-5 space-y-4 relative select-none shadow-[0_28px_80px_rgba(0,0,0,0.85)] border border-white/10 text-zinc-100"
+          >
             <div className="flex items-center justify-between">
               <div className="flex items-center space-x-2">
-                <Crop className="w-5 h-5 text-[#E8474A]" />
-                <h3 className="font-bold text-sm text-slate-900">Rasmni moslashtirish</h3>
+                <Crop className="w-5 h-5 text-rose-400" />
+                <h3 className="font-bold text-sm text-white">Rasmni moslashtirish</h3>
               </div>
-              <button onClick={() => setShowCropModal(false)} className="p-1.5 rounded-full text-slate-500 hover:bg-slate-100">
+              <button onClick={() => setShowCropModal(false)} className="p-1.5 rounded-full bg-white/[0.06] text-zinc-400 hover:text-white hover:bg-rose-500/20 transition cursor-pointer">
                 <X className="w-4 h-4" />
               </button>
             </div>
 
-            <p className="text-[11px] text-slate-500">
+            <p className="text-[11px] text-zinc-400">
               Barmoq/sichqoncha bilan rasmni suring va zoom orqali joylashuvini to'g'rilang:
             </p>
 
             {/* Circular Preview Container with Drag and Pinch capabilities */}
             <div 
-              className="relative w-56 h-56 mx-auto rounded-full overflow-hidden border-4 border-[#E8474A] shadow-lg bg-slate-900 cursor-move flex items-center justify-center touch-none"
+              className="relative w-56 h-56 mx-auto rounded-full overflow-hidden border-4 border-rose-500 shadow-lg bg-[#09090D] cursor-move flex items-center justify-center touch-none"
               onMouseDown={(e) => {
                 setIsDraggingPan(true);
                 dragStartRef.current = { x: e.clientX - cropPan.x, y: e.clientY - cropPan.y };
@@ -6140,7 +6547,7 @@ export default function App() {
                 <button 
                   type="button"
                   onClick={() => setCropScale(prev => Math.max(1, prev - 0.2))} 
-                  className="p-1.5 rounded-full bg-slate-100 hover:bg-slate-200 text-slate-700"
+                  className="p-1.5 rounded-full bg-white/[0.08] hover:bg-white/[0.15] text-zinc-200 cursor-pointer"
                 >
                   <ZoomOut className="w-4 h-4" />
                 </button>
@@ -6151,18 +6558,18 @@ export default function App() {
                   step="0.05"
                   value={cropScale}
                   onChange={(e) => setCropScale(parseFloat(e.target.value))}
-                  className="flex-1 accent-[#E8474A] h-1.5 bg-slate-200 rounded-lg cursor-pointer"
+                  className="flex-1 accent-rose-500 h-1.5 bg-white/15 rounded-lg cursor-pointer"
                 />
                 <button 
                   type="button"
                   onClick={() => setCropScale(prev => Math.min(3, prev + 0.2))} 
-                  className="p-1.5 rounded-full bg-slate-100 hover:bg-slate-200 text-slate-700"
+                  className="p-1.5 rounded-full bg-white/[0.08] hover:bg-white/[0.15] text-zinc-200 cursor-pointer"
                 >
                   <ZoomIn className="w-4 h-4" />
                 </button>
               </div>
 
-              <div className="flex items-center justify-between text-[10px] text-slate-400 px-2">
+              <div className="flex items-center justify-between text-[10px] text-zinc-500 px-2">
                 <span>1x (Oddiy)</span>
                 <span>Zoom: {cropScale.toFixed(2)}x</span>
                 <span>3x (Kattaroq)</span>
@@ -6177,7 +6584,7 @@ export default function App() {
                   setCropScale(1);
                   setCropPan({ x: 0, y: 0 });
                 }}
-                className="px-3 py-2.5 rounded-full bg-slate-100 text-slate-700 font-bold text-xs hover:bg-slate-200 transition-all flex items-center space-x-1"
+                className="px-3 py-2.5 rounded-full bg-white/[0.07] text-zinc-200 font-bold text-xs hover:bg-white/[0.14] transition-all flex items-center space-x-1 cursor-pointer"
               >
                 <RefreshCw className="w-3.5 h-3.5" />
                 <span>Tiklash</span>
@@ -6185,12 +6592,12 @@ export default function App() {
               <button 
                 type="button"
                 onClick={handleApplyCrop}
-                className="flex-1 py-2.5 rounded-full bg-[#E8474A] text-white font-bold text-xs shadow-md hover:bg-[#CB2E31] transition-all flex items-center justify-center space-x-1.5"
+                className="flex-1 py-2.5 rounded-full bg-gradient-to-r from-[#E11D48] to-rose-600 text-white font-bold text-xs shadow-md hover:brightness-110 transition-all flex items-center justify-center space-x-1.5 cursor-pointer"
               >
-                <span>Saqlash va Tasdiqlash ✨</span>
+                <span>Saqlash va Tasdiqlash</span>
               </button>
             </div>
-          </div>
+          </motion.div>
         </div>
       )}
 
@@ -6246,16 +6653,17 @@ export default function App() {
 
       {/* --- PROFILE FACE ID VERIFICATION MODAL --- */}
       {showProfileFaceIdModal && currentUser && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-[#221719]/65 backdrop-blur-md animate-fadeIn">
-          <div className="bg-[#FDFBF9] rounded-[32px] max-w-md w-full p-6 relative shadow-2xl border border-[rgba(166,36,51,0.14)] max-h-[92vh] overflow-y-auto">
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/75 backdrop-blur-md">
+          <div className="bg-[#11131C] rounded-[28px] max-w-md w-full p-6 relative shadow-[0_28px_80px_rgba(0,0,0,0.85)] border border-white/10 max-h-[92vh] overflow-y-auto text-zinc-100">
             <FaceIdVerificationModal
               apiBaseUrl={getBaseUrl()}
               userUid={currentUser.uid}
               userName={getSafeUserDisplayName(currentUser, currentUser.name || 'Foydalanuvchi')}
               onVerified={async (result) => {
+                const facePhoto = result.photoUrl || result.photoDataUrl;
                 const updatedUser = {
                   ...currentUser,
-                  avatar: result.photoUrl || result.photoDataUrl,
+                  avatar: facePhoto,
                   gender: result.detectedGender,
                   faceId: result.faceId,
                   isVerified: true,
@@ -6267,11 +6675,19 @@ export default function App() {
                 });
                 const finalUser = syncData?.user || updatedUser;
                 setCurrentUser(finalUser);
+                setRegAvatar(resolveEffectiveProfileAvatar(finalUser));
+                setUsersList(prev => {
+                  const userMap = new Map<string, any>();
+                  prev.forEach(u => userMap.set(u.uid || u.id, u));
+                  userMap.set(finalUser.uid, finalUser);
+                  return Array.from(userMap.values());
+                });
                 try {
                   localStorage.setItem('alov_current_user', JSON.stringify(finalUser));
                   localStorage.setItem('alov_user_' + finalUser.uid, JSON.stringify(finalUser));
                 } catch {}
                 setShowProfileFaceIdModal(false);
+                showToast("Face ID surati profilingizga qo'yildi");
               }}
               onCancel={() => setShowProfileFaceIdModal(false)}
             />
@@ -6343,32 +6759,37 @@ export default function App() {
 
       {/* --- GIFT SELECTION MODAL --- */}
       {showGiftModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-md animate-fadeIn">
-          <div className="bg-white rounded-[32px] max-w-sm w-full p-6 space-y-4 relative card-shadow border border-slate-100 shadow-2xl text-slate-900">
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/75 backdrop-blur-md">
+          <motion.div
+            initial={{ opacity: 0, scale: 0.96, y: 12 }}
+            animate={{ opacity: 1, scale: 1, y: 0 }}
+            className="bg-[#11131C] rounded-[28px] max-w-sm w-full p-6 space-y-4 relative border border-white/10 shadow-[0_28px_80px_rgba(0,0,0,0.85)] text-zinc-100"
+          >
             <button 
               onClick={() => setShowGiftModal(false)}
-              className="absolute top-5 right-5 p-2 rounded-full bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold transition active:scale-90"
+              className="absolute top-5 right-5 w-8 h-8 rounded-full bg-white/[0.06] hover:bg-rose-500/20 text-zinc-300 hover:text-white flex items-center justify-center transition cursor-pointer"
             >
               <X className="w-4 h-4" />
             </button>
 
-            <div className="space-y-1">
-              <h3 className="text-xl font-black text-slate-900 flex items-center space-x-2">
-                <span>Sovg'a Yuborish 🎁</span>
+            <div className="space-y-1 pr-8">
+              <h3 className="text-xl font-editorial font-bold text-white flex items-center space-x-2">
+                <Gift className="w-5 h-5 text-amber-400" />
+                <span>Sovg'a yuborish</span>
               </h3>
-              <p className="text-xs text-slate-500 font-medium">
+              <p className="text-xs text-zinc-400 font-medium">
                 {selectedChatUser?.name || 'Foydalanuvchi'}ga virtual sovg'a taqdim eting:
               </p>
             </div>
 
-            <div className="bg-amber-50 border border-amber-200 rounded-2xl p-2.5 flex items-center justify-between text-xs font-bold text-amber-900">
-              <span className="flex items-center space-x-1">
-                <Coins className="w-4 h-4 text-amber-500 fill-amber-400" />
+            <div className="bg-amber-500/10 border border-amber-400/25 rounded-2xl p-2.5 flex items-center justify-between text-xs font-bold text-amber-200">
+              <span className="flex items-center space-x-1.5">
+                <Coins className="w-4 h-4 text-amber-400" />
                 <span>Balansingiz: {currentUser?.coins ?? 100} moneta</span>
               </span>
               <button 
                 onClick={() => { setShowGiftModal(false); setShowTopUpModal(true); }}
-                className="bg-amber-500 hover:bg-amber-600 text-white px-2.5 py-1 rounded-full text-[10px] font-bold shadow-xs"
+                className="bg-amber-500 hover:bg-amber-400 text-black px-2.5 py-1 rounded-lg text-[10px] font-bold shadow-xs cursor-pointer"
               >
                 + To'ldirish
               </button>
@@ -6376,104 +6797,125 @@ export default function App() {
 
             <div className="grid grid-cols-2 gap-2.5 max-h-[300px] overflow-y-auto pr-1">
               {[
-                { id: 'rose', name: 'Atirgul 🌹', coinPrice: 10, icon: '🌹' },
-                { id: 'heart', name: 'Yurak 💖', coinPrice: 30, icon: '💖' },
-                { id: 'teddy', name: 'Ayiqcha 🧸', coinPrice: 50, icon: '🧸' },
-                { id: 'crown', name: 'Toj 👑', coinPrice: 100, icon: '👑' },
-                { id: 'car', name: 'Qimmat Mashina 🚗', coinPrice: 300, icon: '🚗' },
-                { id: 'castle', name: 'Olmos Qasr 💎', coinPrice: 500, icon: '💎' },
+                { id: 'rose', name: 'Atirgul', coinPrice: 10, icon: '🌹' },
+                { id: 'heart', name: 'Yurak', coinPrice: 30, icon: '💖' },
+                { id: 'teddy', name: 'Ayiqcha', coinPrice: 50, icon: '🧸' },
+                { id: 'crown', name: 'Toj', coinPrice: 100, icon: '👑' },
+                { id: 'car', name: 'Sport mashina', coinPrice: 300, icon: '🚗' },
+                { id: 'castle', name: 'Olmos qasr', coinPrice: 500, icon: '💎' },
               ].map((g) => (
                 <button
                   key={g.id}
                   onClick={() => handleSendGift(g)}
-                  className="p-3 rounded-2xl border border-slate-200 hover:border-amber-400 bg-slate-50 hover:bg-amber-50/50 flex flex-col items-center justify-center space-y-1.5 transition active:scale-95 text-center group"
+                  className="p-3 rounded-2xl border border-white/10 hover:border-amber-400/60 bg-[#171A26] hover:bg-amber-500/10 flex flex-col items-center justify-center space-y-1.5 transition active:scale-95 text-center group cursor-pointer"
                 >
                   <span className="text-3xl group-hover:scale-110 transition-transform">{g.icon}</span>
-                  <span className="text-xs font-bold text-slate-800 leading-tight">{g.name}</span>
-                  <span className="text-[10px] font-black text-amber-600 bg-amber-100/80 px-2 py-0.5 rounded-full flex items-center space-x-0.5">
-                    <Coins className="w-2.5 h-2.5 fill-amber-500 text-amber-600" />
+                  <span className="text-xs font-bold text-white leading-tight">{g.name}</span>
+                  <span className="text-[10px] font-mono font-bold text-amber-300 bg-amber-500/15 px-2 py-0.5 rounded-md flex items-center space-x-1">
+                    <Coins className="w-2.5 h-2.5 text-amber-400" />
                     <span>{g.coinPrice} moneta</span>
                   </span>
                 </button>
               ))}
             </div>
-          </div>
+          </motion.div>
         </div>
       )}
 
-      {/* --- TOP-UP COINS MODAL (Click, Payme, Uzum, Telegram Stars) --- */}
+      {/* --- COIN SHOP MODAL (Ariza yuborish orqali Moneta olish) --- */}
       {showTopUpModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-md animate-fadeIn">
-          <div className="bg-white rounded-[32px] max-w-sm w-full p-6 space-y-4 relative card-shadow border border-slate-100 shadow-2xl text-slate-900">
-            <button 
+        <div
+          className="fixed inset-0 z-[120] flex items-center justify-center p-3 sm:p-4 bg-black/75 backdrop-blur-md animate-fadeIn"
+          data-testid="coin-shop-modal"
+          onClick={() => { setShowTopUpModal(false); setWalletNoticeMsg(''); }}
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            className="bg-[#11131C] text-zinc-100 rounded-[28px] max-w-md w-full p-5 sm:p-6 space-y-4 relative shadow-[0_28px_80px_rgba(0,0,0,0.75)] border border-white/10 max-h-[90vh] overflow-y-auto"
+          >
+            <button
+              type="button"
               onClick={() => { setShowTopUpModal(false); setWalletNoticeMsg(''); }}
-              className="absolute top-5 right-5 p-2 rounded-full bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold transition active:scale-90"
+              aria-label="Do'konni yopish"
+              className="absolute top-4 right-4 w-9 h-9 rounded-xl bg-white/[0.06] hover:bg-rose-600 text-zinc-300 hover:text-white flex items-center justify-center transition cursor-pointer"
             >
               <X className="w-4 h-4" />
             </button>
 
-            <div className="space-y-1">
-              <h3 className="text-xl font-black text-slate-900 flex items-center space-x-2">
-                <Coins className="w-5 h-5 text-amber-500 fill-amber-400" />
-                <span>Moneta Sotib Olish 🪙</span>
+            <div className="space-y-1 pr-10">
+              <div className="flex items-center gap-2 text-amber-400">
+                <Coins className="w-5 h-5 fill-amber-400 text-amber-500" />
+                <span className="text-[11px] font-bold uppercase tracking-[0.14em]">Moneta Do'koni</span>
+              </div>
+              <h3 className="text-xl font-editorial font-bold text-white">
+                O'zingizga mos paketni tanlang
               </h3>
-              <p className="text-xs text-slate-500 font-medium">
-                Xabar yozish va sovg'alar yuborish uchun moneta balansini to'ldiring:
+              <p className="text-xs text-zinc-400">
+                Narx ustiga bosib ariza yuboring — admin tasdiqlaganidan so'ng monetalar hisobingizga tushadi.
               </p>
             </div>
 
             {walletNoticeMsg && (
-              <div className="p-3 bg-amber-50 border border-amber-200 rounded-2xl text-amber-900 text-xs font-semibold">
+              <div className="p-3 bg-amber-500/15 border border-amber-400/30 rounded-2xl text-amber-200 text-xs font-semibold">
                 {walletNoticeMsg}
               </div>
             )}
 
             <div className="space-y-2">
-              <label className="block text-[11px] font-bold text-slate-700">Moneta Paketini Tanlang:</label>
-              <div className="grid grid-cols-2 gap-2">
-                {[
-                  { coins: 100, uzs: 10000, label: 'Standard' },
-                  { coins: 300, uzs: 28000, label: '🔥 Mashhur' },
-                  { coins: 500, uzs: 45000, label: 'Tejamkor' },
-                  { coins: 1000, uzs: 80000, label: '⚡️ Super' },
-                ].map((pkg) => (
-                  <button
-                    key={pkg.coins}
-                    type="button"
-                    onClick={() => setTopUpPackage(pkg)}
-                    className={cn(
-                      "p-3 rounded-2xl border text-left transition relative active:scale-95",
-                      topUpPackage.coins === pkg.coins 
-                        ? "border-amber-500 bg-amber-50/70 shadow-xs ring-2 ring-amber-400/30" 
-                        : "border-slate-200 bg-slate-50 hover:bg-slate-100"
-                    )}
-                  >
-                    <span className="text-xs font-black text-slate-900 block">{pkg.coins} Moneta 🪙</span>
-                    <span className="text-[11px] font-bold text-amber-600 block mt-0.5">{pkg.uzs.toLocaleString()} so'm</span>
-                    <span className="text-[9px] font-bold text-slate-400 block mt-0.5">{pkg.label}</span>
-                  </button>
-                ))}
+              <label className="block text-[11px] font-bold uppercase tracking-wider text-zinc-400">
+                Moneta Paketlari
+              </label>
+              <div className="grid grid-cols-2 gap-2.5">
+                {COIN_SHOP_PACKAGES.map((pkg) => {
+                  const selected = topUpPackage.coins === pkg.coins;
+                  return (
+                    <button
+                      key={pkg.coins}
+                      type="button"
+                      data-testid={`coin-package-${pkg.coins}`}
+                      onClick={() => setTopUpPackage({ coins: pkg.coins, uzs: pkg.uzs })}
+                      className={cn(
+                        'p-3.5 rounded-2xl border text-left transition relative active:scale-[0.98] cursor-pointer',
+                        selected
+                          ? 'border-amber-400 bg-amber-500/15 ring-2 ring-amber-400/30'
+                          : 'border-white/10 bg-[#171A26] hover:border-white/25'
+                      )}
+                    >
+                      <div className="flex items-center justify-between gap-1">
+                        <span className="text-sm font-mono font-bold text-white tabular-nums">
+                          {pkg.coins} 🪙
+                        </span>
+                        <span className="text-[10px] font-semibold text-amber-300">{pkg.label}</span>
+                      </div>
+                      <span className="text-xs font-mono font-bold text-amber-400 block mt-1 tabular-nums">
+                        {pkg.uzs.toLocaleString()} so'm
+                      </span>
+                    </button>
+                  );
+                })}
               </div>
             </div>
 
             <div className="space-y-2">
-              <label className="block text-[11px] font-bold text-slate-700">To'lov Tizimi:</label>
+              <label className="block text-[11px] font-bold uppercase tracking-wider text-zinc-400">
+                To'lov usuli
+              </label>
               <div className="grid grid-cols-2 gap-2">
                 {[
                   { id: 'click', name: 'Click' },
                   { id: 'payme', name: 'Payme' },
                   { id: 'uzum', name: 'Uzum Bank' },
-                  { id: 'telegram_stars', name: 'Telegram Stars ⭐️' },
+                  { id: 'telegram_stars', name: 'Telegram Stars' },
                 ].map((p) => (
                   <button
                     key={p.id}
                     type="button"
                     onClick={() => setPaymentProvider(p.id as any)}
                     className={cn(
-                      "py-2.5 px-3 rounded-xl border text-xs font-bold transition active:scale-95 text-center",
-                      paymentProvider === p.id 
-                        ? "border-blue-500 bg-blue-50 text-blue-900 ring-2 ring-blue-400/30" 
-                        : "border-slate-200 bg-slate-50 text-slate-700 hover:bg-slate-100"
+                      'py-2.5 px-3 rounded-xl border text-xs font-bold transition cursor-pointer text-center',
+                      paymentProvider === p.id
+                        ? 'border-rose-500 bg-rose-500/20 text-white'
+                        : 'border-white/10 bg-[#171A26] text-zinc-300 hover:border-white/25'
                     )}
                   >
                     {p.name}
@@ -6482,50 +6924,114 @@ export default function App() {
               </div>
             </div>
 
+            <div className="space-y-1.5">
+              <label className="block text-[11px] font-bold uppercase tracking-wider text-zinc-400">
+                Izoh (ixtiyoriy)
+              </label>
+              <input
+                type="text"
+                value={coinRequestNote}
+                onChange={(e) => setCoinRequestNote(e.target.value)}
+                data-testid="coin-request-note-input"
+                placeholder="Masalan: @telegram orqali bog'laning..."
+                className="w-full px-3.5 py-2.5 rounded-xl bg-[#171A26] border border-white/10 text-xs text-white placeholder:text-zinc-500 outline-none focus:border-amber-400"
+              />
+            </div>
+
             <button
+              type="button"
+              disabled={isSubmittingCoinRequest}
+              data-testid="submit-coin-request-btn"
               onClick={handleExecuteTopUp}
-              className="w-full py-3.5 rounded-2xl bg-gradient-to-r from-amber-500 to-orange-500 hover:from-amber-600 hover:to-orange-600 text-white font-bold text-xs shadow-lg shadow-amber-500/25 transition active:scale-95 flex items-center justify-center space-x-2"
+              className="w-full py-3.5 rounded-2xl bg-gradient-to-r from-amber-500 to-rose-600 hover:brightness-110 text-white font-bold text-xs shadow-lg shadow-amber-950/40 transition active:scale-[0.98] flex items-center justify-center gap-2 cursor-pointer disabled:opacity-60"
             >
               <CreditCard className="w-4 h-4" />
-              <span>{topUpPackage.uzs.toLocaleString()} So'm To'lash va Olish 🚀</span>
+              <span>
+                {isSubmittingCoinRequest
+                  ? 'Ariza yuborilmoqda...'
+                  : `${topUpPackage.coins} moneta (${topUpPackage.uzs.toLocaleString()} so'm) — Ariza yuborish`}
+              </span>
             </button>
+
+            {userCoinRequests.length > 0 && (
+              <div className="pt-3 border-t border-white/10 space-y-2">
+                <p className="text-[11px] font-bold uppercase tracking-wider text-zinc-400">
+                  Mening arizalarim ({userCoinRequests.length})
+                </p>
+                <div className="space-y-1.5 max-h-36 overflow-y-auto pr-1">
+                  {userCoinRequests.slice(0, 8).map((req) => (
+                    <div
+                      key={req.id}
+                      data-testid={`user-coin-request-${req.id}`}
+                      className="flex items-center justify-between gap-2 px-3 py-2 rounded-xl bg-[#171A26] border border-white/[0.07] text-xs"
+                    >
+                      <div className="min-w-0">
+                        <span className="font-mono font-bold text-white">+{req.coinAmount} 🪙</span>
+                        <span className="text-zinc-400 ml-2 text-[11px]">{req.uzsAmount.toLocaleString()} so'm</span>
+                      </div>
+                      <span
+                        className={cn(
+                          'px-2 py-0.5 rounded-md text-[10px] font-bold shrink-0',
+                          req.status === 'approved'
+                            ? 'bg-emerald-500/20 text-emerald-300'
+                            : req.status === 'rejected'
+                            ? 'bg-rose-500/20 text-rose-300'
+                            : 'bg-amber-500/20 text-amber-300'
+                        )}
+                      >
+                        {req.status === 'approved'
+                          ? 'Tasdiqlangan'
+                          : req.status === 'rejected'
+                          ? 'Rad etilgan'
+                          : 'Kutilmoqda'}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
           </div>
         </div>
       )}
 
       {/* --- WITHDRAW DIAMONDS MODAL (FOR FEMALE USERS) --- */}
       {showWithdrawModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-md animate-fadeIn">
-          <div className="bg-white rounded-[32px] max-w-sm w-full p-6 space-y-4 relative card-shadow border border-slate-100 shadow-2xl text-slate-900">
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/75 backdrop-blur-md">
+          <motion.div
+            initial={{ opacity: 0, scale: 0.96, y: 12 }}
+            animate={{ opacity: 1, scale: 1, y: 0 }}
+            className="bg-[#11131C] rounded-[28px] max-w-sm w-full p-6 space-y-4 relative border border-white/10 shadow-[0_28px_80px_rgba(0,0,0,0.85)] text-zinc-100"
+          >
             <button 
               onClick={() => setShowWithdrawModal(false)}
-              className="absolute top-5 right-5 p-2 rounded-full bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold transition active:scale-90"
+              className="absolute top-5 right-5 w-8 h-8 rounded-full bg-white/[0.06] hover:bg-rose-500/20 text-zinc-300 hover:text-white flex items-center justify-center transition cursor-pointer"
             >
               <X className="w-4 h-4" />
             </button>
 
-            <div className="space-y-1">
-              <h3 className="text-xl font-black text-slate-900 flex items-center space-x-2">
-                <span>Pul Yechib Olish 💎</span>
+            <div className="space-y-1 pr-8">
+              <h3 className="text-xl font-editorial font-bold text-white flex items-center space-x-2">
+                <Wallet className="w-5 h-5 text-cyan-400" />
+                <span>Pul yechib olish</span>
               </h3>
-              <p className="text-xs text-slate-500 font-medium">
+              <p className="text-xs text-zinc-400 font-medium">
                 Ishlab topilgan almazlarni Humo yoki Uzcard kartangizga pul qilib chiqaring:
               </p>
             </div>
 
-            <div className="bg-cyan-50 border border-cyan-200 rounded-2xl p-3.5 space-y-1">
-              <div className="flex items-center justify-between text-xs font-bold text-cyan-950">
-                <span>Mavjud Balans:</span>
-                <span className="text-sm font-black text-cyan-700">💎 {currentUser?.diamonds ?? 0} Almaz</span>
+            <div className="bg-cyan-500/10 border border-cyan-400/25 rounded-2xl p-3.5 space-y-1">
+              <div className="flex items-center justify-between text-xs font-bold text-cyan-100">
+                <span>Mavjud balans:</span>
+                <span className="text-sm font-mono font-bold text-cyan-300">{currentUser?.diamonds ?? 0} Almaz</span>
               </div>
-              <p className="text-[10px] text-cyan-800 font-medium">
-                Kurs: 1 Almaz = 1,000 So'm • minimal yechish: 100 Almaz (100,000 So'm)
+              <p className="text-[10px] text-cyan-300/80 font-medium">
+                Kurs: 1 Almaz = 1,000 So'm • Minimal yechish: 100 Almaz (100,000 So'm)
               </p>
             </div>
 
             <form onSubmit={handleExecuteWithdrawal} className="space-y-3">
               <div>
-                <label className="block text-[11px] font-bold text-slate-700 mb-1">Yechib olinadigan almaz miqdori:</label>
+                <label className="block text-[11px] font-bold text-zinc-300 mb-1">Yechib olinadigan almaz miqdori:</label>
                 <input 
                   type="number"
                   min={100}
@@ -6533,15 +7039,15 @@ export default function App() {
                   value={withdrawAmount}
                   onChange={(e) => setWithdrawAmount(Number(e.target.value))}
                   required
-                  className="w-full px-3.5 py-2.5 rounded-xl bg-slate-50 border border-slate-200 text-xs font-bold text-slate-900 focus:border-cyan-500 outline-none"
+                  className="w-full px-3.5 py-2.5 rounded-xl bg-[#171A26] border border-white/10 text-xs font-bold text-white focus:border-cyan-400 outline-none"
                 />
-                <p className="text-[10px] text-slate-500 mt-1">
-                  Kartangizga o'tkaziladi: <span className="font-bold text-emerald-600">{(withdrawAmount * 1000).toLocaleString()} So'm</span>
+                <p className="text-[10px] text-zinc-400 mt-1">
+                  Kartangizga o'tkaziladi: <span className="font-bold text-emerald-400">{(withdrawAmount * 1000).toLocaleString()} So'm</span>
                 </p>
               </div>
 
               <div>
-                <label className="block text-[11px] font-bold text-slate-700 mb-1">Humo / Uzcard Karta Raqami (16 xonali):</label>
+                <label className="block text-[11px] font-bold text-zinc-300 mb-1">Humo / Uzcard karta raqami (16 xonali):</label>
                 <input 
                   type="text"
                   maxLength={19}
@@ -6553,19 +7059,19 @@ export default function App() {
                     setWithdrawCardNumber(formatted);
                   }}
                   required
-                  className="w-full px-3.5 py-2.5 rounded-xl bg-slate-50 border border-slate-200 text-xs font-mono font-bold text-slate-900 focus:border-cyan-500 outline-none"
+                  className="w-full px-3.5 py-2.5 rounded-xl bg-[#171A26] border border-white/10 text-xs font-mono font-bold text-white placeholder:text-zinc-500 focus:border-cyan-400 outline-none"
                 />
               </div>
 
               <button
                 type="submit"
-                className="w-full py-3.5 rounded-2xl bg-gradient-to-r from-teal-500 to-emerald-600 hover:from-teal-600 hover:to-emerald-700 text-white font-bold text-xs shadow-lg shadow-teal-500/25 transition active:scale-95 flex items-center justify-center space-x-2"
+                className="w-full py-3.5 rounded-2xl bg-gradient-to-r from-teal-500 to-emerald-600 hover:brightness-110 text-white font-bold text-xs shadow-lg shadow-emerald-950/40 transition active:scale-[0.98] flex items-center justify-center space-x-2 cursor-pointer"
               >
                 <Wallet className="w-4 h-4" />
-                <span>Ariza Yuborish (Kartaga O'tkazish) 💸</span>
+                <span>Ariza yuborish (Kartaga o'tkazish)</span>
               </button>
             </form>
-          </div>
+          </motion.div>
         </div>
       )}
 
@@ -6574,7 +7080,15 @@ export default function App() {
         <AdminPanelModal
           currentUser={currentUser}
           apiBaseUrl={getBaseUrl()}
+          socket={socketRef.current}
           onClose={() => setShowAdminPanel(false)}
+          onOpenUserProfile={(uid, snapshot) => {
+            const { isSelf } = resolveExactUserByUid(uid, usersList, currentUser, snapshot);
+            if (isSelf) {
+              setShowAdminPanel(false);
+            }
+            openUserProfileByUid(uid, snapshot);
+          }}
           onUserUpdated={(updatedUser) => {
             if (updatedUser?.uid === currentUser?.uid) {
               setCurrentUser(updatedUser);
@@ -6589,16 +7103,19 @@ export default function App() {
 
       {/* --- NON-INTRUSIVE TOAST NOTIFICATION --- */}
       {toastMsg && (
-        <div
+        <motion.div
           role="status"
           aria-live="polite"
-          className="fixed bottom-24 left-1/2 -translate-x-1/2 z-[180] px-4 py-2.5 rounded-full bg-[#221719] text-white text-xs font-bold shadow-xl border border-white/15 flex items-center gap-2 pointer-events-none"
+          initial={{ opacity: 0, y: 12 }}
+          animate={{ opacity: 1, y: 0 }}
+          className="fixed bottom-24 left-1/2 -translate-x-1/2 z-[180] px-4 py-2.5 rounded-full bg-[#151824] text-white text-xs font-bold shadow-[0_12px_36px_rgba(0,0,0,0.65)] border border-white/15 flex items-center gap-2 pointer-events-none"
         >
           <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
           <span>{toastMsg}</span>
-        </div>
+        </motion.div>
       )}
 
     </div>
+    </MotionConfig>
   );
 }

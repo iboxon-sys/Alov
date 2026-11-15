@@ -9,6 +9,10 @@ import {
   extractTwitterStatusPath,
   extractInstagramShortcode,
   isSocialVideoHost,
+  inferAudioFileExtension,
+  buildFfmpegMp3Args,
+  deriveAudioMetadataFromUrl,
+  sanitizeMp3DownloadFilename,
 } from './videoImport';
 
 describe('Video link import & MP4 resolution helpers', () => {
@@ -59,5 +63,38 @@ describe('Video link import & MP4 resolution helpers', () => {
     assert.equal(extractInstagramShortcode('https://www.instagram.com/reel/CxYz123AbC/'), 'CxYz123AbC');
     assert.equal(isSocialVideoHost('https://www.instagram.com/reel/CxYz123AbC/'), true);
     assert.equal(isSocialVideoHost('https://youtube.com/shorts/dQw4w9WgXcQ'), true);
+    assert.equal(isSocialVideoHost('https://soundcloud.com/artist/track'), true);
+  });
+
+  it('infers audio extensions and builds deterministic ffmpeg MP3 args', () => {
+    assert.equal(inferAudioFileExtension('audio/mpeg', 'https://cdn.site/audio'), '.mp3');
+    assert.equal(inferAudioFileExtension('audio/x-m4a', 'https://cdn.site/song'), '.m4a');
+    assert.equal(inferAudioFileExtension('application/octet-stream', 'https://cdn.site/track.ogg?v=1'), '.ogg');
+    assert.equal(inferAudioFileExtension('text/html', 'https://youtube.com/watch?v=1'), null);
+
+    const args = buildFfmpegMp3Args('/tmp/in.mp4', '/tmp/out.mp3', { maxDurationSec: 300 });
+    assert.deepEqual(args, [
+      '-y',
+      '-i',
+      '/tmp/in.mp4',
+      '-t',
+      '300',
+      '-vn',
+      '-acodec',
+      'libmp3lame',
+      '-b:a',
+      '192k',
+      '-ar',
+      '44100',
+      '-f',
+      'mp3',
+      '/tmp/out.mp3',
+    ]);
+
+    const meta = deriveAudioMetadataFromUrl('https://cdn.example.uz/clips/toshkent_oqshomi.mp4');
+    assert.equal(meta.title, 'toshkent oqshomi');
+    assert.equal(meta.artist, 'cdn.example.uz');
+    assert.equal(sanitizeMp3DownloadFilename('Bahor Nafasi (Live)'), 'Bahor_Nafasi_Live.mp3');
   });
 });
+

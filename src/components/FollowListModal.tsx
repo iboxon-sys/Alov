@@ -108,66 +108,66 @@ export const FollowListModal: React.FC<FollowListModalProps> = ({
 
   return (
     <div
-      className="fixed inset-0 z-[150] bg-[#1A1113]/65 backdrop-blur-sm flex items-center justify-center p-3 sm:p-4"
+      className="fixed inset-0 z-[150] bg-black/75 backdrop-blur-md flex items-center justify-center p-3 sm:p-4 animate-fadeIn"
       onClick={onClose}
       data-testid="follow-list-modal"
     >
       <div
-        className="bg-[#FFFFFF] w-full max-w-md rounded-3xl shadow-2xl border border-[#F2E8E6] overflow-hidden flex flex-col max-h-[84vh] animate-in zoom-in-95 duration-200"
+        className="bg-[#11131C] text-zinc-100 w-full max-w-md rounded-[28px] shadow-[0_28px_80px_rgba(0,0,0,0.75)] border border-white/10 overflow-hidden flex flex-col max-h-[84vh]"
         onClick={(e) => e.stopPropagation()}
       >
         {/* Header */}
-        <div className="px-5 py-4 border-b border-[#F2E8E6] flex items-center justify-between bg-[#FDFBF9]">
+        <div className="px-5 py-4 border-b border-white/[0.08] flex items-center justify-between bg-[#151824]">
           <div className="flex items-center gap-2.5 min-w-0">
-            <div className="w-9 h-9 rounded-full overflow-hidden border border-[#F2E8E6] shrink-0 bg-[#FAF4F2]">
+            <div className="w-9 h-9 rounded-full overflow-hidden border border-white/15 shrink-0 bg-[#1B1E2C]">
               <img
-                src={resolveApiMediaUrl(targetUser.avatar || `https://ui-avatars.com/api/?name=${encodeURIComponent(targetUser.name || 'U')}&background=FDF2F3&color=C93545`)}
+                src={resolveApiMediaUrl(targetUser.avatar || `https://ui-avatars.com/api/?name=${encodeURIComponent(targetUser.name || 'U')}&background=1F2437&color=F43F5E`)}
                 alt={targetUser.name}
                 className="w-full h-full object-cover"
               />
             </div>
             <div className="min-w-0">
-              <h3 className="font-editorial text-xl font-bold text-[#221719] truncate leading-tight">
+              <h3 className="font-editorial text-xl font-bold text-white truncate leading-tight">
                 {targetUser.name || 'Foydalanuvchi'}
               </h3>
-              <p className="text-[11px] text-[#837275] truncate">Obuna tarmog'i</p>
+              <p className="text-[11px] text-zinc-400 truncate">Obuna tarmog'i</p>
             </div>
           </div>
           <button
             type="button"
             onClick={onClose}
             aria-label="Yopish"
-            className="w-8 h-8 rounded-full bg-[#FAF4F2] hover:bg-[#F2E8E6] flex items-center justify-center text-[#36272A] transition-colors shrink-0"
+            className="w-8 h-8 rounded-xl bg-white/[0.06] hover:bg-rose-600 text-zinc-300 hover:text-white flex items-center justify-center transition-colors shrink-0 cursor-pointer"
           >
             <X className="w-4 h-4" />
           </button>
         </div>
 
         {/* Tabs */}
-        <div className="grid grid-cols-2 border-b border-[#F2E8E6] bg-[#FFFFFF]">
+        <div className="grid grid-cols-2 border-b border-white/[0.08] bg-[#11131C]">
           <button
             type="button"
             onClick={() => setActiveTab('followers')}
             data-testid="tab-followers"
-            className={`py-3 text-xs font-bold tracking-wide transition-colors border-b-2 ${
+            className={`py-3 text-xs font-bold tracking-wide transition-colors border-b-2 cursor-pointer ${
               activeTab === 'followers'
-                ? 'border-[#C93545] text-[#C93545] bg-[#FDF2F3]/50'
-                : 'border-transparent text-[#6B5B5E] hover:text-[#221719]'
+                ? 'border-rose-500 text-white bg-rose-500/10'
+                : 'border-transparent text-zinc-400 hover:text-zinc-200'
             }`}
           >
-            Obunachilar <span className="ml-1 tabular-nums">({followersList.length})</span>
+            Obunachilar <span className="ml-1 tabular-nums text-zinc-400">({followersList.length})</span>
           </button>
           <button
             type="button"
             onClick={() => setActiveTab('following')}
             data-testid="tab-following"
-            className={`py-3 text-xs font-bold tracking-wide transition-colors border-b-2 ${
+            className={`py-3 text-xs font-bold tracking-wide transition-colors border-b-2 cursor-pointer ${
               activeTab === 'following'
-                ? 'border-[#C93545] text-[#C93545] bg-[#FDF2F3]/50'
-                : 'border-transparent text-[#6B5B5E] hover:text-[#221719]'
+                ? 'border-rose-500 text-white bg-rose-500/10'
+                : 'border-transparent text-zinc-400 hover:text-zinc-200'
             }`}
           >
-            Obunalar <span className="ml-1 tabular-nums">({followingList.length})</span>
+            Obunalar <span className="ml-1 tabular-nums text-zinc-400">({followingList.length})</span>
           </button>
         </div>
 
@@ -175,13 +175,13 @@ export const FollowListModal: React.FC<FollowListModalProps> = ({
         {(activeTab === 'followers' ? followersList.length : followingList.length) > 3 && (
           <div className="px-4 pt-3 pb-1">
             <div className="relative">
-              <Search className="w-3.5 h-3.5 text-[#837275] absolute left-3 top-1/2 -translate-y-1/2" />
+              <Search className="w-3.5 h-3.5 text-zinc-400 absolute left-3 top-1/2 -translate-y-1/2" />
               <input
                 type="text"
                 value={searchQuery}
                 onChange={(e) => setSearchQuery(e.target.value)}
                 placeholder="Ism yoki shahar bo'yicha qidirish..."
-                className="w-full pl-8 pr-3 py-2 text-xs bg-[#FAF4F2] border border-[#F2E8E6] rounded-xl text-[#221719] placeholder-[#837275] focus:outline-none focus:border-[#C93545]"
+                className="w-full pl-8 pr-3 py-2 text-xs bg-[#171A26] border border-white/10 rounded-xl text-white placeholder-zinc-500 focus:outline-none focus:border-rose-500"
               />
             </div>
           </div>
@@ -190,12 +190,12 @@ export const FollowListModal: React.FC<FollowListModalProps> = ({
         {/* List */}
         <div className="flex-1 overflow-y-auto p-3 space-y-1.5">
           {loading && displayedList.length === 0 ? (
-            <div className="py-12 text-center text-xs text-[#837275]">Yuklanmoqda...</div>
+            <div className="py-12 text-center text-xs text-zinc-400">Yuklanmoqda...</div>
           ) : displayedList.length === 0 ? (
-            <div className="py-12 text-center flex flex-col items-center justify-center gap-2 text-[#837275]">
-              <Users className="w-8 h-8 text-[#D8C7C4]" />
+            <div className="py-12 text-center flex flex-col items-center justify-center gap-2 text-zinc-400">
+              <Users className="w-8 h-8 text-zinc-600" />
               <p className="text-xs font-medium">
-                {activeTab === 'followers' ? 'Hozircha obunachilar yo\'q' : 'Hozircha hech kimga obuna bo\'lmagan'}
+                {activeTab === 'followers' ? "Hozircha obunachilar yo'q" : "Hozircha hech kimga obuna bo'lmagan"}
               </p>
             </div>
           ) : (
@@ -212,7 +212,7 @@ export const FollowListModal: React.FC<FollowListModalProps> = ({
                 <div
                   key={liveUser.uid || liveUser.id}
                   data-testid={`connection-row-${liveUser.uid}`}
-                  className="flex items-center justify-between gap-3 p-2.5 rounded-2xl hover:bg-[#FAF4F2] transition-colors border border-transparent hover:border-[#F2E8E6]"
+                  className="flex items-center justify-between gap-3 p-2.5 rounded-2xl hover:bg-white/[0.04] transition-colors border border-transparent hover:border-white/[0.08]"
                 >
                   <button
                     type="button"
@@ -221,35 +221,35 @@ export const FollowListModal: React.FC<FollowListModalProps> = ({
                       onClose();
                       onOpenProfile(liveUser.uid, liveUser);
                     }}
-                    className="flex items-center gap-3 min-w-0 flex-1 text-left group"
+                    className="flex items-center gap-3 min-w-0 flex-1 text-left group cursor-pointer"
                   >
                     <div className="relative w-11 h-11 shrink-0">
                       <img
                         src={resolveApiMediaUrl(
                           liveUser.avatar ||
-                            `https://ui-avatars.com/api/?name=${encodeURIComponent(liveUser.name || 'U')}&background=FDF2F3&color=C93545`
+                            `https://ui-avatars.com/api/?name=${encodeURIComponent(liveUser.name || 'U')}&background=1F2437&color=F43F5E`
                         )}
                         alt={liveUser.name}
-                        className="w-11 h-11 rounded-full object-cover border border-[#F2E8E6] group-hover:scale-105 transition-transform"
+                        className="w-11 h-11 rounded-full object-cover border border-white/15 group-hover:scale-105 transition-transform"
                       />
                       <span
                         title={online ? 'Onlayn' : formatLastSeenUz(liveUser.lastSeen, false)}
-                        className={`absolute bottom-0 right-0 w-3 h-3 rounded-full border-2 border-white ${
-                          online ? 'bg-emerald-500' : 'bg-slate-400'
+                        className={`absolute bottom-0 right-0 w-3 h-3 rounded-full border-2 border-[#11131C] ${
+                          online ? 'bg-emerald-500' : 'bg-zinc-600'
                         }`}
                       />
                     </div>
                     <div className="min-w-0 flex-1">
                       <div className="flex items-center gap-1">
-                        <span className="text-sm font-bold text-[#221719] group-hover:text-[#C93545] transition-colors truncate">
+                        <span className="text-sm font-bold text-white group-hover:text-rose-400 transition-colors truncate">
                           {liveUser.name || 'Foydalanuvchi'}
                         </span>
                         {(liveUser.faceId?.verified || liveUser.isVerified) && (
-                          <ShieldCheck className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
+                          <ShieldCheck className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
                         )}
                       </div>
-                      <div className="flex items-center gap-1.5 text-[11px] text-[#6B5B5E] truncate">
-                        <span className={online ? 'text-emerald-600 font-semibold' : 'text-[#837275]'}>
+                      <div className="flex items-center gap-1.5 text-[11px] text-zinc-400 truncate">
+                        <span className={online ? 'text-emerald-400 font-semibold' : 'text-zinc-500'}>
                           {online ? 'Onlayn' : formatLastSeenUz(liveUser.lastSeen, false)}
                         </span>
                         {(() => {
@@ -272,15 +272,15 @@ export const FollowListModal: React.FC<FollowListModalProps> = ({
                     <button
                       type="button"
                       onClick={() => onToggleFollow(liveUser)}
-                      className={`px-3 py-1.5 rounded-xl text-[11px] font-bold flex items-center gap-1 transition-all shrink-0 ${
+                      className={`px-3 py-1.5 rounded-xl text-[11px] font-bold flex items-center gap-1 transition-all shrink-0 cursor-pointer ${
                         isFollowing
-                          ? 'bg-[#FAF4F2] text-[#36272A] border border-[#E7D8D5] hover:bg-[#F2E8E6]'
-                          : 'bg-[#C93545] text-white hover:bg-[#A62433] shadow-sm'
+                          ? 'bg-white/[0.06] text-zinc-200 border border-white/10 hover:bg-white/[0.1]'
+                          : 'bg-rose-600 text-white hover:bg-rose-500 shadow-sm'
                       }`}
                     >
                       {isFollowing ? (
                         <>
-                          <UserCheck className="w-3.5 h-3.5 text-emerald-600" />
+                          <UserCheck className="w-3.5 h-3.5 text-emerald-400" />
                           <span>Obunada</span>
                         </>
                       ) : (

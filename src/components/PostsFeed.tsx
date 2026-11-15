@@ -18,20 +18,18 @@ import {
   Sparkles,
   Plus,
   Camera,
-  CheckCircle2,
-  ExternalLink,
-  Disc,
+  Download,
+  Loader2,
 } from 'lucide-react';
+import { motion, AnimatePresence } from 'framer-motion';
 import { PostItem, PostMediaType, formatPostTimeUz, isPostVisibleToViewer, validateNewPostDraft } from '../utils/posts';
 import { isUserOnlineStrict } from '../utils/presence';
 import {
   parseMediaLink,
-  CURATED_MUSIC_CATALOG,
   parseAudioFilenameMetadata,
-  MusicCatalogTrack,
 } from '../utils/mediaLinks';
 import { formatUsernameDisplay } from '../utils/username';
-import { isDirectPlayableVideoUrl } from '../utils/videoImport';
+import { isDirectPlayableVideoUrl, sanitizeMp3DownloadFilename } from '../utils/videoImport';
 import { getApiUrl, resolveApiMediaUrl } from '../config/api';
 
 interface MusicPlayerCardProps {
@@ -49,6 +47,11 @@ export const MusicPlayerCard: React.FC<MusicPlayerCardProps> = ({ mediaUrl, titl
   const [loadError, setLoadError] = useState(false);
   const resolvedMediaUrl = resolveApiMediaUrl(mediaUrl);
   const resolvedCoverUrl = coverUrl ? resolveApiMediaUrl(coverUrl) : '';
+  const isLocalMedia = resolvedMediaUrl.includes('/api/media/');
+  const downloadFileName = sanitizeMp3DownloadFilename(title);
+  const downloadHref = isLocalMedia
+    ? `${resolvedMediaUrl}?download=1&filename=${encodeURIComponent(downloadFileName)}`
+    : resolvedMediaUrl;
 
   useEffect(() => {
     setIsPlaying(false);
@@ -76,7 +79,7 @@ export const MusicPlayerCard: React.FC<MusicPlayerCardProps> = ({ mediaUrl, titl
   };
 
   return (
-    <div className="relative overflow-hidden rounded-2xl bg-gradient-to-br from-[#221719] via-[#2E1F22] to-[#3B262B] text-white p-4 border border-[#C89B54]/30 shadow-md">
+    <div className="relative overflow-hidden rounded-2xl bg-gradient-to-br from-[#171824] via-[#1C1722] to-[#28151D] text-white p-4 border border-white/10 shadow-lg">
       <audio
         ref={audioRef}
         src={resolvedMediaUrl}
@@ -91,21 +94,21 @@ export const MusicPlayerCard: React.FC<MusicPlayerCardProps> = ({ mediaUrl, titl
           type="button"
           onClick={togglePlay}
           aria-label={isPlaying ? 'Pauza' : 'Ijro etish'}
-          className="relative w-14 h-14 rounded-2xl shrink-0 bg-[#1A1113] border border-[#C89B54]/40 flex items-center justify-center overflow-hidden group hover:border-[#C89B54] transition-all cursor-pointer"
+          className="relative w-14 h-14 rounded-2xl shrink-0 bg-[#101118] border border-amber-400/30 flex items-center justify-center overflow-hidden group hover:border-rose-500 transition-all cursor-pointer"
         >
           {resolvedCoverUrl ? (
             <img src={resolvedCoverUrl} alt={title || 'Musiqa'} className="w-full h-full object-cover opacity-55" />
           ) : (
             <div
-              className={`w-10 h-10 rounded-full border-2 border-dashed border-[#C89B54]/70 flex items-center justify-center ${
+              className={`w-10 h-10 rounded-full border-2 border-dashed border-amber-400/60 flex items-center justify-center ${
                 isPlaying ? 'animate-spin' : ''
               }`}
               style={{ animationDuration: '4s' }}
             >
-              <Music className="w-4 h-4 text-[#C89B54]" />
+              <Music className="w-4 h-4 text-amber-400" />
             </div>
           )}
-          <span className="absolute inset-0 bg-black/35 flex items-center justify-center">
+          <span className="absolute inset-0 bg-black/40 flex items-center justify-center">
             {isPlaying ? (
               <Pause className="w-5 h-5 text-white fill-white" />
             ) : (
@@ -117,17 +120,34 @@ export const MusicPlayerCard: React.FC<MusicPlayerCardProps> = ({ mediaUrl, titl
         <div className="flex-1 min-w-0">
           <div className="flex items-center justify-between gap-2">
             <div className="min-w-0">
-              <p className="font-editorial text-lg font-bold text-[#FAF4F2] truncate leading-tight">
+              <p className="font-editorial text-lg font-bold text-zinc-100 truncate leading-tight">
                 {title || 'Musiqiy trek'}
               </p>
-              <p className="text-[11px] text-[#E4C28E] truncate flex items-center gap-1 mt-0.5">
+              <p className="text-[11px] text-amber-300/90 truncate flex items-center gap-1 mt-0.5">
                 <Volume2 className="w-3 h-3 shrink-0" />
-                {artist || 'Alov.uz Audio'}
+                <span>{artist || 'Alov.uz Audio'}</span>
+                <span className="text-zinc-500">·</span>
+                <span className="font-mono text-[10px] text-emerald-400 uppercase">MP3</span>
               </p>
             </div>
-            <span className="text-[11px] text-white/75 tabular-nums shrink-0">
-              {formatSec(currentTime)} / {duration ? formatSec(duration) : '--:--'}
-            </span>
+
+            <div className="flex items-center gap-2 shrink-0">
+              <span className="text-[11px] font-mono text-zinc-400 tabular-nums">
+                {formatSec(currentTime)} / {duration ? formatSec(duration) : '--:--'}
+              </span>
+              {resolvedMediaUrl && !loadError && (
+                <a
+                  href={downloadHref}
+                  download={downloadFileName}
+                  data-testid="music-mp3-download-btn"
+                  title="MP3 faylni yuklab olish"
+                  className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-white/10 hover:bg-rose-600 border border-white/10 text-[10.5px] font-bold text-zinc-100 transition-colors cursor-pointer"
+                >
+                  <Download className="w-3.5 h-3.5" />
+                  <span className="hidden sm:inline">MP3</span>
+                </a>
+              )}
+            </div>
           </div>
 
           <input
@@ -142,10 +162,10 @@ export const MusicPlayerCard: React.FC<MusicPlayerCardProps> = ({ mediaUrl, titl
                 setCurrentTime(val);
               }
             }}
-            className="w-full mt-2.5 accent-[#C89B54] h-1.5 bg-white/15 rounded-lg cursor-pointer"
+            className="w-full mt-2.5 accent-[#E11D48] h-1.5 bg-white/15 rounded-lg cursor-pointer"
           />
           {loadError && (
-            <p className="text-[10px] text-rose-200 mt-1">Audio manbasini yuklab bo'lmadi</p>
+            <p className="text-[10px] text-rose-300 mt-1">Audio manbasini yuklab bo'lmadi</p>
           )}
         </div>
       </div>
@@ -199,7 +219,6 @@ export const PostsFeed: React.FC<PostsFeedProps> = ({
   const [uploadingMedia, setUploadingMedia] = useState(false);
   const [publishing, setPublishing] = useState(false);
   const [draftError, setDraftError] = useState('');
-  const [selectedPresetId, setSelectedPresetId] = useState<string | null>(null);
 
   // Comments State
   const [commentInputs, setCommentInputs] = useState<Record<string, string>>({});
@@ -234,7 +253,6 @@ export const PostsFeed: React.FC<PostsFeedProps> = ({
     setLinkInputText('');
     setShowLinkInput(false);
     setDraftError('');
-    setSelectedPresetId(null);
   };
 
   const handleApplyLink = async (urlToParse: string) => {
@@ -280,6 +298,47 @@ export const PostsFeed: React.FC<PostsFeedProps> = ({
         return;
       } catch {
         setDraftError("Video havolasini yuklab olishda server bilan aloqa uzildi.");
+        return;
+      } finally {
+        setUploadingMedia(false);
+      }
+    }
+
+    if (draftType === 'music' && !raw.startsWith('/api/media/') && !raw.startsWith('blob:') && !raw.startsWith('data:')) {
+      setUploadingMedia(true);
+      try {
+        const res = await fetch(getApiUrl('/api/media/import-audio-url'), {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ url: parsed.normalizedUrl || raw }),
+        });
+        const data = await res.json();
+        if (!res.ok || !data?.success) {
+          setDraftError(
+            data?.error ||
+              "Havoladan MP3 audio ajratib bo'lmadi. Boshqa havola kiriting yoki qurilmadan audio yuklang."
+          );
+          return;
+        }
+        if (data.mode === 'embed' && data.embedUrl) {
+          setMediaUrl(data.url || parsed.normalizedUrl || raw);
+          setEmbedUrl(data.embedUrl);
+          setMediaProvider(data.provider || parsed.provider || 'direct');
+          return;
+        }
+        if (!data.url) {
+          setDraftError("MP3 fayl yaratilmadi. Boshqa havola sinab ko'ring.");
+          return;
+        }
+        setMediaUrl(data.url);
+        setEmbedUrl('');
+        setMediaProvider('direct');
+        if (!audioTitle && data.title) setAudioTitle(data.title);
+        if (!audioArtist && data.artist) setAudioArtist(data.artist);
+        if (onNotify) onNotify('Video/audio MP3 formatida yuklandi');
+        return;
+      } catch {
+        setDraftError("Havolani MP3 ga aylantirishda server bilan aloqa uzildi.");
         return;
       } finally {
         setUploadingMedia(false);
@@ -343,16 +402,6 @@ export const PostsFeed: React.FC<PostsFeedProps> = ({
     }
   };
 
-  const handleSelectCuratedTrack = (track: MusicCatalogTrack) => {
-    setSelectedPresetId(track.id);
-    setMediaUrl(track.audioUrl);
-    setEmbedUrl('');
-    setMediaProvider('direct');
-    setAudioTitle(track.title);
-    setAudioArtist(track.artist);
-    setDraftError('');
-  };
-
   const handlePublishPost = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!currentUser) {
@@ -400,7 +449,7 @@ export const PostsFeed: React.FC<PostsFeedProps> = ({
       onPostCreated(data.post);
       resetComposerState();
       setShowComposeModal(false);
-      if (onNotify) onNotify('Postingiz muvaffaqiyatli joylandi!');
+      if (onNotify) onNotify('Postingiz muvaffaqiyatli joylandi');
     } catch {
       setDraftError('Post joylashda xatolik yuz berdi.');
     } finally {
@@ -510,8 +559,10 @@ export const PostsFeed: React.FC<PostsFeedProps> = ({
 
       {/* Floating Action Button (+) for Post Creation */}
       {allowCompose && (
-        <button
+        <motion.button
           type="button"
+          whileHover={{ scale: 1.06 }}
+          whileTap={{ scale: 0.94 }}
           onClick={() => {
             if (!currentUser) {
               onOpenAuth();
@@ -521,451 +572,438 @@ export const PostsFeed: React.FC<PostsFeedProps> = ({
           }}
           data-testid="open-compose-modal-btn"
           aria-label="Yangi post joylash"
-          className="fixed bottom-20 sm:bottom-24 right-5 sm:right-8 z-40 w-14 h-14 rounded-full bg-gradient-to-tr from-[#A62433] via-[#C93545] to-[#E35465] text-white shadow-[0_10px_30px_rgba(201,53,69,0.45)] hover:shadow-[0_14px_36px_rgba(201,53,69,0.6)] flex items-center justify-center transition-all duration-200 hover:scale-105 active:scale-95 border-2 border-white/50 cursor-pointer group"
+          className="fixed bottom-20 sm:bottom-24 right-5 sm:right-8 z-40 w-14 h-14 rounded-full bg-gradient-to-tr from-[#BE123C] via-[#E11D48] to-[#FB7185] text-white shadow-[0_12px_32px_rgba(225,29,72,0.45)] flex items-center justify-center border border-white/25 cursor-pointer group"
         >
           <Plus className="w-7 h-7 stroke-[2.5] group-hover:rotate-90 transition-transform duration-200" />
-        </button>
+        </motion.button>
       )}
 
       {/* Post Compose Modal Dialog */}
-      {showComposeModal && (
-        <div
-          className="fixed inset-0 z-[150] bg-[#1A1113]/70 backdrop-blur-md flex items-center justify-center p-3 sm:p-4 animate-in fade-in duration-200"
-          onClick={() => setShowComposeModal(false)}
-          data-testid="compose-modal-backdrop"
-        >
-          <div
-            className="bg-[#FFFFFF] w-full max-w-xl rounded-3xl shadow-2xl border border-[#F2E8E6] overflow-hidden flex flex-col max-h-[92vh] animate-in zoom-in-95 duration-200"
-            onClick={(e) => e.stopPropagation()}
-            data-testid="post-compose-modal"
+      <AnimatePresence>
+        {showComposeModal && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            transition={{ duration: 0.18 }}
+            className="fixed inset-0 z-[150] bg-black/75 backdrop-blur-md flex items-center justify-center p-3 sm:p-4"
+            onClick={() => setShowComposeModal(false)}
+            data-testid="compose-modal-backdrop"
           >
-            {/* Modal Header */}
-            <div className="px-5 py-4 border-b border-[#F2E8E6] flex items-center justify-between bg-gradient-to-r from-[#FFF5F6] via-white to-[#FDFBF9]">
-              <div className="flex items-center gap-3">
-                <div className="w-10 h-10 rounded-2xl bg-[#FDF2F3] border border-[#F2D5D9] flex items-center justify-center text-[#C93545] shadow-xs">
-                  <Sparkles className="w-5 h-5" />
+            <motion.div
+              initial={{ opacity: 0, scale: 0.96, y: 12 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.96, y: 10 }}
+              transition={{ duration: 0.22, ease: [0.16, 1, 0.3, 1] }}
+              className="bg-[#11131B] w-full max-w-xl rounded-[28px] shadow-[0_30px_90px_rgba(0,0,0,0.8)] border border-white/10 overflow-hidden flex flex-col max-h-[92vh] text-zinc-100"
+              onClick={(e) => e.stopPropagation()}
+              data-testid="post-compose-modal"
+            >
+              {/* Modal Header */}
+              <div className="px-5 py-4 border-b border-white/[0.08] flex items-center justify-between bg-[#151822]">
+                <div className="flex items-center gap-3">
+                  <div className="w-10 h-10 rounded-2xl bg-rose-500/15 border border-rose-500/30 flex items-center justify-center text-rose-400">
+                    <Sparkles className="w-5 h-5" />
+                  </div>
+                  <div>
+                    <h3 className="font-editorial text-xl font-bold text-white leading-tight">Yangi post joylash</h3>
+                    <p className="text-[11px] text-zinc-400">Rasm, video, MP3 musiqa yoki fikringizni ulashing</p>
+                  </div>
                 </div>
-                <div>
-                  <h3 className="font-editorial text-xl font-bold text-[#221719] leading-tight">Yangi post joylash</h3>
-                  <p className="text-[11px] text-[#837275]">Rasm, universal video, musiqa yoki fikringizni ulashing</p>
-                </div>
-              </div>
-              <button
-                type="button"
-                onClick={() => setShowComposeModal(false)}
-                aria-label="Yopish"
-                data-testid="compose-modal-close-btn"
-                className="w-8 h-8 rounded-full bg-[#FAF4F2] hover:bg-[#F2E8E6] text-[#57484B] flex items-center justify-center transition-colors cursor-pointer"
-              >
-                <X className="w-4 h-4" />
-              </button>
-            </div>
-
-            {/* Modal Body / Scrollable Content */}
-            <form onSubmit={handlePublishPost} className="p-5 overflow-y-auto space-y-4 flex-1">
-              {/* Media Type Selector Tabs */}
-              <div className="grid grid-cols-4 gap-1.5 p-1 bg-[#FAF4F2] rounded-2xl border border-[#F2E8E6]">
-                {[
-                  { key: 'photo' as PostMediaType, label: 'Rasm', icon: ImageIcon },
-                  { key: 'video' as PostMediaType, label: 'Video', icon: Video },
-                  { key: 'music' as PostMediaType, label: 'Musiqa', icon: Music },
-                  { key: 'text' as PostMediaType, label: 'Matn', icon: FileText },
-                ].map((m) => {
-                  const Icon = m.icon;
-                  const active = draftType === m.key;
-                  return (
-                    <button
-                      key={m.key}
-                      type="button"
-                      data-testid={`compose-type-${m.key}`}
-                      onClick={() => {
-                        setDraftType(m.key);
-                        setMediaUrl('');
-                        setEmbedUrl('');
-                        setDraftError('');
-                        setShowLinkInput(false);
-                      }}
-                      className={`py-2 px-1 rounded-xl text-xs font-bold flex flex-col sm:flex-row items-center justify-center gap-1.5 transition-all cursor-pointer ${
-                        active
-                          ? 'bg-[#C93545] text-white shadow-sm'
-                          : 'text-[#6B5B5E] hover:text-[#221719] hover:bg-white/60'
-                      }`}
-                    >
-                      <Icon className="w-4 h-4" />
-                      <span>{m.label}</span>
-                    </button>
-                  );
-                })}
+                <button
+                  type="button"
+                  onClick={() => setShowComposeModal(false)}
+                  aria-label="Yopish"
+                  data-testid="compose-modal-close-btn"
+                  className="w-8 h-8 rounded-full bg-white/[0.06] hover:bg-white/15 text-zinc-300 hover:text-white flex items-center justify-center transition-colors cursor-pointer"
+                >
+                  <X className="w-4 h-4" />
+                </button>
               </div>
 
-              {/* Caption Textarea */}
-              <div className="space-y-1">
-                <label className="text-[11px] font-bold text-[#6B5B5E] uppercase tracking-wider">
-                  Post matni / Taassurotingiz
-                </label>
-                <textarea
-                  value={caption}
-                  onChange={(e) => setCaption(e.target.value)}
-                  rows={3}
-                  placeholder={
-                    draftType === 'music'
-                      ? 'Ushbu musiqa sizga qanday kayfiyat beradi? Fikringizni yozing...'
-                      : draftType === 'video'
-                        ? 'Video haqida qisqacha ma\'lumot yoki eslatma yozing...'
-                        : 'Bugungi kayfiyat yoki chiroyli xotirangiz bilan bo\'lishing...'
-                  }
-                  data-testid="post-caption-input"
-                  className="w-full px-3.5 py-2.5 bg-[#FAF4F2] border border-[#F2E8E6] rounded-2xl text-sm text-[#221719] placeholder-[#837275] focus:outline-none focus:border-[#C93545] resize-none leading-relaxed"
-                />
-              </div>
-
-              {/* PHOTO UPLOAD OPTIONS */}
-              {draftType === 'photo' && (
-                <div className="space-y-3">
-                  <label className="text-[11px] font-bold text-[#6B5B5E] uppercase tracking-wider">
-                    Rasm manbasi
-                  </label>
-                  {!mediaUrl ? (
-                    <div className="space-y-2.5">
-                      <div className="grid grid-cols-2 gap-2.5">
-                        <button
-                          type="button"
-                          onClick={() => galleryInputRef.current?.click()}
-                          disabled={uploadingMedia}
-                          data-testid="compose-gallery-btn"
-                          className="p-3.5 rounded-2xl bg-[#FFF5F6] hover:bg-[#FDECEF] border border-[#F2D5D9] text-[#C93545] flex flex-col items-center justify-center gap-1.5 transition cursor-pointer text-center group"
-                        >
-                          <div className="w-10 h-10 rounded-full bg-white flex items-center justify-center shadow-xs text-[#C93545] group-hover:scale-105 transition-transform">
-                            <ImageIcon className="w-5 h-5" />
-                          </div>
-                          <span className="text-xs font-bold">Galereyadan tanlash</span>
-                          <span className="text-[10px] text-[#A62433]/70">Qurilmangizdagi fotosuratlar</span>
-                        </button>
-
-                        <button
-                          type="button"
-                          onClick={() => cameraInputRef.current?.click()}
-                          disabled={uploadingMedia}
-                          data-testid="compose-camera-btn"
-                          className="p-3.5 rounded-2xl bg-[#FAF4F2] hover:bg-[#F2E8E6] border border-[#F2E8E6] text-[#221719] flex flex-col items-center justify-center gap-1.5 transition cursor-pointer text-center group"
-                        >
-                          <div className="w-10 h-10 rounded-full bg-white flex items-center justify-center shadow-xs text-[#221719] group-hover:scale-105 transition-transform">
-                            <Camera className="w-5 h-5" />
-                          </div>
-                          <span className="text-xs font-bold">Kamerada suratga olish</span>
-                          <span className="text-[10px] text-[#6B5B5E]">Jonli lahzani oling</span>
-                        </button>
-                      </div>
-
-                      <div className="pt-1">
-                        <button
-                          type="button"
-                          onClick={() => setShowLinkInput((v) => !v)}
-                          className="text-xs font-bold text-[#C93545] hover:underline flex items-center gap-1.5 cursor-pointer"
-                        >
-                          <LinkIcon className="w-3.5 h-3.5" />
-                          <span>{showLinkInput ? "Havolani yashirish" : "Yoki internetdan rasm havolasi (URL) orqali"}</span>
-                        </button>
-                      </div>
-
-                      {showLinkInput && (
-                        <div className="flex gap-2">
-                          <input
-                            type="url"
-                            value={linkInputText}
-                            onChange={(e) => setLinkInputText(e.target.value)}
-                            placeholder="https://... rasm havolasini kiriting"
-                            data-testid="post-photo-link-input"
-                            className="flex-1 px-3.5 py-2 bg-[#FAF4F2] border border-[#F2E8E6] rounded-xl text-xs text-[#221719] placeholder-[#837275] focus:outline-none focus:border-[#C93545]"
-                          />
-                          <button
-                            type="button"
-                            onClick={() => handleApplyLink(linkInputText)}
-                            className="px-3.5 py-2 rounded-xl bg-[#221719] text-white text-xs font-bold hover:bg-[#36272A] transition cursor-pointer"
-                          >
-                            Tasdiqlash
-                          </button>
-                        </div>
-                      )}
-                    </div>
-                  ) : (
-                    <div className="relative rounded-2xl overflow-hidden border border-[#F2E8E6] bg-[#FAF4F2]">
+              {/* Modal Body */}
+              <form onSubmit={handlePublishPost} className="p-5 overflow-y-auto space-y-4 flex-1">
+                {/* Media Type Selector Tabs */}
+                <div className="grid grid-cols-4 gap-1.5 p-1 bg-[#0A0C12] rounded-2xl border border-white/[0.08]">
+                  {[
+                    { key: 'photo' as PostMediaType, label: 'Rasm', icon: ImageIcon },
+                    { key: 'video' as PostMediaType, label: 'Video', icon: Video },
+                    { key: 'music' as PostMediaType, label: 'Musiqa', icon: Music },
+                    { key: 'text' as PostMediaType, label: 'Matn', icon: FileText },
+                  ].map((m) => {
+                    const Icon = m.icon;
+                    const active = draftType === m.key;
+                    return (
                       <button
+                        key={m.key}
                         type="button"
+                        data-testid={`compose-type-${m.key}`}
                         onClick={() => {
+                          setDraftType(m.key);
                           setMediaUrl('');
                           setEmbedUrl('');
+                          setDraftError('');
+                          setShowLinkInput(false);
                         }}
-                        aria-label="Rasmni o'chirish"
-                        className="absolute top-2.5 right-2.5 z-10 w-8 h-8 rounded-full bg-black/70 hover:bg-black text-white flex items-center justify-center transition cursor-pointer"
+                        className={`py-2 px-1 rounded-xl text-xs font-bold flex flex-col sm:flex-row items-center justify-center gap-1.5 transition-all cursor-pointer ${
+                          active
+                            ? 'bg-[#E11D48] text-white shadow-sm'
+                            : 'text-zinc-400 hover:text-white hover:bg-white/[0.05]'
+                        }`}
                       >
-                        <X className="w-4 h-4" />
+                        <Icon className="w-4 h-4" />
+                        <span>{m.label}</span>
                       </button>
-                      <img src={resolveApiMediaUrl(mediaUrl)} alt="Preview" className="w-full max-h-72 object-cover" />
-                    </div>
-                  )}
+                    );
+                  })}
                 </div>
-              )}
 
-              {/* VIDEO UPLOAD OPTIONS (Universal Social Media Link & Direct Video) */}
-              {draftType === 'video' && (
-                <div className="space-y-3">
-                  <div className="flex items-center justify-between">
-                    <label className="text-[11px] font-bold text-[#6B5B5E] uppercase tracking-wider">
-                      Istalgan ijtimoiy tarmoq havolasi yoki video fayl
+                {/* Caption Textarea */}
+                <div className="space-y-1.5">
+                  <label className="text-[11px] font-semibold text-zinc-400 uppercase tracking-wider">
+                    Post matni / Taassurotingiz
+                  </label>
+                  <textarea
+                    value={caption}
+                    onChange={(e) => setCaption(e.target.value)}
+                    rows={3}
+                    placeholder={
+                      draftType === 'music'
+                        ? 'Ushbu musiqa sizga qanday kayfiyat beradi? Fikringizni yozing...'
+                        : draftType === 'video'
+                          ? "Video haqida qisqacha ma'lumot yozing..."
+                          : "Bugungi kayfiyat yoki xotirangiz bilan bo'lishing..."
+                    }
+                    data-testid="post-caption-input"
+                    className="w-full px-3.5 py-2.5 bg-[#161923] border border-white/10 rounded-2xl text-sm text-zinc-100 placeholder-zinc-500 focus:outline-none focus:border-rose-500 resize-none leading-relaxed"
+                  />
+                </div>
+
+                {/* PHOTO UPLOAD OPTIONS */}
+                {draftType === 'photo' && (
+                  <div className="space-y-3">
+                    <label className="text-[11px] font-semibold text-zinc-400 uppercase tracking-wider">
+                      Rasm manbasi
                     </label>
-                    <span className="text-[10px] text-[#A62433] font-bold">
-                      MP4 / TikTok / Reels / Shorts
-                    </span>
-                  </div>
-
-                  {!mediaUrl ? (
-                    <div className="space-y-3">
-                      <div className="p-3 rounded-2xl bg-[#FAF4F2] border border-[#F2E8E6] space-y-2">
-                        <p className="text-xs font-bold text-[#221719] flex items-center gap-1.5">
-                          <LinkIcon className="w-3.5 h-3.5 text-[#C93545]" />
-                          <span>Video havolasini kiriting (avtomatik yuklanadi):</span>
-                        </p>
-                        <div className="flex gap-2">
-                          <input
-                            type="url"
-                            value={linkInputText}
-                            onChange={(e) => setLinkInputText(e.target.value)}
-                            placeholder="TikTok, Instagram, YouTube, X, Telegram yoki .mp4 havola"
-                            data-testid="post-video-link-input"
-                            className="flex-1 px-3.5 py-2.5 bg-white border border-[#F2E8E6] rounded-xl text-xs text-[#221719] placeholder-[#837275] focus:outline-none focus:border-[#C93545]"
-                          />
+                    {!mediaUrl ? (
+                      <div className="space-y-2.5">
+                        <div className="grid grid-cols-2 gap-2.5">
                           <button
                             type="button"
-                            disabled={uploadingMedia || !linkInputText.trim()}
-                            onClick={() => handleApplyLink(linkInputText)}
-                            data-testid="post-video-link-submit-btn"
-                            className="px-4 py-2.5 rounded-xl bg-gradient-to-r from-[#C93545] to-[#A62433] text-white text-xs font-bold hover:opacity-95 transition cursor-pointer disabled:opacity-50"
+                            onClick={() => galleryInputRef.current?.click()}
+                            disabled={uploadingMedia}
+                            data-testid="compose-gallery-btn"
+                            className="p-3.5 rounded-2xl bg-rose-500/10 hover:bg-rose-500/15 border border-rose-500/25 text-rose-300 flex flex-col items-center justify-center gap-1.5 transition cursor-pointer text-center group"
                           >
-                            {uploadingMedia ? 'Yuklanmoqda...' : 'Yuklash'}
+                            <div className="w-10 h-10 rounded-full bg-rose-500/20 flex items-center justify-center text-rose-400 group-hover:scale-105 transition-transform">
+                              <ImageIcon className="w-5 h-5" />
+                            </div>
+                            <span className="text-xs font-bold text-white">Galereyadan tanlash</span>
+                            <span className="text-[10px] text-zinc-400">Qurilmangizdagi fotosuratlar</span>
+                          </button>
+
+                          <button
+                            type="button"
+                            onClick={() => cameraInputRef.current?.click()}
+                            disabled={uploadingMedia}
+                            data-testid="compose-camera-btn"
+                            className="p-3.5 rounded-2xl bg-[#161923] hover:bg-[#1D212E] border border-white/10 text-zinc-200 flex flex-col items-center justify-center gap-1.5 transition cursor-pointer text-center group"
+                          >
+                            <div className="w-10 h-10 rounded-full bg-white/[0.07] flex items-center justify-center text-zinc-200 group-hover:scale-105 transition-transform">
+                              <Camera className="w-5 h-5" />
+                            </div>
+                            <span className="text-xs font-bold text-white">Kamerada suratga olish</span>
+                            <span className="text-[10px] text-zinc-400">Jonli lahzani oling</span>
                           </button>
                         </div>
-                        <p className="text-[10.5px] text-[#6B5B5E]">
-                          TikTok, Instagram, YouTube, X, Facebook, Telegram va boshqa istalgan tarmoqdagi video avtomatik ajratib olinadi va ramkasiz toza pleyerda ko'rsatiladi.
-                        </p>
-                      </div>
 
-                      <div className="text-center">
+                        <div className="pt-1">
+                          <button
+                            type="button"
+                            onClick={() => setShowLinkInput((v) => !v)}
+                            className="text-xs font-semibold text-rose-400 hover:underline flex items-center gap-1.5 cursor-pointer"
+                          >
+                            <LinkIcon className="w-3.5 h-3.5" />
+                            <span>{showLinkInput ? 'Havolani yashirish' : 'Yoki rasm havolasi (URL) orqali'}</span>
+                          </button>
+                        </div>
+
+                        {showLinkInput && (
+                          <div className="flex gap-2">
+                            <input
+                              type="url"
+                              value={linkInputText}
+                              onChange={(e) => setLinkInputText(e.target.value)}
+                              placeholder="https://... rasm havolasini kiriting"
+                              data-testid="post-photo-link-input"
+                              className="flex-1 px-3.5 py-2 bg-[#161923] border border-white/10 rounded-xl text-xs text-zinc-100 placeholder-zinc-500 focus:outline-none focus:border-rose-500"
+                            />
+                            <button
+                              type="button"
+                              onClick={() => handleApplyLink(linkInputText)}
+                              className="px-3.5 py-2 rounded-xl bg-white/10 hover:bg-white/20 text-white text-xs font-bold transition cursor-pointer"
+                            >
+                              Tasdiqlash
+                            </button>
+                          </div>
+                        )}
+                      </div>
+                    ) : (
+                      <div className="relative rounded-2xl overflow-hidden border border-white/10 bg-[#0A0C12]">
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setMediaUrl('');
+                            setEmbedUrl('');
+                          }}
+                          aria-label="Rasmni o'chirish"
+                          className="absolute top-2.5 right-2.5 z-10 w-8 h-8 rounded-full bg-black/70 hover:bg-black text-white flex items-center justify-center transition cursor-pointer"
+                        >
+                          <X className="w-4 h-4" />
+                        </button>
+                        <img src={resolveApiMediaUrl(mediaUrl)} alt="Preview" className="w-full max-h-72 object-cover" />
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {/* VIDEO UPLOAD OPTIONS */}
+                {draftType === 'video' && (
+                  <div className="space-y-3">
+                    <div className="flex items-center justify-between">
+                      <label className="text-[11px] font-semibold text-zinc-400 uppercase tracking-wider">
+                        Video havolasi yoki fayl
+                      </label>
+                      <span className="text-[10px] text-rose-400 font-semibold">
+                        MP4 · TikTok · Reels · Shorts
+                      </span>
+                    </div>
+
+                    {!mediaUrl ? (
+                      <div className="space-y-3">
+                        <div className="p-3.5 rounded-2xl bg-[#161923] border border-white/10 space-y-2.5">
+                          <p className="text-xs font-bold text-white flex items-center gap-1.5">
+                            <LinkIcon className="w-3.5 h-3.5 text-rose-400" />
+                            <span>Video havolasini kiriting (avtomatik yuklanadi):</span>
+                          </p>
+                          <div className="flex gap-2">
+                            <input
+                              type="url"
+                              value={linkInputText}
+                              onChange={(e) => setLinkInputText(e.target.value)}
+                              placeholder="TikTok, Instagram, YouTube, X, Telegram yoki .mp4 havola"
+                              data-testid="post-video-link-input"
+                              className="flex-1 px-3.5 py-2.5 bg-[#0D0F16] border border-white/10 rounded-xl text-xs text-zinc-100 placeholder-zinc-500 focus:outline-none focus:border-rose-500"
+                            />
+                            <button
+                              type="button"
+                              disabled={uploadingMedia || !linkInputText.trim()}
+                              onClick={() => handleApplyLink(linkInputText)}
+                              data-testid="post-video-link-submit-btn"
+                              className="px-4 py-2.5 rounded-xl bg-[#E11D48] hover:bg-[#BE123C] text-white text-xs font-bold transition cursor-pointer disabled:opacity-50 flex items-center gap-1.5 shrink-0"
+                            >
+                              {uploadingMedia && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
+                              <span>{uploadingMedia ? 'Yuklanmoqda...' : 'Yuklash'}</span>
+                            </button>
+                          </div>
+                          <p className="text-[10.5px] text-zinc-400 leading-relaxed">
+                            Havoladagi video serverda MP4 formatiga keltirilib, toza pleyerda ijro etiladi.
+                          </p>
+                        </div>
+
                         <button
                           type="button"
                           onClick={() => videoInputRef.current?.click()}
                           disabled={uploadingMedia}
                           data-testid="compose-device-video-btn"
-                          className="w-full p-3 rounded-xl bg-white hover:bg-[#FAF4F2] border border-dashed border-[#C93545]/40 text-xs font-bold text-[#C93545] flex items-center justify-center gap-2 transition cursor-pointer"
+                          className="w-full p-3 rounded-xl bg-[#161923] hover:bg-[#1D212E] border border-dashed border-rose-500/35 text-xs font-bold text-rose-300 flex items-center justify-center gap-2 transition cursor-pointer"
                         >
                           <Upload className="w-4 h-4" />
-                          <span>{uploadingMedia ? "Video yuklanmoqda..." : "Yoki telefon/qurilmadan video fayl tanlash"}</span>
+                          <span>{uploadingMedia ? 'Video yuklanmoqda...' : 'Yoki qurilmadan video fayl tanlash'}</span>
                         </button>
                       </div>
-                    </div>
-                  ) : (
-                    <div className="relative overflow-hidden bg-black">
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setMediaUrl('');
-                          setEmbedUrl('');
-                          setLinkInputText('');
-                        }}
-                        aria-label="Videoni o'chirish"
-                        className="absolute top-2.5 right-2.5 z-20 w-8 h-8 rounded-full bg-black/80 hover:bg-black text-white flex items-center justify-center transition cursor-pointer"
-                      >
-                        <X className="w-4 h-4" />
-                      </button>
+                    ) : (
+                      <div className="relative overflow-hidden rounded-2xl bg-black border border-white/10">
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setMediaUrl('');
+                            setEmbedUrl('');
+                            setLinkInputText('');
+                          }}
+                          aria-label="Videoni o'chirish"
+                          className="absolute top-2.5 right-2.5 z-20 w-8 h-8 rounded-full bg-black/80 hover:bg-black text-white flex items-center justify-center transition cursor-pointer"
+                        >
+                          <X className="w-4 h-4" />
+                        </button>
 
-                      {embedUrl && !isDirectPlayableVideoUrl(mediaUrl) ? (
-                        <div className={`relative w-full ${isVerticalVideo ? 'aspect-[9/16] max-w-[280px] mx-auto' : 'aspect-video'}`}>
-                          <iframe
-                            src={embedUrl}
-                            title="Video Preview"
-                            className="w-full h-full border-0"
-                            allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
-                            allowFullScreen
-                          />
-                        </div>
-                      ) : (
-                        <div className={isVerticalVideo ? 'aspect-[9/16] max-w-[260px] mx-auto bg-black overflow-hidden' : 'w-full bg-black'}>
-                          <video
-                            src={resolveApiMediaUrl(mediaUrl)}
-                            controls
-                            playsInline
-                            preload="metadata"
-                            onLoadedMetadata={(e) => {
-                              const v = e.currentTarget;
-                              if (v.videoHeight > v.videoWidth) {
-                                setIsVerticalVideo(true);
-                              }
-                            }}
-                            className={isVerticalVideo ? 'w-full h-full object-contain bg-black block' : 'w-full max-h-72 object-contain bg-black block'}
-                          />
-                        </div>
-                      )}
-                    </div>
-                  )}
-                </div>
-              )}
-
-              {/* MUSIC UPLOAD OPTIONS (Device + 1-Click Curated Catalog) */}
-              {draftType === 'music' && (
-                <div className="space-y-3">
-                  <div className="flex items-center justify-between">
-                    <label className="text-[11px] font-bold text-[#6B5B5E] uppercase tracking-wider">
-                      Musiqa tanlash yoki yuklash
-                    </label>
-                    <span className="text-[10px] text-[#A62433] font-bold">1-bosishda treklar</span>
+                        {embedUrl && !isDirectPlayableVideoUrl(mediaUrl) ? (
+                          <div className={`relative w-full ${isVerticalVideo ? 'aspect-[9/16] max-w-[280px] mx-auto' : 'aspect-video'}`}>
+                            <iframe
+                              src={embedUrl}
+                              title="Video Preview"
+                              className="w-full h-full border-0"
+                              allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
+                              allowFullScreen
+                            />
+                          </div>
+                        ) : (
+                          <div className={isVerticalVideo ? 'aspect-[9/16] max-w-[260px] mx-auto bg-black overflow-hidden' : 'w-full bg-black'}>
+                            <video
+                              src={resolveApiMediaUrl(mediaUrl)}
+                              controls
+                              playsInline
+                              preload="metadata"
+                              onLoadedMetadata={(e) => {
+                                const v = e.currentTarget;
+                                if (v.videoHeight > v.videoWidth) {
+                                  setIsVerticalVideo(true);
+                                }
+                              }}
+                              className={isVerticalVideo ? 'w-full h-full object-contain bg-black block' : 'w-full max-h-72 object-contain bg-black block'}
+                            />
+                          </div>
+                        )}
+                      </div>
+                    )}
                   </div>
+                )}
 
-                  {/* Curated 1-Click Music Catalog */}
-                  <div className="space-y-2">
-                    <p className="text-[11px] text-[#57484B] font-semibold flex items-center gap-1.5">
-                      <Disc className="w-3.5 h-3.5 text-[#C93545]" />
-                      <span>Mashhur treklar (Fayl qidirish shart emas):</span>
-                    </p>
-                    <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
-                      {CURATED_MUSIC_CATALOG.map((track) => {
-                        const isSelected = selectedPresetId === track.id || mediaUrl === track.audioUrl;
-                        return (
-                          <button
-                            key={track.id}
-                            type="button"
-                            onClick={() => handleSelectCuratedTrack(track)}
-                            data-testid={`curated-track-${track.id}`}
-                            className={`p-2.5 rounded-xl border text-left transition-all cursor-pointer relative overflow-hidden flex flex-col justify-between ${
-                              isSelected
-                                ? 'bg-[#FDF2F3] border-[#C93545] shadow-sm'
-                                : 'bg-[#FAF4F2] border-[#F2E8E6] hover:border-[#C93545]/40 hover:bg-white'
-                            }`}
-                          >
-                            <div className="flex items-center justify-between gap-1">
-                              <p className="text-xs font-bold text-[#221719] truncate">{track.title}</p>
-                              {isSelected && <CheckCircle2 className="w-3.5 h-3.5 text-[#C93545] shrink-0" />}
-                            </div>
-                            <p className="text-[10px] text-[#837275] truncate mt-0.5">{track.artist}</p>
-                            <div className="flex items-center justify-between mt-1 text-[9px] text-[#A62433] font-bold">
-                              <span>{track.genre}</span>
-                              <span className="tabular-nums">{track.durationLabel}</span>
-                            </div>
-                          </button>
-                        );
-                      })}
+                {/* MUSIC UPLOAD OPTIONS (Video/Audio Link -> MP3 Extraction + Device Upload) */}
+                {draftType === 'music' && (
+                  <div className="space-y-3" data-testid="compose-music-panel">
+                    <div className="flex items-center justify-between">
+                      <label className="text-[11px] font-semibold text-zinc-400 uppercase tracking-wider">
+                        Havoladan MP3 yuklash yoki audio fayl
+                      </label>
+                      <span className="text-[10px] font-mono font-bold text-emerald-400">
+                        MP3 Konverter
+                      </span>
                     </div>
-                  </div>
 
-                  {/* Device Audio Upload or URL */}
-                  <div className="pt-2 flex flex-wrap items-center gap-2">
+                    {/* Video or Audio Link to MP3 Converter Box */}
+                    <div className="p-3.5 rounded-2xl bg-[#161923] border border-white/10 space-y-2.5">
+                      <p className="text-xs font-bold text-white flex items-center gap-1.5">
+                        <LinkIcon className="w-3.5 h-3.5 text-rose-400" />
+                        <span>Video yoki audio havolasini kiriting (MP3 ga aylantiriladi):</span>
+                      </p>
+                      <div className="flex gap-2">
+                        <input
+                          type="url"
+                          value={linkInputText}
+                          onChange={(e) => setLinkInputText(e.target.value)}
+                          placeholder="YouTube, TikTok, Instagram, Telegram yoki .mp4/.mp3 havola"
+                          data-testid="post-audio-link-input"
+                          className="flex-1 px-3.5 py-2.5 bg-[#0D0F16] border border-white/10 rounded-xl text-xs text-zinc-100 placeholder-zinc-500 focus:outline-none focus:border-rose-500"
+                        />
+                        <button
+                          type="button"
+                          disabled={uploadingMedia || !linkInputText.trim()}
+                          onClick={() => handleApplyLink(linkInputText)}
+                          data-testid="post-audio-link-submit-btn"
+                          className="px-4 py-2.5 rounded-xl bg-[#E11D48] hover:bg-[#BE123C] text-white text-xs font-bold transition cursor-pointer disabled:opacity-50 flex items-center gap-1.5 shrink-0"
+                        >
+                          {uploadingMedia && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
+                          <span>{uploadingMedia ? 'MP3...' : 'MP3 yuklash'}</span>
+                        </button>
+                      </div>
+                      <p className="text-[10.5px] text-zinc-400 leading-relaxed">
+                        Havoladagi video ovozi serverda avtomatik <strong className="text-zinc-200">.mp3</strong> formatiga o'giriladi.
+                      </p>
+                    </div>
+
+                    {/* Device Audio Upload */}
                     <button
                       type="button"
                       onClick={() => audioInputRef.current?.click()}
                       disabled={uploadingMedia}
                       data-testid="compose-device-audio-btn"
-                      className="px-3.5 py-2 rounded-xl bg-white hover:bg-[#FAF4F2] border border-dashed border-[#C93545]/40 text-xs font-bold text-[#C93545] flex items-center gap-1.5 transition cursor-pointer"
+                      className="w-full px-3.5 py-2.5 rounded-xl bg-[#161923] hover:bg-[#1D212E] border border-dashed border-rose-500/35 text-xs font-bold text-rose-300 flex items-center justify-center gap-2 transition cursor-pointer"
                     >
                       <Upload className="w-3.5 h-3.5" />
-                      <span>{uploadingMedia ? "Yuklanmoqda..." : "Qurilmadan audio tanlash"}</span>
+                      <span>{uploadingMedia ? 'Audio tayyorlanmoqda...' : 'Yoki qurilmadan audio fayl tanlash'}</span>
                     </button>
 
-                    <button
-                      type="button"
-                      onClick={() => setShowLinkInput((v) => !v)}
-                      className="px-3 py-2 rounded-xl bg-[#FAF4F2] hover:bg-[#F2E8E6] text-xs font-semibold text-[#57484B] flex items-center gap-1.5 transition cursor-pointer"
-                    >
-                      <LinkIcon className="w-3.5 h-3.5" />
-                      <span>SoundCloud / URL</span>
-                    </button>
+                    {/* Audio Title & Artist */}
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 pt-1">
+                      <div>
+                        <label className="text-[10px] font-semibold text-zinc-400 block mb-1">Musiqa nomi</label>
+                        <input
+                          type="text"
+                          value={audioTitle}
+                          onChange={(e) => setAudioTitle(e.target.value)}
+                          placeholder="Trek nomi (masalan: Bahor)"
+                          data-testid="post-audio-title-input"
+                          className="w-full px-3.5 py-2 bg-[#161923] border border-white/10 rounded-xl text-xs text-zinc-100 placeholder-zinc-500 focus:outline-none focus:border-rose-500"
+                        />
+                      </div>
+                      <div>
+                        <label className="text-[10px] font-semibold text-zinc-400 block mb-1">Ijrochi ismi</label>
+                        <input
+                          type="text"
+                          value={audioArtist}
+                          onChange={(e) => setAudioArtist(e.target.value)}
+                          placeholder="Ijrochi (masalan: Sevara)"
+                          data-testid="post-audio-artist-input"
+                          className="w-full px-3.5 py-2 bg-[#161923] border border-white/10 rounded-xl text-xs text-zinc-100 placeholder-zinc-500 focus:outline-none focus:border-rose-500"
+                        />
+                      </div>
+                    </div>
+
+                    {/* Audio Preview Card */}
+                    {mediaUrl && (
+                      <div className="pt-2 space-y-1.5">
+                        <div className="flex items-center justify-between">
+                          <p className="text-[10.5px] font-semibold text-zinc-400">Tayyor MP3 pleyer:</p>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setMediaUrl('');
+                              setEmbedUrl('');
+                            }}
+                            className="text-[10.5px] font-semibold text-rose-400 hover:underline cursor-pointer"
+                          >
+                            Olib tashlash
+                          </button>
+                        </div>
+                        <MusicPlayerCard mediaUrl={mediaUrl} title={audioTitle} artist={audioArtist} />
+                      </div>
+                    )}
                   </div>
+                )}
 
-                  {showLinkInput && (
-                    <div className="flex gap-2">
-                      <input
-                        type="url"
-                        value={linkInputText}
-                        onChange={(e) => setLinkInputText(e.target.value)}
-                        placeholder="https://... musiqa / audio havolasi"
-                        data-testid="post-audio-link-input"
-                        className="flex-1 px-3.5 py-2 bg-[#FAF4F2] border border-[#F2E8E6] rounded-xl text-xs text-[#221719] placeholder-[#837275] focus:outline-none focus:border-[#C93545]"
-                      />
-                      <button
-                        type="button"
-                        onClick={() => handleApplyLink(linkInputText)}
-                        className="px-3.5 py-2 rounded-xl bg-[#221719] text-white text-xs font-bold hover:bg-[#36272A] transition cursor-pointer"
-                      >
-                        Qo'shish
-                      </button>
-                    </div>
-                  )}
+                {/* Draft Error Message */}
+                {draftError && (
+                  <p className="text-xs font-semibold text-rose-300 bg-rose-500/15 px-3.5 py-2.5 rounded-2xl border border-rose-500/30">
+                    {draftError}
+                  </p>
+                )}
 
-                  {/* Audio Title & Artist */}
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 pt-1">
-                    <div>
-                      <label className="text-[10px] font-bold text-[#837275] block mb-1">Musiqa nomi</label>
-                      <input
-                        type="text"
-                        value={audioTitle}
-                        onChange={(e) => setAudioTitle(e.target.value)}
-                        placeholder="Trek nomi (masalan: Bahor)"
-                        data-testid="post-audio-title-input"
-                        className="w-full px-3.5 py-2 bg-[#FAF4F2] border border-[#F2E8E6] rounded-xl text-xs text-[#221719] placeholder-[#837275] focus:outline-none focus:border-[#C93545]"
-                      />
-                    </div>
-                    <div>
-                      <label className="text-[10px] font-bold text-[#837275] block mb-1">Ijrochi ismi</label>
-                      <input
-                        type="text"
-                        value={audioArtist}
-                        onChange={(e) => setAudioArtist(e.target.value)}
-                        placeholder="Ijrochi (masalan: Sevara Nazrxon)"
-                        data-testid="post-audio-artist-input"
-                        className="w-full px-3.5 py-2 bg-[#FAF4F2] border border-[#F2E8E6] rounded-xl text-xs text-[#221719] placeholder-[#837275] focus:outline-none focus:border-[#C93545]"
-                      />
-                    </div>
-                  </div>
+                {/* Modal Footer Buttons */}
+                <div className="pt-3 border-t border-white/[0.08] flex items-center justify-between gap-3">
+                  <button
+                    type="button"
+                    onClick={() => setShowComposeModal(false)}
+                    className="px-4 py-2.5 rounded-xl bg-white/[0.06] hover:bg-white/[0.12] text-xs font-bold text-zinc-300 transition cursor-pointer"
+                  >
+                    Bekor qilish
+                  </button>
 
-                  {/* Audio Preview Card */}
-                  {mediaUrl && (
-                    <div className="pt-2">
-                      <p className="text-[10.5px] font-bold text-[#6B5B5E] mb-1.5">Musiqa ijrosi tekshiruvi:</p>
-                      <MusicPlayerCard mediaUrl={mediaUrl} title={audioTitle} artist={audioArtist} />
-                    </div>
-                  )}
+                  <button
+                    type="submit"
+                    disabled={publishing || uploadingMedia}
+                    data-testid="publish-post-btn"
+                    className="px-6 py-2.5 rounded-xl bg-[#E11D48] hover:bg-[#BE123C] text-white text-xs font-bold shadow-lg shadow-rose-950/50 transition-all disabled:opacity-50 flex items-center gap-2 cursor-pointer"
+                  >
+                    <Send className="w-3.5 h-3.5" />
+                    <span>{publishing ? 'Joylanmoqda...' : 'Postni joylash'}</span>
+                  </button>
                 </div>
-              )}
-
-              {/* Draft Error Message */}
-              {draftError && (
-                <p className="text-xs font-semibold text-[#C93545] bg-[#FDF2F3] px-3.5 py-2.5 rounded-2xl border border-[#F2D5D9]">
-                  {draftError}
-                </p>
-              )}
-
-              {/* Modal Footer Buttons */}
-              <div className="pt-3 border-t border-[#F2E8E6] flex items-center justify-between gap-3">
-                <button
-                  type="button"
-                  onClick={() => setShowComposeModal(false)}
-                  className="px-4 py-2.5 rounded-xl bg-[#FAF4F2] hover:bg-[#F2E8E6] text-xs font-bold text-[#57484B] transition cursor-pointer"
-                >
-                  Bekor qilish
-                </button>
-
-                <button
-                  type="submit"
-                  disabled={publishing || uploadingMedia}
-                  data-testid="publish-post-btn"
-                  className="px-6 py-2.5 rounded-xl bg-gradient-to-r from-[#C93545] to-[#A62433] text-white text-xs font-bold shadow-md hover:opacity-95 transition-opacity disabled:opacity-50 flex items-center gap-2 cursor-pointer"
-                >
-                  <Send className="w-3.5 h-3.5" />
-                  <span>{publishing ? 'Joylanmoqda...' : 'Postni joylash'}</span>
-                </button>
-              </div>
-            </form>
-          </div>
-        </div>
-      )}
+              </form>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
 
       {/* Filter Tabs for Global Feed */}
       {!authorUid && (
@@ -983,8 +1021,8 @@ export const PostsFeed: React.FC<PostsFeedProps> = ({
               onClick={() => setFilterType(tab.key)}
               className={`px-3.5 py-1.5 rounded-xl text-xs font-bold transition-all shrink-0 border cursor-pointer ${
                 filterType === tab.key
-                  ? 'bg-[#221719] text-white border-[#221719] shadow-xs'
-                  : 'bg-[#FFFFFF] text-[#57484B] border-[#F2E8E6] hover:border-[#C93545]/40 hover:bg-[#FAF4F2]'
+                  ? 'bg-[#E11D48] text-white border-[#E11D48] shadow-sm'
+                  : 'bg-[#141620] text-zinc-400 border-white/[0.08] hover:text-white hover:border-white/20'
               }`}
             >
               {tab.label}
@@ -995,15 +1033,15 @@ export const PostsFeed: React.FC<PostsFeedProps> = ({
 
       {/* Empty State */}
       {visiblePosts.length === 0 ? (
-        <div className="bg-[#FFFFFF] rounded-3xl border border-[#F2E8E6] p-10 text-center space-y-3">
-          <div className="w-14 h-14 rounded-2xl bg-[#FAF4F2] text-[#C93545] flex items-center justify-center mx-auto shadow-xs">
+        <div className="bg-[#12141E] rounded-3xl border border-white/[0.08] p-10 text-center space-y-3">
+          <div className="w-14 h-14 rounded-2xl bg-rose-500/15 border border-rose-500/25 text-rose-400 flex items-center justify-center mx-auto">
             <Sparkles className="w-6 h-6" />
           </div>
-          <p className="font-editorial text-xl font-bold text-[#221719]">Hozircha postlar yo'q</p>
-          <p className="text-xs text-[#837275] max-w-sm mx-auto leading-relaxed">
+          <p className="font-editorial text-xl font-bold text-white">Hozircha postlar yo'q</p>
+          <p className="text-xs text-zinc-400 max-w-sm mx-auto leading-relaxed">
             {authorUid
               ? 'Bu foydalanuvchi hali rasm, video yoki musiqa joylamagan.'
-              : 'Pastdagi "+" tugmasini bosib, birinchi bo\'lib chiroyli rasm, video yoki musiqa ulashing!'}
+              : 'Pastdagi "+" tugmasini bosib, birinchi bo\'lib rasm, video yoki MP3 musiqa ulashing.'}
           </p>
           {allowCompose && !authorUid && (
             <button
@@ -1012,7 +1050,7 @@ export const PostsFeed: React.FC<PostsFeedProps> = ({
                 if (!currentUser) onOpenAuth();
                 else setShowComposeModal(true);
               }}
-              className="inline-flex items-center gap-2 px-5 py-2.5 rounded-xl bg-gradient-to-r from-[#C93545] to-[#A62433] text-white text-xs font-bold shadow hover:opacity-95 transition cursor-pointer"
+              className="inline-flex items-center gap-2 px-5 py-2.5 rounded-xl bg-[#E11D48] hover:bg-[#BE123C] text-white text-xs font-bold shadow transition cursor-pointer"
             >
               <Plus className="w-4 h-4" />
               <span>Yangi post qo'shish</span>
@@ -1021,7 +1059,7 @@ export const PostsFeed: React.FC<PostsFeedProps> = ({
         </div>
       ) : (
         <div className="space-y-4">
-          {visiblePosts.map((post) => {
+          {visiblePosts.map((post, idx) => {
             const liveAuthor =
               usersList.find((u) => u.uid === post.authorUid || (post.authorId && u.id === post.authorId)) ||
               (currentUser && (currentUser.uid === post.authorUid || currentUser.id === post.authorId) ? currentUser : null);
@@ -1029,7 +1067,7 @@ export const PostsFeed: React.FC<PostsFeedProps> = ({
             const authorAvatar = resolveApiMediaUrl(
               liveAuthor?.avatar ||
                 post.authorAvatar ||
-                `https://ui-avatars.com/api/?name=${encodeURIComponent(liveAuthor?.name || post.authorName || 'U')}&background=FDF2F3&color=C93545`
+                `https://ui-avatars.com/api/?name=${encodeURIComponent(liveAuthor?.name || post.authorName || 'U')}&background=1C1F2B&color=F4F4F6`
             );
             const authorName = liveAuthor?.name || post.authorName || 'Foydalanuvchi';
             const authorUsername = liveAuthor?.username || post.authorUsername || '';
@@ -1049,7 +1087,6 @@ export const PostsFeed: React.FC<PostsFeedProps> = ({
                   currentUser.id === 'ALOV-ADMIN')
             );
 
-            // Universal embed detection for posts
             const resolvedEmbedUrl =
               post.embedUrl ||
               (post.type === 'video' && post.mediaUrl ? parseMediaLink(post.mediaUrl, 'video').embedUrl : undefined);
@@ -1060,10 +1097,13 @@ export const PostsFeed: React.FC<PostsFeedProps> = ({
             );
 
             return (
-              <article
+              <motion.article
                 key={post.id}
+                initial={{ opacity: 0, y: 14 }}
+                animate={{ opacity: 1, y: 0 }}
+                transition={{ duration: 0.28, delay: Math.min(idx * 0.04, 0.24), ease: [0.16, 1, 0.3, 1] }}
                 data-testid={`post-card-${post.id}`}
-                className="bg-[#FFFFFF] rounded-3xl border border-[#F2E8E6] shadow-subtle overflow-hidden"
+                className="bg-[#12141E] rounded-3xl border border-white/[0.08] shadow-subtle overflow-hidden"
               >
                 {/* Author Header */}
                 <div className="px-4 sm:px-5 pt-4 pb-3 flex items-center justify-between gap-3">
@@ -1093,36 +1133,36 @@ export const PostsFeed: React.FC<PostsFeedProps> = ({
                           const fallback = e.currentTarget.nextElementSibling as HTMLElement | null;
                           if (fallback) fallback.style.display = 'flex';
                         }}
-                        className="w-10 h-10 rounded-full object-cover border border-[#F2E8E6] group-hover:scale-105 transition-transform"
+                        className="w-10 h-10 rounded-full object-cover border border-white/15 group-hover:scale-105 transition-transform"
                       />
                       <div
-                        className="hidden w-10 h-10 rounded-full bg-[#FAF4F2] text-[#C93545] font-editorial font-black text-sm items-center justify-center border border-[#F2D5D9]"
+                        className="hidden w-10 h-10 rounded-full bg-[#1C1F2B] text-rose-400 font-editorial font-black text-sm items-center justify-center border border-white/10"
                         aria-hidden="true"
                       >
                         {authorName.charAt(0).toUpperCase()}
                       </div>
                       <span
-                        className={`absolute bottom-0 right-0 w-2.5 h-2.5 rounded-full border-2 border-white ${
-                          authorOnline ? 'bg-emerald-500' : 'bg-slate-400'
+                        className={`absolute bottom-0 right-0 w-2.5 h-2.5 rounded-full border-2 border-[#12141E] ${
+                          authorOnline ? 'bg-emerald-500' : 'bg-zinc-500'
                         }`}
                       />
                     </div>
                     <div className="min-w-0">
                       <div className="flex items-center gap-1.5 flex-wrap">
-                        <span className="text-sm font-bold text-[#221719] group-hover:text-[#C93545] transition-colors truncate">
+                        <span className="text-sm font-bold text-white group-hover:text-rose-400 transition-colors truncate">
                           {authorName}
                         </span>
-                        {authorVerified && <ShieldCheck className="w-3.5 h-3.5 text-emerald-600 shrink-0" />}
+                        {authorVerified && <ShieldCheck className="w-3.5 h-3.5 text-emerald-400 shrink-0" />}
                         {authorUsername && (
-                          <span className="text-[11px] font-semibold text-[#837275] font-mono">
+                          <span className="text-[11px] font-semibold text-zinc-400 font-mono">
                             {formatUsernameDisplay(authorUsername)}
                           </span>
                         )}
                       </div>
-                      <div className="flex items-center gap-1.5 text-[11px] text-[#837275]">
+                      <div className="flex items-center gap-1.5 text-[11px] text-zinc-400">
                         <span>{formatPostTimeUz(post.createdAt)}</span>
                         <span>·</span>
-                        <span className="font-semibold text-[#6B5B5E]">
+                        <span className="font-semibold text-zinc-300">
                           {post.type === 'photo'
                             ? 'Rasm'
                             : post.type === 'video'
@@ -1141,7 +1181,7 @@ export const PostsFeed: React.FC<PostsFeedProps> = ({
                       onClick={() => handleDeletePost(post.id)}
                       aria-label="Postni o'chirish"
                       data-testid={`delete-post-btn-${post.id}`}
-                      className="p-2 rounded-xl text-[#837275] hover:text-[#C93545] hover:bg-[#FDF2F3] transition-colors cursor-pointer"
+                      className="p-2 rounded-xl text-zinc-400 hover:text-rose-400 hover:bg-rose-500/10 transition-colors cursor-pointer"
                     >
                       <Trash2 className="w-4 h-4" />
                     </button>
@@ -1150,7 +1190,7 @@ export const PostsFeed: React.FC<PostsFeedProps> = ({
 
                 {/* Caption */}
                 {post.caption && (
-                  <p className="px-4 sm:px-5 pb-3 text-sm text-[#36272A] leading-relaxed whitespace-pre-line">
+                  <p className="px-4 sm:px-5 pb-3 text-sm text-zinc-200 leading-relaxed whitespace-pre-line">
                     {post.caption}
                   </p>
                 )}
@@ -1161,7 +1201,7 @@ export const PostsFeed: React.FC<PostsFeedProps> = ({
                     <img
                       src={resolveApiMediaUrl(post.mediaUrl)}
                       alt={post.caption || authorName}
-                      className="w-full max-h-[520px] object-cover rounded-2xl border border-[#F2E8E6] bg-[#FAF4F2]"
+                      className="w-full max-h-[520px] object-cover rounded-2xl border border-white/10 bg-[#0A0C12]"
                     />
                   </div>
                 )}
@@ -1250,20 +1290,21 @@ export const PostsFeed: React.FC<PostsFeedProps> = ({
                 )}
 
                 {/* Post Actions: Like & Comments toggle */}
-                <div className="px-4 sm:px-5 py-2.5 border-t border-[#F2E8E6] flex items-center gap-4 bg-[#FDFBF9]">
-                  <button
+                <div className="px-4 sm:px-5 py-2.5 border-t border-white/[0.06] flex items-center gap-4 bg-[#10121B]">
+                  <motion.button
                     type="button"
+                    whileTap={{ scale: 0.92 }}
                     onClick={() => handleToggleLike(post)}
                     data-testid={`like-post-btn-${post.id}`}
                     className={`flex items-center gap-1.5 text-xs font-bold py-1 px-2.5 rounded-xl transition-all cursor-pointer ${
                       isLiked
-                        ? 'text-[#C93545] bg-[#FDF2F3]'
-                        : 'text-[#57484B] hover:text-[#C93545] hover:bg-[#FAF4F2]'
+                        ? 'text-rose-400 bg-rose-500/15'
+                        : 'text-zinc-400 hover:text-rose-400 hover:bg-white/[0.05]'
                     }`}
                   >
-                    <Heart className={`w-4 h-4 ${isLiked ? 'fill-[#C93545] text-[#C93545]' : ''}`} />
+                    <Heart className={`w-4 h-4 ${isLiked ? 'fill-rose-500 text-rose-500' : ''}`} />
                     <span className="tabular-nums">{likes.length}</span>
-                  </button>
+                  </motion.button>
 
                   <button
                     type="button"
@@ -1271,20 +1312,20 @@ export const PostsFeed: React.FC<PostsFeedProps> = ({
                       setExpandedComments((prev) => ({ ...prev, [post.id]: !prev[post.id] }))
                     }
                     data-testid={`toggle-comments-btn-${post.id}`}
-                    className="flex items-center gap-1.5 text-xs font-bold py-1 px-2.5 rounded-xl text-[#57484B] hover:text-[#221719] hover:bg-[#FAF4F2] transition-colors cursor-pointer"
+                    className="flex items-center gap-1.5 text-xs font-bold py-1 px-2.5 rounded-xl text-zinc-400 hover:text-white hover:bg-white/[0.05] transition-colors cursor-pointer"
                   >
                     <MessageCircle className="w-4 h-4" />
                     <span className="tabular-nums">{comments.length} izoh</span>
                   </button>
                 </div>
 
-                {/* Comments Area (Tidy, Refined with @username and Profile Navigation) */}
-                <div className="px-4 sm:px-5 py-3.5 bg-[#FAF4F2]/50 border-t border-[#F2E8E6] space-y-3">
+                {/* Comments Area */}
+                <div className="px-4 sm:px-5 py-3.5 bg-[#0D0F16] border-t border-white/[0.06] space-y-3">
                   {comments.length > 3 && !showAllComments && (
                     <button
                       type="button"
                       onClick={() => setExpandedComments((prev) => ({ ...prev, [post.id]: true }))}
-                      className="text-[11px] font-bold text-[#C93545] hover:underline cursor-pointer"
+                      className="text-[11px] font-bold text-rose-400 hover:underline cursor-pointer"
                     >
                       Barcha {comments.length} ta izohni ko'rish
                     </button>
@@ -1301,7 +1342,7 @@ export const PostsFeed: React.FC<PostsFeedProps> = ({
                         const commentAvatar = resolveApiMediaUrl(
                           commentLiveUser?.avatar ||
                             c.authorAvatar ||
-                            `https://ui-avatars.com/api/?name=${encodeURIComponent(commentLiveUser?.name || c.authorName || 'U')}&background=FDF2F3&color=C93545`
+                            `https://ui-avatars.com/api/?name=${encodeURIComponent(commentLiveUser?.name || c.authorName || 'U')}&background=1C1F2B&color=F4F4F6`
                         );
                         const commentName = commentLiveUser?.name || c.authorName || 'Foydalanuvchi';
                         const commentUsername = commentLiveUser?.username || c.authorUsername || '';
@@ -1310,7 +1351,7 @@ export const PostsFeed: React.FC<PostsFeedProps> = ({
                           <div
                             key={c.id}
                             data-testid={`comment-item-${c.id}`}
-                            className="flex items-start gap-2.5 bg-white p-2.5 sm:p-3 rounded-2xl border border-[#F2E8E6] shadow-xs"
+                            className="flex items-start gap-2.5 bg-[#151822] p-2.5 sm:p-3 rounded-2xl border border-white/[0.06]"
                           >
                             <button
                               type="button"
@@ -1338,10 +1379,10 @@ export const PostsFeed: React.FC<PostsFeedProps> = ({
                                   const fallback = e.currentTarget.nextElementSibling as HTMLElement | null;
                                   if (fallback) fallback.style.display = 'flex';
                                 }}
-                                className="w-8 h-8 rounded-full object-cover border border-[#F2E8E6] group-hover:ring-2 group-hover:ring-[#C93545]/50 transition-all"
+                                className="w-8 h-8 rounded-full object-cover border border-white/10 group-hover:ring-2 group-hover:ring-rose-500/50 transition-all"
                               />
                               <div
-                                className="hidden w-8 h-8 rounded-full bg-[#FAF4F2] text-[#C93545] font-editorial font-black text-xs items-center justify-center border border-[#F2D5D9]"
+                                className="hidden w-8 h-8 rounded-full bg-[#1C1F2B] text-rose-400 font-editorial font-black text-xs items-center justify-center border border-white/10"
                                 aria-hidden="true"
                               >
                                 {commentName.charAt(0).toUpperCase()}
@@ -1364,21 +1405,21 @@ export const PostsFeed: React.FC<PostsFeedProps> = ({
                                     )
                                   }
                                   data-testid={`comment-author-name-${c.id}`}
-                                  className="text-xs font-bold text-[#221719] hover:text-[#C93545] hover:underline transition-colors text-left cursor-pointer"
+                                  className="text-xs font-bold text-white hover:text-rose-400 hover:underline transition-colors text-left cursor-pointer"
                                 >
                                   {commentName}
                                 </button>
                                 {commentUsername && (
-                                  <span className="text-[10px] font-semibold text-[#837275] font-mono">
+                                  <span className="text-[10px] font-semibold text-zinc-400 font-mono">
                                     {formatUsernameDisplay(commentUsername)}
                                   </span>
                                 )}
-                                <span className="text-[10px] text-[#A6979A]">·</span>
-                                <span className="text-[10px] text-[#A6979A]">
+                                <span className="text-[10px] text-zinc-600">·</span>
+                                <span className="text-[10px] text-zinc-500">
                                   {formatPostTimeUz(c.createdAt)}
                                 </span>
                               </div>
-                              <p className="text-xs text-[#36272A] mt-1 leading-relaxed break-words">
+                              <p className="text-xs text-zinc-300 mt-1 leading-relaxed break-words">
                                 {c.text}
                               </p>
                             </div>
@@ -1398,20 +1439,20 @@ export const PostsFeed: React.FC<PostsFeedProps> = ({
                       }
                       placeholder={currentUser ? 'Fikringizni yozing...' : 'Izoh qoldirish uchun tizimga kiring...'}
                       data-testid={`comment-input-${post.id}`}
-                      className="flex-1 px-3.5 py-2.5 bg-white border border-[#F2E8E6] rounded-xl text-xs text-[#221719] placeholder-[#837275] focus:outline-none focus:border-[#C93545] shadow-xs"
+                      className="flex-1 px-3.5 py-2.5 bg-[#151822] border border-white/10 rounded-xl text-xs text-zinc-100 placeholder-zinc-500 focus:outline-none focus:border-rose-500"
                     />
                     <button
                       type="submit"
                       disabled={submittingCommentId === post.id || !(commentInputs[post.id] || '').trim()}
                       data-testid={`comment-submit-${post.id}`}
                       aria-label="Izoh yuborish"
-                      className="px-3.5 py-2.5 rounded-xl bg-gradient-to-r from-[#C93545] to-[#A62433] text-white hover:opacity-95 transition-opacity disabled:opacity-40 flex items-center justify-center shrink-0 cursor-pointer shadow-xs"
+                      className="px-3.5 py-2.5 rounded-xl bg-[#E11D48] hover:bg-[#BE123C] text-white transition-colors disabled:opacity-40 flex items-center justify-center shrink-0 cursor-pointer"
                     >
                       <Send className="w-3.5 h-3.5" />
                     </button>
                   </form>
                 </div>
-              </article>
+              </motion.article>
             );
           })}
         </div>

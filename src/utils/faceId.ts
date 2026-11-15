@@ -215,9 +215,19 @@ export function requiresFaceIdForUser(user: {
   isAdmin?: boolean | null;
   faceId?: { verified?: boolean } | null;
 } | null | undefined): boolean {
-  if (!user) return true;
+  if (!user) return false;
   if (isAdminTelegramUser(user)) return false;
   return !user.faceId?.verified;
+}
+
+export function resolveEffectiveProfileAvatar(user: {
+  avatar?: string | null;
+  faceId?: { verified?: boolean; capturedPhotoUrl?: string | null } | null;
+} | null | undefined): string {
+  if (!user) return '';
+  const facePhoto = String(user.faceId?.capturedPhotoUrl || '').trim();
+  if (facePhoto) return facePhoto;
+  return String(user.avatar || '').trim();
 }
 
 export function formatFaceIdDateUz(isoDate?: string | null): string {

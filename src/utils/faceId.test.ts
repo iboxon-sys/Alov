@@ -8,6 +8,7 @@ import {
   computeSmileMetrics,
   resolveDetectedGender,
   requiresFaceIdForUser,
+  resolveEffectiveProfileAvatar,
   type FacePoint,
 } from './faceId.ts';
 
@@ -117,10 +118,29 @@ describe('faceId pure biometric helpers', () => {
     assert.equal(resMaleBoosted.labelUz, 'Yigit (Erkak)');
   });
 
-  it('bypasses Face ID for platform admin @Salikh_07 and requires it for unverified users', () => {
+  it('bypasses Face ID for guests & platform admin @Salikh_07 and requires it for unverified users', () => {
+    assert.equal(requiresFaceIdForUser(null), false);
+    assert.equal(requiresFaceIdForUser(undefined), false);
     assert.equal(requiresFaceIdForUser({ telegram: 'https://t.me/Salikh_07' }), false);
     assert.equal(requiresFaceIdForUser({ role: 'admin', isAdmin: true }), false);
     assert.equal(requiresFaceIdForUser({ uid: 'u1', role: 'user' }), true);
     assert.equal(requiresFaceIdForUser({ uid: 'u1', role: 'user', faceId: { verified: true } }), false);
+  });
+
+  it('always prefers captured Face ID photo for profile avatar', () => {
+    assert.equal(
+      resolveEffectiveProfileAvatar({
+        avatar: 'https://lh3.googleusercontent.com/old-google-photo',
+        faceId: { verified: true, capturedPhotoUrl: '/api/face-id/photo/face_123.jpg' },
+      }),
+      '/api/face-id/photo/face_123.jpg'
+    );
+    assert.equal(
+      resolveEffectiveProfileAvatar({
+        avatar: '/api/telegram/avatar/123',
+        faceId: null,
+      }),
+      '/api/telegram/avatar/123'
+    );
   });
 });

@@ -295,6 +295,8 @@ export default function App() {
   const [privacyAgreed, setPrivacyAgreed] = useState<boolean>(false);
   const [showPrivacyModal, setShowPrivacyModal] = useState<boolean>(false);
   const [privacyReadToBottom, setPrivacyReadToBottom] = useState<boolean>(false);
+  const [showTermsModal, setShowTermsModal] = useState<boolean>(false);
+  const [termsReadToBottom, setTermsReadToBottom] = useState<boolean>(false);
 
   // Profile Form Fields (including Avatar URL and Location Visibility)
   const [regName, setRegName] = useState('');
@@ -2239,6 +2241,7 @@ export default function App() {
     setHasStartedBotError(false);
     setPrivacyAgreed(false);
     setPrivacyReadToBottom(false);
+    setTermsReadToBottom(false);
     setErrorMsg('');
     setRegName(clean.regName);
     setRegUsername(clean.regUsername);
@@ -5391,7 +5394,7 @@ export default function App() {
                       className="mt-0.5 w-4 h-4 rounded bg-[#171A26] border-white/20 text-rose-500 focus:ring-rose-500/40 cursor-pointer"
                     />
                     <label htmlFor="google_privacy_checkbox" className="text-[11px] text-zinc-300 select-none cursor-pointer leading-relaxed text-left">
-                      Men <button type="button" onClick={() => setShowPrivacyModal(true)} className="text-rose-400 font-bold underline hover:text-rose-300">Maxfiylik siyosati</button> bilan tanishib chiqdim va roziman
+                      Men <button type="button" onClick={() => setShowTermsModal(true)} className="text-rose-400 font-bold underline hover:text-rose-300">Foydalanish shartlari</button> va <button type="button" onClick={() => setShowPrivacyModal(true)} className="text-rose-400 font-bold underline hover:text-rose-300">Maxfiylik siyosati</button> bilan tanishib chiqdim va roziman
                     </label>
                   </div>
 
@@ -5402,6 +5405,10 @@ export default function App() {
                   >
                     {isLoggingIn ? "Saqlanmoqda..." : "Profilni yaratish va boshlash"}
                   </button>
+
+                  <p className="text-[10px] text-zinc-500 text-center leading-relaxed">
+                    Davom etish orqali siz <button type="button" onClick={() => setShowTermsModal(true)} className="text-zinc-400 underline hover:text-white">Foydalanish shartlari</button> va <button type="button" onClick={() => setShowPrivacyModal(true)} className="text-zinc-400 underline hover:text-white">Maxfiylik siyosati</button>ga rozilik bildirasiz.
+                  </p>
                 </form>
               </div>
             ) : telegramStep === 'input_phone' && authMode === 'telegram' ? (
@@ -5800,7 +5807,7 @@ export default function App() {
                       className="mt-0.5 w-4 h-4 rounded bg-[#171A26] border-white/20 text-rose-500 focus:ring-rose-500/40 cursor-pointer"
                     />
                     <label htmlFor="tg_privacy_checkbox" className="text-[11px] text-zinc-300 select-none cursor-pointer leading-relaxed text-left">
-                      Men <button type="button" onClick={() => setShowPrivacyModal(true)} className="text-rose-400 font-bold underline hover:text-rose-300">Maxfiylik siyosati</button> bilan tanishib chiqdim va roziman
+                      Men <button type="button" onClick={() => setShowTermsModal(true)} className="text-rose-400 font-bold underline hover:text-rose-300">Foydalanish shartlari</button> va <button type="button" onClick={() => setShowPrivacyModal(true)} className="text-rose-400 font-bold underline hover:text-rose-300">Maxfiylik siyosati</button> bilan tanishib chiqdim va roziman
                     </label>
                   </div>
 
@@ -5818,6 +5825,10 @@ export default function App() {
                       <span>Platformaga kirish</span>
                     )}
                   </button>
+
+                  <p className="text-[10px] text-zinc-500 text-center leading-relaxed">
+                    Davom etish orqali siz <button type="button" onClick={() => setShowTermsModal(true)} className="text-zinc-400 underline hover:text-white">Foydalanish shartlari</button> va <button type="button" onClick={() => setShowPrivacyModal(true)} className="text-zinc-400 underline hover:text-white">Maxfiylik siyosati</button>ga rozilik bildirasiz.
+                  </p>
                 </form>
               </div>
             ) : (
@@ -5926,6 +5937,10 @@ export default function App() {
                       >
                         {isLoggingIn ? "Kirilmoqda..." : "Kirish"}
                       </button>
+
+                      <p className="text-[10px] text-zinc-500 text-center leading-relaxed">
+                        Kirish orqali siz <button type="button" onClick={() => setShowTermsModal(true)} className="text-zinc-400 underline hover:text-white">Foydalanish shartlari</button> va <button type="button" onClick={() => setShowPrivacyModal(true)} className="text-zinc-400 underline hover:text-white">Maxfiylik siyosati</button>ga rozilik bildirasiz.
+                      </p>
                     </motion.form>
                   ) : (
                     <motion.form
@@ -5990,7 +6005,7 @@ export default function App() {
                           className="mt-0.5 w-4 h-4 rounded bg-[#171A26] border-white/20 text-rose-500 focus:ring-rose-500/40 cursor-pointer"
                         />
                         <label htmlFor="email_privacy_checkbox" className="text-[11px] text-zinc-300 select-none cursor-pointer leading-relaxed text-left">
-                          Men <button type="button" onClick={() => setShowPrivacyModal(true)} className="text-rose-400 font-bold underline hover:text-rose-300">Maxfiylik siyosati</button> bilan tanishib chiqdim va roziman
+                          Men <button type="button" onClick={() => setShowTermsModal(true)} className="text-rose-400 font-bold underline hover:text-rose-300">Foydalanish shartlari</button> va <button type="button" onClick={() => setShowPrivacyModal(true)} className="text-rose-400 font-bold underline hover:text-rose-300">Maxfiylik siyosati</button> bilan tanishib chiqdim va roziman
                         </label>
                       </div>
 
@@ -6001,6 +6016,10 @@ export default function App() {
                       >
                         {isLoggingIn ? "Ro'yxatdan o'tmoqda..." : "Ro'yxatdan o'tish"}
                       </button>
+
+                      <p className="text-[10px] text-zinc-500 text-center leading-relaxed">
+                        Davom etish orqali siz <button type="button" onClick={() => setShowTermsModal(true)} className="text-zinc-400 underline hover:text-white">Foydalanish shartlari</button> va <button type="button" onClick={() => setShowPrivacyModal(true)} className="text-zinc-400 underline hover:text-white">Maxfiylik siyosati</button>ga rozilik bildirasiz.
+                      </p>
                     </motion.form>
                   )}
                 </AnimatePresence>
@@ -6117,6 +6136,87 @@ export default function App() {
                 onClick={() => {
                   setPrivacyAgreed(true);
                   setShowPrivacyModal(false);
+                }}
+                className="py-2.5 px-6 rounded-xl bg-gradient-to-r from-[#E11D48] to-rose-600 text-white font-bold text-xs shadow-md hover:brightness-110 disabled:opacity-40 disabled:cursor-not-allowed transition cursor-pointer"
+              >
+                Roziman
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* --- TERMS OF USE MODAL --- */}
+      {showTermsModal && (
+        <div className="fixed inset-0 z-[165] flex items-center justify-center p-4 bg-black/80 backdrop-blur-md">
+          <div className="bg-[#12141E] text-zinc-100 rounded-[24px] w-full max-w-2xl max-h-[90vh] flex flex-col border border-white/15 shadow-2xl overflow-hidden animate-fadeIn">
+            <div className="p-5 border-b border-white/10 flex items-center justify-between bg-[#181A26]">
+              <h2 className="text-lg font-editorial font-bold text-white tracking-tight">Foydalanish Shartlari (Terms of Use)</h2>
+              <button 
+                onClick={() => setShowTermsModal(false)}
+                className="w-8 h-8 rounded-full bg-white/10 hover:bg-rose-500/20 text-zinc-300 hover:text-white flex items-center justify-center transition cursor-pointer"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+            
+            <div 
+              onScroll={(e) => {
+                const el = e.currentTarget;
+                if (el.scrollTop + el.clientHeight >= el.scrollHeight - 30) {
+                  setTermsReadToBottom(true);
+                }
+              }}
+              className="p-6 overflow-y-auto space-y-4 text-xs text-zinc-300 leading-relaxed text-left flex-1"
+            >
+              <p className="font-bold text-white text-sm">Oxirgi yangilangan sana: 2026-yil 16-noyabr</p>
+              <p>Ushbu Foydalanish shartlari Alov.uz platformasi (keyingi o‘rinlarda — "Platforma") hamda undan foydalanuvchi shaxs (keyingi o‘rinlarda — "Foydalanuvchi") o‘rtasidagi o‘zaro munosabatlarni va platformadan foydalanish qoidalarini belgilaydi. Ro‘yxatdan o‘tish orqali siz ushbu barcha shartlarga rozilik bildirasiz.</p>
+              
+              <h3 className="font-bold text-white text-sm pt-2">1. Umumiy qoidalar va yosh chegarasi</h3>
+              <p>• Platformadan faqat 18 yoshga to‘lgan shaxslar foydalanishi mumkin. Ro‘yxatdan o‘tish orqali siz voyaga yetganingizni tasdiqlaysiz.</p>
+              <p>• Foydalanuvchi o‘zi haqida haqqoniy ma'lumotlarni kiritishi va profil rasmi sifatida o‘zining real tasviridan foydalanishi shart.</p>
+
+              <h3 className="font-bold text-white text-sm pt-2">2. Platformada taqiqlangan harakatlar</h3>
+              <p>Foydalanuvchiga quyidagilar qat'iyan taqiqlanadi:</p>
+              <p>• Noqonuniy va behayo kontent: 18+ (pornografik) rasm va videolar yuborish, videoqo‘ng‘iroqlar vaqtida behayo harakatlar qilish yoki shunday materiallarni targ‘ib etish.</p>
+              <p>• Zararli dasturlar va fayllar: Chatlar orqali .apk, .exe, viruslar, zararli havolalar (fishing linklar) yoki boshqa shubhali fayllarni tarqatish.</p>
+              <p>• Shantaj va haqorat: Boshqa foydalanuvchilarni haqorat qilish, tahdid solish, ularning ruxsatisiz suhbat yoki videolarni yozib olish va uchinchi shaxslarga tarqatish.</p>
+              <p>• Soxta akkauntlar: Boshqa shaxslarning rasmi yoki ma'lumotlaridan foydalanib, aldash maqsadida profil ochish.</p>
+              <p>• Spam va reklama: Ma'muriyat ruxsatisiz tijoriy reklamalar, begona botlar yoki saytlar havolasini tarqatish.</p>
+
+              <h3 className="font-bold text-white text-sm pt-2">3. Foydalanuvchining shaxsiy javobgarligi</h3>
+              <p>• Platformadagi har bir foydalanuvchi o‘z harakatlari, yuborgan xabarlari va muloqot madaniyati uchun shaxsan o‘zi javobgardir.</p>
+              <p>• O‘zbekiston Respublikasi qonunchiligini buzgan (jumladan, shaxsiy ma'lumotlarni ruxsatsiz tarqatgan, shantaj qilgan yoki zararli dasturlar yuborgan) foydalanuvchi qonun oldida shaxsan ma'muriy va jinoiy javobgarlikka tortiladi. Platforma ma'muriyati foydalanuvchilarning shaxsiy xatti-harakatlari uchun javobgar emas.</p>
+
+              <h3 className="font-bold text-white text-sm pt-2">4. Ma'muriyat huquqlari va Moderatsiya</h3>
+              <p>• Platforma xavfsizligini ta'minlash maqsadida ma'muriyat qoidalarni buzgan har qanday foydalanuvchining akkauntini oldindan ogohlantirmasdan bloklash yoki o‘chirib tashlash huquqiga ega.</p>
+              <p>• Qonunbuzarlik holatlari aniqlanganda yoki huquqni muhofaza qiluvchi organlardan (IIV) rasmiy so‘rov kelib tushganda, ma'muriyat qoidabuzar foydalanuvchining texnik ma'lumotlarini (IP-manzil, ro‘yxatdan o‘tish loglari va boshqalar) vakolatli organlarga taqdim etadi.</p>
+
+              <h3 className="font-bold text-white text-sm pt-2">5. Xavfsizlik va Shikoyat qilish</h3>
+              <p>• Agar boshqa foydalanuvchi tomonidan qoidabuzarlik, tahdid yoki shubhali harakat sezilsa, Foydalanuvchi darhol chat yoki videoqo‘ng‘iroq oynasidagi "Shikoyat qilish" (Report) tugmasidan foydalanishi lozim.</p>
+              <p>• Foydalanuvchilarga notanish insonlarga o‘zlarining shaxsiy, moliyaviy yoki maxfiy ma'lumotlarini bermaslik tavsiya etiladi.</p>
+
+              <h3 className="font-bold text-white text-sm pt-2">6. Shartlarga o‘zgartirish kiritish</h3>
+              <p>Platforma ma'muriyati ushbu Foydalanish shartlariga istalgan vaqtda o‘zgartirish yoki qo‘shimchalar kiritish huquqiga ega. Yangilangan shartlar saytda e'lon qilingan paytdan boshlab kuchga kiradi.</p>
+
+              {!termsReadToBottom && (
+                <div className="p-3 bg-amber-500/10 border border-amber-400/30 rounded-xl text-amber-300 text-center font-bold text-xs animate-pulse">
+                  ⬇️ Matnni oxirigacha o'qish uchun pastga aylantiring...
+                </div>
+              )}
+            </div>
+
+            <div className="p-4 border-t border-white/10 bg-[#181A26] flex items-center justify-between">
+              <span className="text-[11px] text-zinc-400">
+                {termsReadToBottom ? "✅ Matn oxirigacha o'qildi" : "⚠️ Matnni oxirigacha o'qing"}
+              </span>
+              <button
+                type="button"
+                disabled={!termsReadToBottom}
+                onClick={() => {
+                  setPrivacyAgreed(true);
+                  setTermsReadToBottom(true);
+                  setShowTermsModal(false);
                 }}
                 className="py-2.5 px-6 rounded-xl bg-gradient-to-r from-[#E11D48] to-rose-600 text-white font-bold text-xs shadow-md hover:brightness-110 disabled:opacity-40 disabled:cursor-not-allowed transition cursor-pointer"
               >

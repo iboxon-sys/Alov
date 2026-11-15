@@ -1882,7 +1882,7 @@ async function startServer() {
       // Match by ChatID first
       if (userChatId) {
         for (const u of usersStore.values()) {
-          if (u.telegramChatId === userChatId) {
+          if (u.telegramChatId && Number(u.telegramChatId) === Number(userChatId)) {
             existingUser = u;
             break;
           }
@@ -2854,7 +2854,7 @@ Suhbatlashish qoidalaringiz:
         // Look for match by Telegram Chat ID
         if (!canonicalUser && incomingTgChatId) {
           for (const u of usersStore.values()) {
-            if (u.telegramChatId === incomingTgChatId) {
+            if (u.telegramChatId && Number(u.telegramChatId) === Number(incomingTgChatId)) {
               canonicalUser = u;
               break;
             }

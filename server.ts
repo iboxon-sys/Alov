@@ -45,6 +45,7 @@ import {
   buildUserWalletSnapshot
 } from './src/utils/tokenomics';
 import { walletRepository } from './server/walletRepository';
+import { contentRepository } from './server/contentRepository';
 import { PresenceRegistry } from './src/utils/presence';
 import { canPersistUserProfile, telegramInputMatchesBotRecord } from './src/utils/profileLookup';
 import {
@@ -52,6 +53,8 @@ import {
   appendPostComment,
   computeAuthorTotalLikes,
   isPostVisibleToViewer,
+  mergePostsLists,
+  normalizePostRecord,
   type PostItem,
   type PostComment
 } from './src/utils/posts';
@@ -68,7 +71,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const isProduction = process.env.NODE_ENV === 'production';
 
 async function startServer() {
-  await walletRepository.init();
+  await Promise.all([walletRepository.init(), contentRepository.init()]);
   const app = express();
   app.set('trust proxy', 1);
   app.use(express.json({ limit: '15mb' }));
@@ -248,11 +251,20 @@ async function startServer() {
     fs.mkdirSync(MEDIA_UPLOADS_DIR, { recursive: true });
   }
 
-  app.get('/api/face-id/photo/:filename', (req, res) => {
+  app.get('/api/face-id/photo/:filename', async (req, res) => {
     const safeName = path.basename(req.params.filename || '').replace(/[^a-zA-Z0-9._-]/g, '');
     if (!safeName) return res.status(400).send('Invalid file name');
     const filePath = path.join(FACE_ID_DIR, safeName);
-    if (!fs.existsSync(filePath)) return res.status(404).send('Not found');
+    if (!fs.existsSync(filePath)) {
+      const fromDb = await contentRepository.getMediaFile(`face/${safeName}`);
+      if (!fromDb) return res.status(404).send('Not found');
+      try {
+        fs.writeFileSync(filePath, fromDb.buffer);
+      } catch {}
+      res.setHeader('Content-Type', fromDb.contentType || 'image/jpeg');
+      res.setHeader('Cache-Control', 'public, max-age=86400');
+      return res.send(fromDb.buffer);
+    }
     res.setHeader('Cache-Control', 'public, max-age=86400');
     res.sendFile(filePath);
   });
@@ -291,6 +303,7 @@ async function startServer() {
       const storedName = `media_${Date.now()}_${Math.random().toString(36).slice(2, 8)}${ext}`;
       const destPath = path.join(MEDIA_UPLOADS_DIR, storedName);
       fs.writeFileSync(destPath, buf);
+      await contentRepository.saveMediaFile(storedName, mimeType, buf);
       const isVideoUpload = mimeType.toLowerCase().startsWith('video/') || ['.mp4', '.webm', '.mov', '.m4v'].includes(ext);
       const isVertical = isVideoUpload ? await probeIsVerticalVideo(destPath) : false;
       return res.json({ success: true, url: `/api/media/${storedName}`, mimeType, isVertical });
@@ -299,7 +312,7 @@ async function startServer() {
     }
   });
 
-  app.post('/api/media/upload', (req, res) => {
+  app.post('/api/media/upload', async (req, res) => {
     try {
       const { dataUrl, fileName = 'upload', mimeType = '' } = req.body || {};
       if (!dataUrl || typeof dataUrl !== 'string') {
@@ -313,18 +326,26 @@ async function startServer() {
       const ext = inferMediaExt(detectedMime, fileName);
       const storedName = `media_${Date.now()}_${Math.random().toString(36).slice(2, 8)}${ext}`;
       const destPath = path.join(MEDIA_UPLOADS_DIR, storedName);
-      fs.writeFileSync(destPath, Buffer.from(match[2], 'base64'));
+      const buf = Buffer.from(match[2], 'base64');
+      fs.writeFileSync(destPath, buf);
+      await contentRepository.saveMediaFile(storedName, detectedMime, buf);
       return res.json({ success: true, url: `/api/media/${storedName}`, mimeType: detectedMime });
     } catch (err: any) {
       return res.status(500).json({ success: false, error: err.message });
     }
   });
 
-  app.get('/api/media/:filename', (req, res) => {
+  app.get('/api/media/:filename', async (req, res) => {
     const safeName = path.basename(req.params.filename || '').replace(/[^a-zA-Z0-9._-]/g, '');
     if (!safeName) return res.status(400).send('Invalid file name');
     const filePath = path.join(MEDIA_UPLOADS_DIR, safeName);
-    if (!fs.existsSync(filePath)) return res.status(404).send('Not found');
+    if (!fs.existsSync(filePath)) {
+      const fromDb = await contentRepository.getMediaFile(safeName);
+      if (!fromDb) return res.status(404).send('Not found');
+      try {
+        fs.writeFileSync(filePath, fromDb.buffer);
+      } catch {}
+    }
     const ext = path.extname(safeName).toLowerCase();
     const mimeMap: Record<string, string> = {
       '.jpg': 'image/jpeg',
@@ -648,12 +669,22 @@ async function startServer() {
 
       const targetUrl = validation.url.toString();
       const parsedSocial = parseMediaLink(targetUrl, 'video');
-      const replySuccess = (payload: any) =>
-        res.json({
+      const replySuccess = (payload: any) => {
+        if (payload?.url && String(payload.url).startsWith('/api/media/')) {
+          const fname = path.basename(String(payload.url).slice('/api/media/'.length)).replace(/[^a-zA-Z0-9._-]/g, '');
+          const fpath = fname ? path.join(MEDIA_UPLOADS_DIR, fname) : '';
+          if (fname && fpath && fs.existsSync(fpath)) {
+            try {
+              void contentRepository.saveMediaFile(fname, String(payload.mimeType || 'video/mp4'), fs.readFileSync(fpath));
+            } catch {}
+          }
+        }
+        return res.json({
           success: true,
           ...payload,
           isVertical: Boolean(payload?.isVertical || parsedSocial.isVertical),
         });
+      };
 
       // 1. Direct MP4/WebM/MOV/M4V/HLS stream check
       const directResult = await downloadVideoStreamToDisk(targetUrl).catch((err) => {
@@ -1030,14 +1061,24 @@ async function startServer() {
       const targetUrl = validation.url.toString();
       const parsedSocial = parseMediaLink(targetUrl, 'music');
 
-      const replyMp3 = (payload: any) =>
-        res.json({
+      const replyMp3 = (payload: any) => {
+        if (payload?.url && String(payload.url).startsWith('/api/media/')) {
+          const fname = path.basename(String(payload.url).slice('/api/media/'.length)).replace(/[^a-zA-Z0-9._-]/g, '');
+          const fpath = fname ? path.join(MEDIA_UPLOADS_DIR, fname) : '';
+          if (fname && fpath && fs.existsSync(fpath)) {
+            try {
+              void contentRepository.saveMediaFile(fname, 'audio/mpeg', fs.readFileSync(fpath));
+            } catch {}
+          }
+        }
+        return res.json({
           success: true,
           mode: 'mp3',
           mimeType: 'audio/mpeg',
           format: 'mp3',
           ...payload,
         });
+      };
 
       // 1. Direct video (.mp4/.webm/.mov/.m3u8) or audio (.mp3/.m4a/.wav/.ogg) stream -> convert/save as .mp3
       const directAudio = await downloadAudioStreamAsMp3(targetUrl).catch((err) => {
@@ -2301,7 +2342,7 @@ Suhbatlashish qoidalaringiz:
   });
 
   // Save Verified Face ID Photo & Biometric Metadata
-  app.post('/api/face-id/save', (req, res) => {
+  app.post('/api/face-id/save', async (req, res) => {
     try {
       const { uid, photoDataUrl, detectedGender, confidence, blinkVerified = true, smileVerified = true, method = 'camera_biometric' } = req.body || {};
       if (!photoDataUrl || typeof photoDataUrl !== 'string') {
@@ -2315,7 +2356,9 @@ Suhbatlashish qoidalaringiz:
       const safeUid = String(uid || `guest_${Date.now()}`).replace(/[^a-zA-Z0-9_-]/g, '_');
       const fileName = `face_${safeUid}_${Date.now()}.${ext}`;
       const filePath = path.join(FACE_ID_DIR, fileName);
-      fs.writeFileSync(filePath, Buffer.from(match[2], 'base64'));
+      const faceBuf = Buffer.from(match[2], 'base64');
+      fs.writeFileSync(filePath, faceBuf);
+      await contentRepository.saveMediaFile(`face/${fileName}`, `image/${ext}`, faceBuf);
 
       const photoUrl = `/api/face-id/photo/${fileName}`;
       const normalizedGender: 'male' | 'female' | null =
@@ -2610,8 +2653,9 @@ Suhbatlashish qoidalaringiz:
         const raw = fs.readFileSync(POSTS_DB_FILE, 'utf-8');
         const list = JSON.parse(raw);
         if (Array.isArray(list)) {
+          const normalized = list.map(normalizePostRecord).filter((p): p is PostItem => p !== null);
           postsStore.length = 0;
-          postsStore.push(...list);
+          postsStore.push(...normalized);
         }
       }
     } catch (e) {}
@@ -2689,6 +2733,28 @@ Suhbatlashish qoidalaringiz:
   loadCoinRequestsFromDisk();
   loadPostsFromDisk();
 
+  if (contentRepository.getMode() === 'mongodb') {
+    const [mongoUsers, mongoPosts] = await Promise.all([
+      contentRepository.loadAllUsers(),
+      contentRepository.loadAllPosts(),
+    ]);
+    for (const mu of mongoUsers) {
+      if (mu && mu.uid && canPersistUserProfile(mu)) {
+        const existingLocal = usersStore.get(mu.uid);
+        if (!existingLocal) {
+          normalizeAndReleaseUser(mu);
+          usersStore.set(mu.uid, mu);
+        }
+      }
+    }
+    if (mongoPosts.length > 0 || postsStore.length > 0) {
+      const mergedPosts = mergePostsLists(mongoPosts, postsStore);
+      postsStore.length = 0;
+      postsStore.push(...mergedPosts);
+      savePostsToDisk();
+    }
+  }
+
   function purgeNonAdminDatabaseData(): { removedUsersCount: number } {
     let removedUsersCount = 0;
     const adminUids = new Set<string>();
@@ -2756,6 +2822,9 @@ Suhbatlashish qoidalaringiz:
     saveWithdrawalsToDisk();
     saveCoinRequestsToDisk();
 
+    void contentRepository.replaceAllUsers(Array.from(usersStore.values()));
+    void contentRepository.replaceAllPosts(postsStore);
+
     return { removedUsersCount };
   }
 
@@ -2766,9 +2835,22 @@ Suhbatlashish qoidalaringiz:
       const parsedEpoch = JSON.parse(fs.readFileSync(DB_EPOCH_FILE, 'utf-8'));
       currentDiskEpoch = String(parsedEpoch?.epoch || '');
     }
-    if (currentDiskEpoch !== DB_EPOCH) {
+    const currentMongoEpoch = await contentRepository.getDbEpoch();
+    const alreadyMigrated = currentDiskEpoch === DB_EPOCH || currentMongoEpoch === DB_EPOCH;
+    if (!alreadyMigrated) {
       purgeNonAdminDatabaseData();
+    }
+    if (currentDiskEpoch !== DB_EPOCH) {
       fs.writeFileSync(DB_EPOCH_FILE, JSON.stringify({ epoch: DB_EPOCH, updatedAt: new Date().toISOString() }, null, 2), 'utf-8');
+    }
+    if (currentMongoEpoch !== DB_EPOCH) {
+      await contentRepository.setDbEpoch(DB_EPOCH);
+    }
+    if (contentRepository.getMode() === 'mongodb') {
+      await Promise.all([
+        ...Array.from(usersStore.values()).map((u) => contentRepository.upsertUser(u)),
+        ...postsStore.map((p) => contentRepository.upsertPost(p)),
+      ]);
     }
   } catch (e) {
     console.warn('Could not verify DB_EPOCH file:', e);
@@ -3210,8 +3292,10 @@ Suhbatlashish qoidalaringiz:
       usersStore.set(targetUid, mergedUser);
       if (user.uid !== targetUid) {
         usersStore.delete(user.uid);
+        void contentRepository.deleteUser(user.uid);
       }
       saveUsersToDisk();
+      await contentRepository.upsertUser(mergedUser);
       io.emit('user_updated', mergedUser);
 
       res.json({ success: true, exists: true, isNewUser: false, user: mergedUser });
@@ -3266,6 +3350,7 @@ Suhbatlashish qoidalaringiz:
         }
         usersStore.set(uid, updated);
         saveUsersToDisk();
+        void contentRepository.upsertUser(updated);
         io.emit('user_updated', updated);
         return res.json({ success: true, user: updated });
       }
@@ -3800,10 +3885,20 @@ Suhbatlashish qoidalaringiz:
   });
 
   // --- Social Posts CRUD (Photo, Video, Music, Text + Likes & Comments) ---
+  function findUserByUidOrId(key: string): any | undefined {
+    const clean = String(key || '').trim();
+    if (!clean) return undefined;
+    if (usersStore.has(clean)) return usersStore.get(clean);
+    for (const u of usersStore.values()) {
+      if (u.uid === clean || u.id === clean) return u;
+    }
+    return undefined;
+  }
+
   function enrichPost(post: PostItem): PostItem {
-    const author = usersStore.get(post.authorUid);
+    const author = findUserByUidOrId(post.authorUid) || (post.authorId ? findUserByUidOrId(post.authorId) : undefined);
     const enrichedComments = (Array.isArray(post.comments) ? post.comments : []).map((c) => {
-      const commentAuthor = usersStore.get(c.authorUid);
+      const commentAuthor = findUserByUidOrId(c.authorUid) || (c.authorId ? findUserByUidOrId(c.authorId) : undefined);
       return {
         ...c,
         authorName: commentAuthor?.name || c.authorName,
@@ -3824,25 +3919,39 @@ Suhbatlashish qoidalaringiz:
     };
   }
 
-  app.get('/api/posts', (req, res) => {
+  app.get('/api/posts', async (req, res) => {
+    if (contentRepository.getMode() === 'mongodb' && postsStore.length === 0) {
+      const mongoPosts = await contentRepository.loadAllPosts();
+      if (mongoPosts.length > 0) {
+        postsStore.push(...mongoPosts);
+        savePostsToDisk();
+      }
+    }
+
     const authorUid = req.query.authorUid ? String(req.query.authorUid) : '';
     const viewerUid = req.query.viewerUid ? String(req.query.viewerUid) : '';
-    const viewerUser = viewerUid ? usersStore.get(viewerUid) || null : null;
+    const viewerUser = viewerUid ? findUserByUidOrId(viewerUid) || null : null;
 
     const filtered = authorUid
-      ? postsStore.filter((p) => p.authorUid === authorUid)
+      ? postsStore.filter((p) => p.authorUid === authorUid || p.authorId === authorUid)
       : postsStore;
     const sorted = [...filtered]
       .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
       .map(enrichPost)
       .filter((p) => isPostVisibleToViewer(p, viewerUser));
-    res.json({ success: true, posts: sorted });
+    res.json({ success: true, posts: sorted, storageMode: contentRepository.getMode() });
   });
 
-  app.post('/api/posts', (req, res) => {
+  app.post('/api/posts', async (req, res) => {
     try {
       const {
         authorUid,
+        authorId = '',
+        authorName = '',
+        authorUsername = '',
+        authorAvatar = '',
+        authorGender = '',
+        authorVerified = false,
         type = 'photo',
         caption = '',
         mediaUrl = '',
@@ -3856,7 +3965,8 @@ Suhbatlashish qoidalaringiz:
       if (!authorUid) {
         return res.status(400).json({ success: false, error: 'Avtor aniqlanmadi' });
       }
-      const author = usersStore.get(authorUid);
+      const author = findUserByUidOrId(String(authorUid)) || (authorId ? findUserByUidOrId(String(authorId)) : undefined);
+      const canonicalAuthorUid = author?.uid || String(authorUid).trim();
       const safeType = ['photo', 'video', 'music', 'text'].includes(type) ? type : 'text';
       if (safeType !== 'text' && !String(mediaUrl || embedUrl).trim()) {
         return res.status(400).json({ success: false, error: 'Media fayli yoki havolasi talab qilinadi' });
@@ -3865,15 +3975,20 @@ Suhbatlashish qoidalaringiz:
         return res.status(400).json({ success: false, error: 'Post matnini kiriting' });
       }
 
+      const resolvedGender =
+        author?.gender === 'male' || author?.gender === 'female'
+          ? author.gender
+          : (authorGender === 'male' || authorGender === 'female' ? authorGender : undefined);
+
       const newPost: PostItem = {
         id: `post_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
-        authorUid,
-        authorId: author?.id,
-        authorName: author?.name || 'Foydalanuvchi',
-        authorUsername: author?.username || '',
-        authorAvatar: author?.avatar || '',
-        authorGender: author?.gender,
-        authorVerified: Boolean(author?.faceId?.verified || author?.isVerified),
+        authorUid: canonicalAuthorUid,
+        authorId: author?.id || (String(authorId || '').trim() || undefined),
+        authorName: author?.name || String(authorName || '').trim() || 'Foydalanuvchi',
+        authorUsername: author?.username || String(authorUsername || '').trim() || '',
+        authorAvatar: author?.avatar || String(authorAvatar || '').trim() || '',
+        ...(resolvedGender ? { authorGender: resolvedGender } : {}),
+        authorVerified: Boolean(author?.faceId?.verified || author?.isVerified || authorVerified),
         type: safeType,
         caption: String(caption || '').trim(),
         mediaUrl: String(mediaUrl || '').trim() || undefined,
@@ -3889,15 +4004,16 @@ Suhbatlashish qoidalaringiz:
       };
       postsStore.unshift(newPost);
       savePostsToDisk();
+      await contentRepository.upsertPost(newPost);
       const enriched = enrichPost(newPost);
       io.emit('post_created', enriched);
-      res.json({ success: true, post: enriched });
+      res.json({ success: true, post: enriched, storageMode: contentRepository.getMode() });
     } catch (err: any) {
       res.status(500).json({ success: false, error: err.message });
     }
   });
 
-  app.post('/api/posts/:postId/like', (req, res) => {
+  app.post('/api/posts/:postId/like', async (req, res) => {
     try {
       const { postId } = req.params;
       const { uid } = req.body || {};
@@ -3908,12 +4024,14 @@ Suhbatlashish qoidalaringiz:
       const { post: nextPost, liked } = togglePostLike(postsStore[idx], uid);
       postsStore[idx] = nextPost;
       savePostsToDisk();
+      await contentRepository.upsertPost(nextPost);
 
-      const author = usersStore.get(nextPost.authorUid);
+      const author = findUserByUidOrId(nextPost.authorUid);
       if (author) {
         author.likesCount = computeAuthorTotalLikes(postsStore, author.uid);
         usersStore.set(author.uid, author);
         saveUsersToDisk();
+        void contentRepository.upsertUser(author);
         io.emit('user_updated', author);
       }
 
@@ -3925,25 +4043,25 @@ Suhbatlashish qoidalaringiz:
     }
   });
 
-  app.post('/api/posts/:postId/comments', (req, res) => {
+  app.post('/api/posts/:postId/comments', async (req, res) => {
     try {
       const { postId } = req.params;
-      const { authorUid, text } = req.body || {};
+      const { authorUid, authorName = '', authorUsername = '', authorAvatar = '', text } = req.body || {};
       if (!authorUid || !String(text || '').trim()) {
         return res.status(400).json({ success: false, error: 'Izoh matni kiritilmagan' });
       }
       const idx = postsStore.findIndex((p) => p.id === postId);
       if (idx === -1) return res.status(404).json({ success: false, error: 'Post topilmadi' });
 
-      const commentAuthor = usersStore.get(authorUid);
+      const commentAuthor = findUserByUidOrId(String(authorUid));
       const comment: PostComment = {
         id: `cmt_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
         postId,
-        authorUid,
+        authorUid: commentAuthor?.uid || String(authorUid),
         authorId: commentAuthor?.id,
-        authorName: commentAuthor?.name || 'Foydalanuvchi',
-        authorUsername: commentAuthor?.username || '',
-        authorAvatar: commentAuthor?.avatar || '',
+        authorName: commentAuthor?.name || String(authorName || '').trim() || 'Foydalanuvchi',
+        authorUsername: commentAuthor?.username || String(authorUsername || '').trim() || '',
+        authorAvatar: commentAuthor?.avatar || String(authorAvatar || '').trim() || '',
         text: String(text).trim(),
         createdAt: new Date().toISOString(),
       };
@@ -3951,6 +4069,7 @@ Suhbatlashish qoidalaringiz:
       const nextPost = appendPostComment(postsStore[idx], comment);
       postsStore[idx] = nextPost;
       savePostsToDisk();
+      await contentRepository.upsertPost(nextPost);
 
       const enriched = enrichPost(nextPost);
       io.emit('post_updated', enriched);
@@ -3992,10 +4111,11 @@ Suhbatlashish qoidalaringiz:
           fs.unlinkSync(diskPath);
         } catch {}
       }
+      void contentRepository.deleteMediaFile(safeName);
     }
   }
 
-  app.delete('/api/posts/:postId', (req, res) => {
+  app.delete('/api/posts/:postId', async (req, res) => {
     try {
       const { postId } = req.params;
       const requesterUid = String(req.body?.uid || req.query.uid || '');
@@ -4008,14 +4128,16 @@ Suhbatlashish qoidalaringiz:
       }
       postsStore.splice(idx, 1);
       savePostsToDisk();
+      await contentRepository.deletePost(postId);
 
       cleanupOrphanedLocalMedia([target.mediaUrl, target.coverUrl]);
 
-      const author = usersStore.get(target.authorUid);
+      const author = findUserByUidOrId(target.authorUid);
       if (author) {
         author.likesCount = computeAuthorTotalLikes(postsStore, author.uid);
         usersStore.set(author.uid, author);
         saveUsersToDisk();
+        void contentRepository.upsertUser(author);
         io.emit('user_updated', author);
       }
 
@@ -4118,6 +4240,7 @@ Suhbatlashish qoidalaringiz:
         }
         usersStore.delete(targetUid);
         saveUsersToDisk();
+        void contentRepository.deleteUser(targetUid);
         io.emit('user_deleted', { uid: targetUid });
         return res.json({ success: true, deletedUid: targetUid });
       }
@@ -4125,6 +4248,7 @@ Suhbatlashish qoidalaringiz:
       target.updatedAt = new Date().toISOString();
       usersStore.set(targetUid, target);
       saveUsersToDisk();
+      void contentRepository.upsertUser(target);
       io.emit('user_updated', target);
       res.json({ success: true, user: target });
     } catch (err: any) {

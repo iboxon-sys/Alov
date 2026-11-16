@@ -430,7 +430,12 @@ export const PostsFeed: React.FC<PostsFeedProps> = ({
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           authorUid: currentUser.uid,
+          authorId: currentUser.id || '',
+          authorName: currentUser.name || '',
           authorUsername: currentUser.username || '',
+          authorAvatar: currentUser.avatar || '',
+          authorGender: currentUser.gender || '',
+          authorVerified: Boolean(currentUser.faceId?.verified || currentUser.isVerified),
           type: draftType,
           caption,
           mediaUrl,
@@ -491,7 +496,9 @@ export const PostsFeed: React.FC<PostsFeedProps> = ({
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           authorUid: currentUser.uid,
+          authorName: currentUser.name || '',
           authorUsername: currentUser.username || '',
+          authorAvatar: currentUser.avatar || '',
           text,
         }),
       });

@@ -115,26 +115,60 @@ export function formatPostTimeUz(isoDate: string, nowMs: number = Date.now()): s
 }
 
 export function isPostVisibleToViewer(
-  post: Pick<PostItem, 'authorUid' | 'authorGender'>,
-  viewer: { uid?: string; id?: string; gender?: string } | null | undefined,
-  authorGenderFallback?: string
+  post: Pick<PostItem, 'authorUid' | 'authorGender'> | null | undefined,
+  _viewer?: { uid?: string; id?: string; gender?: string } | null,
+  _authorGenderFallback?: string
 ): boolean {
-  if (!post) return false;
-  if (!viewer) return true;
+  if (!post || !String(post.authorUid || '').trim()) return false;
+  return true;
+}
 
-  const viewerUid = String(viewer.uid || viewer.id || '').trim();
-  if (viewerUid && post.authorUid === viewerUid) {
-    return true;
+export function normalizePostRecord(raw: any): PostItem | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const id = String(raw.id || '').trim();
+  const authorUid = String(raw.authorUid || '').trim();
+  if (!id || !authorUid) return null;
+
+  const safeType: PostMediaType = ['photo', 'video', 'music', 'text'].includes(raw.type)
+    ? raw.type
+    : 'text';
+  const authorGender =
+    raw.authorGender === 'male' || raw.authorGender === 'female' ? raw.authorGender : undefined;
+
+  return {
+    id,
+    authorUid,
+    authorId: raw.authorId ? String(raw.authorId) : undefined,
+    authorName: String(raw.authorName || 'Foydalanuvchi').trim() || 'Foydalanuvchi',
+    authorUsername: raw.authorUsername ? String(raw.authorUsername) : '',
+    authorAvatar: raw.authorAvatar ? String(raw.authorAvatar) : '',
+    ...(authorGender ? { authorGender } : {}),
+    authorVerified: Boolean(raw.authorVerified),
+    type: safeType,
+    caption: String(raw.caption || ''),
+    ...(raw.mediaUrl ? { mediaUrl: String(raw.mediaUrl) } : {}),
+    ...(raw.embedUrl ? { embedUrl: String(raw.embedUrl) } : {}),
+    ...(raw.mediaProvider ? { mediaProvider: String(raw.mediaProvider) } : {}),
+    ...(raw.isVerticalVideo !== undefined ? { isVerticalVideo: Boolean(raw.isVerticalVideo) } : {}),
+    ...(raw.coverUrl ? { coverUrl: String(raw.coverUrl) } : {}),
+    ...(raw.audioTitle ? { audioTitle: String(raw.audioTitle) } : {}),
+    ...(raw.audioArtist ? { audioArtist: String(raw.audioArtist) } : {}),
+    likes: Array.isArray(raw.likes) ? raw.likes.map(String) : [],
+    comments: Array.isArray(raw.comments) ? raw.comments : [],
+    createdAt: String(raw.createdAt || new Date().toISOString()),
+  };
+}
+
+export function mergePostsLists(primary: PostItem[], secondary: PostItem[]): PostItem[] {
+  const byId = new Map<string, PostItem>();
+  for (const item of [...(Array.isArray(secondary) ? secondary : []), ...(Array.isArray(primary) ? primary : [])]) {
+    const normalized = normalizePostRecord(item);
+    if (!normalized) continue;
+    byId.set(normalized.id, normalized);
   }
-
-  const viewerGender = viewer.gender === 'male' || viewer.gender === 'female' ? viewer.gender : '';
-  if (!viewerGender) return true;
-
-  const rawAuthorGender = post.authorGender || authorGenderFallback;
-  const authorGender = rawAuthorGender === 'male' || rawAuthorGender === 'female' ? rawAuthorGender : '';
-  if (!authorGender) return false;
-
-  return viewerGender !== authorGender;
+  return Array.from(byId.values()).sort(
+    (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
+  );
 }
 
 export function isPostCommentsOpen(
@@ -144,5 +178,3 @@ export function isPostCommentsOpen(
   if (!expandedComments || !postId) return false;
   return Boolean(expandedComments[postId]);
 }
-
-

@@ -210,3 +210,55 @@ export function formatAuthErrorMessage(
   return "Kirishda xatolik yuz berdi.";
 }
 
+export type AuthProviderKind = 'telegram' | 'google' | 'email';
+
+export interface BootTelegramWebAppDecision {
+  shouldAutoLogin: boolean;
+  shouldOpenAuthModal: boolean;
+  initialStep: null;
+}
+
+/**
+ * Decides what happens when a Telegram Mini App user opens the site.
+ * Never auto-opens Auth or Face ID modals on initial mount for unregistered visitors.
+ */
+export function resolveTelegramMiniAppBootAction(params: {
+  exists: boolean;
+  user?: any | null;
+}): BootTelegramWebAppDecision {
+  if (params.exists && params.user && canPersistUserProfile(params.user)) {
+    return {
+      shouldAutoLogin: true,
+      shouldOpenAuthModal: false,
+      initialStep: null,
+    };
+  }
+
+  return {
+    shouldAutoLogin: false,
+    shouldOpenAuthModal: false,
+    initialStep: null,
+  };
+}
+
+/**
+ * Decides the next step right after a user passes Telegram, Google, or Email authentication.
+ * Returning completed users enter the app immediately; first-time users enter Face ID.
+ */
+export function resolvePostProviderAuthStep(params: {
+  provider: AuthProviderKind;
+  exists: boolean;
+  user?: any | null;
+}): 'enter_app' | 'face_id' {
+  if (params.exists && params.user && canPersistUserProfile(params.user)) {
+    return 'enter_app';
+  }
+  return 'face_id';
+}
+
+/**
+ * Decides the next step right after Face ID verification succeeds for a first-time user.
+ */
+export function resolvePostFaceIdStep(provider: AuthProviderKind): 'profile_setup' | 'google_setup' {
+  return provider === 'telegram' ? 'profile_setup' : 'google_setup';
+}

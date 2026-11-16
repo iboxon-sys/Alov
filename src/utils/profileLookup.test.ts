@@ -8,6 +8,9 @@ import {
   canPersistUserProfile,
   pruneIncompleteProfiles,
   formatAuthErrorMessage,
+  resolveTelegramMiniAppBootAction,
+  resolvePostProviderAuthStep,
+  resolvePostFaceIdStep,
 } from './profileLookup.ts';
 
 describe('Profile lookup & auth isolation helpers', () => {
@@ -103,4 +106,56 @@ describe('Profile lookup & auth isolation helpers', () => {
     const genericFirebase = formatAuthErrorMessage({ code: 'auth/internal-error', message: 'Firebase: Error (auth/internal-error).' }, 'login');
     assert.equal(genericFirebase, "Kirishda xatolik yuz berdi.");
   });
+
+  it('never opens Auth or Face ID on boot for new/unregistered visitors even in Telegram Mini App', () => {
+    const newGuest = resolveTelegramMiniAppBootAction({ exists: false, user: null });
+    assert.equal(newGuest.shouldAutoLogin, false);
+    assert.equal(newGuest.shouldOpenAuthModal, false);
+    assert.equal(newGuest.initialStep, null);
+
+    const incompleteVisitor = resolveTelegramMiniAppBootAction({
+      exists: true,
+      user: { uid: 'tg_999', name: 'Visitor', isProfileCompleted: false },
+    });
+    assert.equal(incompleteVisitor.shouldAutoLogin, false);
+    assert.equal(incompleteVisitor.shouldOpenAuthModal, false);
+    assert.equal(incompleteVisitor.initialStep, null);
+
+    const returningUser = resolveTelegramMiniAppBootAction({
+      exists: true,
+      user: {
+        uid: 'tg_123',
+        name: 'Dilnoza',
+        gender: 'female',
+        isProfileCompleted: true,
+        faceId: { verified: true },
+      },
+    });
+    assert.equal(returningUser.shouldAutoLogin, true);
+    assert.equal(returningUser.shouldOpenAuthModal, false);
+    assert.equal(returningUser.initialStep, null);
+  });
+
+  it('routes only first-time Telegram/Google/Email registrants into Face ID and then profile registration', () => {
+    const completedUser = {
+      uid: 'uid_done',
+      name: 'Azizbek',
+      gender: 'male',
+      isProfileCompleted: true,
+      faceId: { verified: true },
+    };
+
+    assert.equal(resolvePostProviderAuthStep({ provider: 'telegram', exists: false, user: null }), 'face_id');
+    assert.equal(resolvePostProviderAuthStep({ provider: 'google', exists: false, user: null }), 'face_id');
+    assert.equal(resolvePostProviderAuthStep({ provider: 'email', exists: false, user: null }), 'face_id');
+
+    assert.equal(resolvePostProviderAuthStep({ provider: 'telegram', exists: true, user: completedUser }), 'enter_app');
+    assert.equal(resolvePostProviderAuthStep({ provider: 'google', exists: true, user: completedUser }), 'enter_app');
+    assert.equal(resolvePostProviderAuthStep({ provider: 'email', exists: true, user: completedUser }), 'enter_app');
+
+    assert.equal(resolvePostFaceIdStep('telegram'), 'profile_setup');
+    assert.equal(resolvePostFaceIdStep('google'), 'google_setup');
+    assert.equal(resolvePostFaceIdStep('email'), 'google_setup');
+  });
 });
+

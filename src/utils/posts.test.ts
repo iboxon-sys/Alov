@@ -7,6 +7,8 @@ import {
   computeAuthorTotalLikes,
   formatPostTimeUz,
   isPostVisibleToViewer,
+  normalizePostRecord,
+  mergePostsLists,
   isPostCommentsOpen,
   type PostItem,
 } from './posts.ts';
@@ -79,24 +81,59 @@ describe('Posts pure helpers', () => {
     assert.equal(formatPostTimeUz('2026-11-14T08:00:00Z', now), '4 soat oldin');
   });
 
-  it('shows only opposite-gender posts and user own posts', () => {
+  it('shows valid posts to everyone across genders, missing gender, and guest sessions', () => {
     const maleViewer = { uid: 'm1', gender: 'male' };
     const femaleViewer = { uid: 'f1', gender: 'female' };
 
     const ownMalePost = { authorUid: 'm1', authorGender: 'male' as const };
     const otherMalePost = { authorUid: 'm2', authorGender: 'male' as const };
     const femalePost = { authorUid: 'f2', authorGender: 'female' as const };
-    const fallbackGenderPost = { authorUid: 'f3' };
+    const missingGenderPost = { authorUid: 'u3' };
 
     assert.equal(isPostVisibleToViewer(ownMalePost, maleViewer), true);
-    assert.equal(isPostVisibleToViewer(otherMalePost, maleViewer), false);
+    assert.equal(isPostVisibleToViewer(otherMalePost, maleViewer), true);
     assert.equal(isPostVisibleToViewer(femalePost, maleViewer), true);
-    assert.equal(isPostVisibleToViewer(fallbackGenderPost, maleViewer, 'female'), true);
-    assert.equal(isPostVisibleToViewer(fallbackGenderPost, maleViewer, 'male'), false);
-
-    assert.equal(isPostVisibleToViewer(femalePost, femaleViewer), false);
+    assert.equal(isPostVisibleToViewer(missingGenderPost, maleViewer), true);
+    assert.equal(isPostVisibleToViewer(femalePost, femaleViewer), true);
     assert.equal(isPostVisibleToViewer(otherMalePost, femaleViewer), true);
-    assert.equal(isPostVisibleToViewer({ authorUid: 'f1', authorGender: 'female' }, femaleViewer), true);
+    assert.equal(isPostVisibleToViewer(missingGenderPost, null), true);
+    assert.equal(isPostVisibleToViewer({ authorUid: '' }, maleViewer), false);
+  });
+
+  it('normalizes, deduplicates, and sorts merged posts newest-first', () => {
+    assert.equal(normalizePostRecord({ id: '', authorUid: 'u1' }), null);
+    assert.equal(normalizePostRecord({ id: 'p1', authorUid: '' }), null);
+
+    const oldPost: PostItem = {
+      id: 'p1',
+      authorUid: 'u1',
+      authorName: 'Ali',
+      type: 'text',
+      caption: 'Old',
+      likes: [],
+      comments: [],
+      createdAt: '2026-11-14T10:00:00Z',
+    };
+    const updatedOldPost: PostItem = {
+      ...oldPost,
+      likes: ['u2'],
+    };
+    const newPost: PostItem = {
+      id: 'p2',
+      authorUid: 'u2',
+      authorName: 'Laylo',
+      type: 'text',
+      caption: 'New',
+      likes: [],
+      comments: [],
+      createdAt: '2026-11-15T10:00:00Z',
+    };
+
+    const merged = mergePostsLists([updatedOldPost], [oldPost, newPost]);
+    assert.equal(merged.length, 2);
+    assert.equal(merged[0].id, 'p2');
+    assert.equal(merged[1].id, 'p1');
+    assert.deepEqual(merged[1].likes, ['u2']);
   });
 
   it('keeps post comments hidden by default until explicitly expanded', () => {

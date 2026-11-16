@@ -70,6 +70,9 @@ import {
   getInitialAuthDraftState,
   canPersistUserProfile,
   formatAuthErrorMessage,
+  resolveTelegramMiniAppBootAction,
+  resolvePostProviderAuthStep,
+  resolvePostFaceIdStep,
 } from './utils/profileLookup';
 import { computeAuthorTotalLikes, isPostVisibleToViewer, type PostItem } from './utils/posts';
 import { validateUsername, isUsernameUnique, formatUsernameDisplay } from './utils/username';
@@ -1060,7 +1063,7 @@ export default function App() {
     } catch (e) {}
   }, []);
 
-  // Telegram WebApp Auto-login & Integration
+  // Telegram WebApp Auto-login & Integration (never auto-opens Auth or Face ID on boot for new visitors)
   useEffect(() => {
     try {
       const tg = (window as any).Telegram?.WebApp;
@@ -1068,7 +1071,7 @@ export default function App() {
         tg.ready();
         tg.expand();
         const tgUser = tg.initDataUnsafe?.user;
-        if (tgUser) {
+        if (tgUser?.id) {
           const realName = [tgUser.first_name, tgUser.last_name].filter(Boolean).join(' ').trim();
           const telegramUserObj = {
             uid: `tg_${tgUser.id}`,
@@ -1081,7 +1084,7 @@ export default function App() {
             isOnline: true,
             region: 'Toshkent shahri',
             district: 'Yunusobod tumani',
-            gender: 'female',
+            gender: '',
             isProfileCompleted: false
           };
           fetch(getBaseUrl() + '/api/users/sync', {
@@ -1091,30 +1094,18 @@ export default function App() {
           })
           .then(res => res.json())
           .then(data => {
-            if (data && data.success && data.exists && data.user) {
-              const u = data.user;
+            const exists = Boolean(data && data.success && data.exists && data.user);
+            const u = exists ? data.user : null;
+            const bootDecision = resolveTelegramMiniAppBootAction({ exists, user: u });
+            if (bootDecision.shouldAutoLogin && u) {
               setRegName(getSafeUserDisplayName(u, realName));
               setRegAvatar(u.faceId?.capturedPhotoUrl || pickPreferredAvatar(u.avatar, tgUser.photo_url));
-              if (!canPersistUserProfile(u)) {
-                setPendingTgUser(u);
-                setAuthMode('telegram');
-                setTelegramStep('face_id');
-                setShowAuthModal(true);
-              } else {
-                setCurrentUser(u);
-                try {
-                  localStorage.setItem('alov_current_user', JSON.stringify(u));
-                  localStorage.setItem('alov_user_' + u.uid, JSON.stringify(u));
-                } catch (e) {}
-                setActiveTab('discover');
-              }
-            } else {
-              setRegName(realName);
-              setRegAvatar('');
-              setPendingTgUser(telegramUserObj);
-              setAuthMode('telegram');
-              setTelegramStep('face_id');
-              setShowAuthModal(true);
+              setCurrentUser(u);
+              try {
+                localStorage.setItem('alov_current_user', JSON.stringify(u));
+                localStorage.setItem('alov_user_' + u.uid, JSON.stringify(u));
+              } catch (e) {}
+              setActiveTab('discover');
             }
           })
           .catch(() => {});
@@ -1197,8 +1188,12 @@ export default function App() {
       setIsLocationEnabled(userData.isLocationEnabled !== false);
 
       // Admin bypasses Face ID completely; non-admins must have completed profile + Face ID verification
-      const needsFaceId = !canPersistUserProfile(userData);
-      if (needsFaceId) {
+      const nextStep = resolvePostProviderAuthStep({
+        provider: 'google',
+        exists: true,
+        user: userData,
+      });
+      if (nextStep === 'face_id') {
         if (autoOpenFaceId) {
           setPendingGoogleUser(user);
           setAuthOrigin('google');
@@ -2411,22 +2406,26 @@ export default function App() {
         });
         const data = await response.json();
 
-        if (data && data.success && data.exists && data.user) {
+        if (
+          resolvePostProviderAuthStep({
+            provider: 'google',
+            exists: Boolean(data && data.success && data.exists && data.user),
+            user: data?.user,
+          }) === 'enter_app'
+        ) {
           const canonicalUser = data.user;
-          if (canPersistUserProfile(canonicalUser)) {
-            setCurrentUser(canonicalUser);
-            try {
-              localStorage.setItem('alov_current_user', JSON.stringify(canonicalUser));
-              localStorage.setItem('alov_user_' + canonicalUser.uid, JSON.stringify(canonicalUser));
-            } catch(e) {}
-            setShowAuthModal(false);
-            setActiveTab('discover');
-            setIsLoggingIn(false);
-            return;
-          }
+          setCurrentUser(canonicalUser);
+          try {
+            localStorage.setItem('alov_current_user', JSON.stringify(canonicalUser));
+            localStorage.setItem('alov_user_' + canonicalUser.uid, JSON.stringify(canonicalUser));
+          } catch(e) {}
+          setShowAuthModal(false);
+          setActiveTab('discover');
+          setIsLoggingIn(false);
+          return;
         }
 
-        // Immediately run Face ID right after Google account selection, BEFORE profile info form
+        // First-time Google user: enter Face ID right after Google auth, then profile setup
         setRegName(result.user.displayName || '');
         setPendingFaceId(null);
         setPendingGoogleUser(result.user);
@@ -2556,6 +2555,64 @@ export default function App() {
     }
   };
 
+  const handleOpenTelegramFlow = async () => {
+    setErrorMsg('');
+    setAuthOrigin('telegram');
+    setAuthMode('telegram');
+
+    try {
+      const tg = (window as any).Telegram?.WebApp;
+      const tgUser = tg?.initDataUnsafe?.user;
+      if (tg?.initData && tgUser?.id) {
+        setIsLoggingIn(true);
+        const realName = [tgUser.first_name, tgUser.last_name].filter(Boolean).join(' ').trim();
+        const telegramUserObj = {
+          uid: `tg_${tgUser.id}`,
+          id: `TG-${tgUser.id}`,
+          name: realName,
+          telegram: tgUser.username ? `https://t.me/${tgUser.username}` : undefined,
+          telegramChatId: tgUser.id,
+          avatar: tgUser.photo_url || '',
+          gender: '',
+          isProfileCompleted: false,
+        };
+        const res = await safeFetchJson(getApiUrl('/api/users/sync'), {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ user: telegramUserObj, lookupOnly: true }),
+        });
+        const exists = Boolean(res && res.success && res.exists && res.user);
+        const step = resolvePostProviderAuthStep({ provider: 'telegram', exists, user: res?.user });
+        if (step === 'enter_app' && res?.user) {
+          setCurrentUser(res.user);
+          try {
+            localStorage.setItem('alov_current_user', JSON.stringify(res.user));
+            localStorage.setItem('alov_user_' + res.user.uid, JSON.stringify(res.user));
+          } catch (e) {}
+          setShowAuthModal(false);
+          setActiveTab('discover');
+          setIsLoggingIn(false);
+          return;
+        }
+        setPendingTgUser(res?.user || telegramUserObj);
+        setPendingFaceId(null);
+        setRegName(getSafeUserDisplayName(res?.user, realName));
+        setRegAvatar('');
+        setRegTelegram(telegramUserObj.telegram || '');
+        setRegGender('');
+        setTelegramStep('face_id');
+        setIsLoggingIn(false);
+        return;
+      }
+    } catch (e) {
+      // Fallback cleanly to manual Telegram bot verification if Mini App lookup fails
+    } finally {
+      setIsLoggingIn(false);
+    }
+
+    setTelegramStep('input_phone');
+  };
+
   const handleStartTelegramAuth = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!telegramInput.trim()) {
@@ -2631,9 +2688,13 @@ export default function App() {
           localStorage.setItem('alov_tg_started_' + cleanKey, 'true');
         } catch (e) {}
 
-        const needsOnboardingOrFaceId = data.isNewUser || !canPersistUserProfile(data.user);
+        const nextStep = resolvePostProviderAuthStep({
+          provider: 'telegram',
+          exists: !data.isNewUser && Boolean(data.user),
+          user: data.user,
+        });
 
-        if (needsOnboardingOrFaceId) {
+        if (nextStep === 'face_id') {
           setPendingTgUser(data.user);
           setPendingFaceId(null);
 
@@ -2750,10 +2811,10 @@ export default function App() {
         return;
       }
       setRegGender(resolvePostFaceIdGender({ explicitSelection: result.userSelectedGender }));
-      setTelegramStep('profile_setup');
+      setTelegramStep(resolvePostFaceIdStep('telegram') as 'profile_setup');
     } else {
       setRegGender(resolvePostFaceIdGender({ explicitSelection: result.userSelectedGender }));
-      setAuthMode('google_setup');
+      setAuthMode(resolvePostFaceIdStep(origin === 'register' ? 'email' : 'google') as 'google_setup');
     }
   };
 
@@ -6157,8 +6218,9 @@ export default function App() {
                   </button>
 
                   <button 
-                    onClick={() => { setAuthMode('telegram'); setTelegramStep('input_phone'); }}
-                    className="w-full flex items-center justify-center space-x-3 py-3.5 px-4 rounded-2xl bg-[#229ED9] hover:bg-[#1f8fc6] font-bold text-sm shadow-sm text-white active:scale-[0.99] transition duration-200 cursor-pointer"
+                    onClick={handleOpenTelegramFlow}
+                    disabled={isLoggingIn}
+                    className="w-full flex items-center justify-center space-x-3 py-3.5 px-4 rounded-2xl bg-[#229ED9] hover:bg-[#1f8fc6] font-bold text-sm shadow-sm text-white active:scale-[0.99] transition duration-200 disabled:opacity-60 cursor-pointer"
                   >
                     <svg className="w-4 h-4 shrink-0 fill-current" viewBox="0 0 24 24">
                       <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm4.64 6.8c-.15 1.58-.8 5.42-1.13 7.19-.14.75-.42 1-.68 1.03-.58.05-1.02-.38-1.58-.75-.88-.58-1.38-.94-2.23-1.5-.99-.65-.35-1.01.22-1.59.15-.15 2.71-2.48 2.76-2.69.01-.03.01-.14-.07-.2-.08-.06-.19-.04-.27 0-.12.05-1.98 1.26-5.6 3.7-.53.36-1.01.54-1.44.53-.47-.01-1.38-.26-2.06-.48-.83-.27-1.49-.42-1.43-.88.03-.24.37-.49 1.02-.75 3.99-1.74 6.65-2.89 7.98-3.45 3.8-1.6 4.59-1.88 5.1-1.89.11 0 .37.03.54.17.14.12.18.28.2.4-.02.07-.02.13-.04.2z"/>

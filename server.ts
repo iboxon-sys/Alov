@@ -13,13 +13,17 @@ import { AccessToken } from 'livekit-server-sdk';
 import dotenv from 'dotenv';
 import {
   validateExternalVideoUrl,
+  inferImageFileExtension,
   inferVideoFileExtension,
+  extractImageUrlsFromHtml,
   extractVideoUrlsFromHtml,
+  extractAudioUrlsFromHtml,
   isHlsStreamUrl,
   extractTwitterStatusPath,
   extractInstagramShortcode,
   inferAudioFileExtension,
   buildFfmpegMp3Args,
+  buildFfmpegMp4Args,
   deriveAudioMetadataFromUrl,
 } from './src/utils/videoImport';
 import { parseMediaLink } from './src/utils/mediaLinks';
@@ -33,10 +37,13 @@ import {
 import {
   MESSAGE_COIN_COST,
   MESSAGE_DIAMOND_REWARD,
+  DIAMOND_LIMIT_TARGET,
   ADMIN_FULL_COINS,
   ADMIN_FULL_DIAMONDS,
   isAdminTelegramUser,
   canChargeForMessage,
+  coinsToDiamonds,
+  roundDiamonds,
   applyDiamondProgress,
   releaseMatureDiamondBatches,
   getPendingDiamondsTotal,
@@ -272,41 +279,102 @@ async function startServer() {
   // Upload media (image, video, audio, banner) from raw binary or base64 DataURL
   function inferMediaExt(mime: string = '', fileName: string = ''): string {
     const lowerMime = mime.toLowerCase();
-    const extFromName = path.extname(fileName || '').replace(/[^a-zA-Z0-9.]/g, '').toLowerCase();
-    if (extFromName && ['.jpg', '.jpeg', '.png', '.webp', '.gif', '.svg', '.mp4', '.webm', '.mov', '.mp3', '.wav', '.ogg', '.m4a'].includes(extFromName)) {
+    let decodedName = fileName || '';
+    try {
+      decodedName = decodeURIComponent(decodedName);
+    } catch {}
+    const extFromName = path.extname(decodedName).replace(/[^a-zA-Z0-9.]/g, '').toLowerCase();
+    if (
+      extFromName &&
+      [
+        '.jpg',
+        '.jpeg',
+        '.png',
+        '.webp',
+        '.gif',
+        '.avif',
+        '.svg',
+        '.mp4',
+        '.m4v',
+        '.webm',
+        '.mov',
+        '.mkv',
+        '.3gp',
+        '.mp3',
+        '.wav',
+        '.ogg',
+        '.m4a',
+        '.aac',
+        '.flac',
+        '.opus',
+      ].includes(extFromName)
+    ) {
       return extFromName;
     }
     if (lowerMime.includes('svg')) return '.svg';
     if (lowerMime.includes('png')) return '.png';
     if (lowerMime.includes('webp')) return '.webp';
+    if (lowerMime.includes('avif')) return '.avif';
     if (lowerMime.includes('gif')) return '.gif';
     if (lowerMime.includes('mp4')) return '.mp4';
     if (lowerMime.includes('quicktime')) return '.mov';
+    if (lowerMime.includes('matroska')) return '.mkv';
     if (lowerMime.includes('video/webm')) return '.webm';
     if (lowerMime.includes('mpeg') || lowerMime.includes('mp3')) return '.mp3';
     if (lowerMime.includes('wav')) return '.wav';
     if (lowerMime.includes('ogg')) return '.ogg';
+    if (lowerMime.includes('aac')) return '.aac';
+    if (lowerMime.includes('flac')) return '.flac';
     if (lowerMime.includes('m4a') || lowerMime.includes('mp4a')) return '.m4a';
     if (lowerMime.includes('audio/webm')) return '.webm';
     return '.jpg';
   }
 
-  app.post('/api/media/upload-raw', express.raw({ type: '*/*', limit: '35mb' }), async (req, res) => {
+  app.post('/api/media/upload-raw', express.raw({ type: '*/*', limit: '50mb' }), async (req, res) => {
     try {
       const buf = req.body as Buffer;
       if (!buf || !Buffer.isBuffer(buf) || buf.length === 0) {
         return res.status(400).json({ success: false, error: 'Fayl bo\'sh' });
       }
       const mimeType = String(req.headers['content-type'] || 'application/octet-stream');
-      const originalName = String(req.headers['x-file-name'] || 'upload');
-      const ext = inferMediaExt(mimeType, originalName);
-      const storedName = `media_${Date.now()}_${Math.random().toString(36).slice(2, 8)}${ext}`;
-      const destPath = path.join(MEDIA_UPLOADS_DIR, storedName);
+      const rawFileName = String(req.headers['x-file-name'] || 'upload');
+      const requestedType = String(req.query?.type || '').toLowerCase();
+      const ext = inferMediaExt(mimeType, rawFileName);
+      let storedName = `media_${Date.now()}_${Math.random().toString(36).slice(2, 8)}${ext}`;
+      let destPath = path.join(MEDIA_UPLOADS_DIR, storedName);
+      let finalMimeType = mimeType;
       fs.writeFileSync(destPath, buf);
-      await contentRepository.saveMediaFile(storedName, mimeType, buf);
-      const isVideoUpload = mimeType.toLowerCase().startsWith('video/') || ['.mp4', '.webm', '.mov', '.m4v'].includes(ext);
+
+      // Ensure audio uploads for music posts are standardized to playable MP3
+      if (requestedType === 'music' && ext !== '.mp3') {
+        const convertedMp3 = await convertLocalMediaToMp3(destPath);
+        if (convertedMp3) {
+          try { fs.unlinkSync(destPath); } catch {}
+          storedName = convertedMp3;
+          destPath = path.join(MEDIA_UPLOADS_DIR, storedName);
+          finalMimeType = 'audio/mpeg';
+        }
+      }
+
+      // Ensure exotic video uploads (.mkv/.mov/.3gp/.webm) convert to browser-safe MP4 when needed
+      const isVideoUpload =
+        requestedType === 'video' ||
+        mimeType.toLowerCase().startsWith('video/') ||
+        ['.mp4', '.webm', '.mov', '.m4v', '.mkv', '.3gp'].includes(ext);
+      if (isVideoUpload && ext !== '.mp4') {
+        const convertedMp4 = await convertLocalMediaToMp4(destPath);
+        if (convertedMp4) {
+          try { fs.unlinkSync(destPath); } catch {}
+          storedName = convertedMp4;
+          destPath = path.join(MEDIA_UPLOADS_DIR, storedName);
+          finalMimeType = 'video/mp4';
+        }
+      }
+
+      const finalBuf = fs.readFileSync(destPath);
+      await contentRepository.saveMediaFile(storedName, finalMimeType, finalBuf);
       const isVertical = isVideoUpload ? await probeIsVerticalVideo(destPath) : false;
-      return res.json({ success: true, url: `/api/media/${storedName}`, mimeType, isVertical });
+      return res.json({ success: true, url: `/api/media/${storedName}`, mimeType: finalMimeType, isVertical });
     } catch (err: any) {
       return res.status(500).json({ success: false, error: err.message });
     }
@@ -353,15 +421,21 @@ async function startServer() {
       '.png': 'image/png',
       '.webp': 'image/webp',
       '.gif': 'image/gif',
+      '.avif': 'image/avif',
       '.svg': 'image/svg+xml',
       '.mp4': 'video/mp4',
       '.m4v': 'video/mp4',
       '.webm': 'video/webm',
       '.mov': 'video/quicktime',
+      '.mkv': 'video/x-matroska',
+      '.3gp': 'video/3gpp',
       '.mp3': 'audio/mpeg',
       '.wav': 'audio/wav',
       '.ogg': 'audio/ogg',
       '.m4a': 'audio/mp4',
+      '.aac': 'audio/aac',
+      '.flac': 'audio/flac',
+      '.opus': 'audio/opus',
     };
     const contentType = mimeMap[ext] || 'application/octet-stream';
     const stat = fs.statSync(filePath);
@@ -532,6 +606,41 @@ async function startServer() {
     return null;
   }
 
+  async function convertLocalMediaToMp4(inputPath: string): Promise<string | null> {
+    const outName = `video_${Date.now()}_${Math.random().toString(36).slice(2, 8)}.mp4`;
+    const outPath = path.join(MEDIA_UPLOADS_DIR, outName);
+    try {
+      const args = buildFfmpegMp4Args(inputPath, outPath, { maxBytes: MAX_REMOTE_VIDEO_BYTES });
+      await execFileAsync('ffmpeg', args, { timeout: 60000, maxBuffer: 5 * 1024 * 1024 });
+      if (fs.existsSync(outPath)) {
+        const stat = fs.statSync(outPath);
+        if (stat.size > 1024 && stat.size <= MAX_REMOTE_VIDEO_BYTES) {
+          return outName;
+        }
+        try { fs.unlinkSync(outPath); } catch {}
+      }
+    } catch {
+      if (fs.existsSync(outPath)) {
+        try { fs.unlinkSync(outPath); } catch {}
+      }
+    }
+    return null;
+  }
+
+  async function probeNeedsH264Transcode(filePath: string): Promise<boolean> {
+    try {
+      const { stdout } = await execFileAsync(
+        'ffprobe',
+        ['-v', 'error', '-select_streams', 'v:0', '-show_entries', 'stream=codec_name', '-of', 'default=noprint_wrappers=1:nokey=1', filePath],
+        { timeout: 5000 }
+      );
+      const codec = String(stdout || '').trim().toLowerCase();
+      return Boolean(codec && codec !== 'h264' && codec !== 'vp8' && codec !== 'vp9');
+    } catch {
+      return false;
+    }
+  }
+
   async function downloadViaYtDlp(targetUrl: string): Promise<{ url: string; mimeType: string; format: string; mode: 'mp4'; isVertical: boolean } | null> {
     const bin = await ensureYtDlpBinary();
     if (!bin) return null;
@@ -563,19 +672,27 @@ async function startServer() {
 
       const files = fs.readdirSync(MEDIA_UPLOADS_DIR).filter((f) => f.startsWith(`${prefix}.`) && !f.endsWith('.part'));
       if (files.length > 0) {
-        const chosen = files[0];
-        const fullPath = path.join(MEDIA_UPLOADS_DIR, chosen);
+        let chosen = files[0];
+        let fullPath = path.join(MEDIA_UPLOADS_DIR, chosen);
         const stat = fs.statSync(fullPath);
         if (stat.size > 1024 && stat.size <= MAX_REMOTE_VIDEO_BYTES) {
-          const ext = path.extname(chosen).toLowerCase().replace('.', '') || 'mp4';
+          let ext = path.extname(chosen).toLowerCase().replace('.', '') || 'mp4';
+          if (ext !== 'mp4' || (await probeNeedsH264Transcode(fullPath))) {
+            const mp4Name = await convertLocalMediaToMp4(fullPath);
+            if (mp4Name) {
+              try { fs.unlinkSync(fullPath); } catch {}
+              chosen = mp4Name;
+              fullPath = path.join(MEDIA_UPLOADS_DIR, chosen);
+              ext = 'mp4';
+            }
+          }
           const mime = ext === 'webm' ? 'video/webm' : ext === 'mov' ? 'video/quicktime' : 'video/mp4';
           const isVertical = await probeIsVerticalVideo(fullPath);
           return { url: `/api/media/${chosen}`, mimeType: mime, format: ext, mode: 'mp4', isVertical };
         }
         try { fs.unlinkSync(fullPath); } catch {}
       }
-    } catch (err: any) {
-      // Clean partial downloads if any
+    } catch {
       try {
         for (const f of fs.readdirSync(MEDIA_UPLOADS_DIR)) {
           if (f.startsWith(`${prefix}.`)) fs.unlinkSync(path.join(MEDIA_UPLOADS_DIR, f));
@@ -631,16 +748,27 @@ async function startServer() {
       }
 
       const buf = Buffer.from(arrayBuf);
-      const storedName = `video_${Date.now()}_${Math.random().toString(36).slice(2, 8)}${ext}`;
-      const destPath = path.join(MEDIA_UPLOADS_DIR, storedName);
+      let storedName = `video_${Date.now()}_${Math.random().toString(36).slice(2, 8)}${ext}`;
+      let destPath = path.join(MEDIA_UPLOADS_DIR, storedName);
       fs.writeFileSync(destPath, buf);
 
+      let finalExt = ext;
+      if (ext !== '.mp4' || (await probeNeedsH264Transcode(destPath))) {
+        const convertedMp4 = await convertLocalMediaToMp4(destPath);
+        if (convertedMp4) {
+          try { fs.unlinkSync(destPath); } catch {}
+          storedName = convertedMp4;
+          destPath = path.join(MEDIA_UPLOADS_DIR, storedName);
+          finalExt = '.mp4';
+        }
+      }
+
       const finalMime =
-        contentType && contentType.startsWith('video/')
-          ? contentType.split(';')[0].trim()
-          : ext === '.webm'
+        finalExt === '.mp4' || finalExt === '.m4v'
+          ? 'video/mp4'
+          : finalExt === '.webm'
             ? 'video/webm'
-            : ext === '.mov'
+            : finalExt === '.mov'
               ? 'video/quicktime'
               : 'video/mp4';
 
@@ -648,7 +776,7 @@ async function startServer() {
       return {
         url: `/api/media/${storedName}`,
         mimeType: finalMime,
-        format: ext.replace('.', ''),
+        format: finalExt.replace('.', ''),
         mode: 'mp4',
         isVertical,
       };
@@ -656,6 +784,164 @@ async function startServer() {
       clearTimeout(timer);
     }
   }
+
+  const MAX_REMOTE_IMAGE_BYTES = 20 * 1024 * 1024;
+  async function downloadImageStreamToDisk(
+    imageUrl: string,
+    refererUrl?: string
+  ): Promise<{ url: string; mimeType: string; format: string } | null> {
+    const check = validateExternalVideoUrl(imageUrl, {
+      allowLoopback: process.env.ALLOW_LOOPBACK_MEDIA_IMPORT === 'true',
+    });
+    if (!check.ok) return null;
+
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 20000);
+    try {
+      const headers: Record<string, string> = {
+        ...VIDEO_BROWSER_HEADERS,
+        Accept: 'image/avif,image/webp,image/apng,image/png,image/jpeg,image/*,*/*;q=0.8',
+      };
+      if (refererUrl) headers.Referer = refererUrl;
+
+      const response = await fetch(check.url.toString(), {
+        headers,
+        redirect: 'follow',
+        signal: controller.signal,
+      });
+      if (!response.ok) return null;
+
+      const contentType = String(response.headers.get('content-type') || '');
+      const contentLen = Number(response.headers.get('content-length') || 0);
+      if (contentLen > MAX_REMOTE_IMAGE_BYTES) {
+        throw new Error('Rasm hajmi 20 MB dan oshmasligi kerak.');
+      }
+
+      const ext = inferImageFileExtension(contentType, response.url || imageUrl);
+      if (!ext) return null;
+
+      const arrayBuf = await response.arrayBuffer();
+      if (arrayBuf.byteLength < 128 || arrayBuf.byteLength > MAX_REMOTE_IMAGE_BYTES) {
+        return null;
+      }
+
+      const buf = Buffer.from(arrayBuf);
+      let storedName = `photo_${Date.now()}_${Math.random().toString(36).slice(2, 8)}${ext}`;
+      let destPath = path.join(MEDIA_UPLOADS_DIR, storedName);
+      fs.writeFileSync(destPath, buf);
+
+      let finalExt = ext;
+      // Convert AVIF to universal JPEG if possible
+      if (ext === '.avif') {
+        const jpgName = `photo_${Date.now()}_${Math.random().toString(36).slice(2, 8)}.jpg`;
+        const jpgPath = path.join(MEDIA_UPLOADS_DIR, jpgName);
+        try {
+          await execFileAsync('ffmpeg', ['-y', '-i', destPath, '-frames:v', '1', '-q:v', '2', jpgPath], { timeout: 15000 });
+          if (fs.existsSync(jpgPath) && fs.statSync(jpgPath).size > 128) {
+            try { fs.unlinkSync(destPath); } catch {}
+            storedName = jpgName;
+            destPath = jpgPath;
+            finalExt = '.jpg';
+          }
+        } catch {
+          if (fs.existsSync(jpgPath)) {
+            try { fs.unlinkSync(jpgPath); } catch {}
+          }
+        }
+      }
+
+      const mimeByExt: Record<string, string> = {
+        '.jpg': 'image/jpeg',
+        '.jpeg': 'image/jpeg',
+        '.png': 'image/png',
+        '.webp': 'image/webp',
+        '.gif': 'image/gif',
+        '.avif': 'image/avif',
+      };
+      const finalMime = mimeByExt[finalExt] || 'image/jpeg';
+      const finalBuf = fs.readFileSync(destPath);
+      await contentRepository.saveMediaFile(storedName, finalMime, finalBuf);
+
+      return {
+        url: `/api/media/${storedName}`,
+        mimeType: finalMime,
+        format: finalExt.replace('.', ''),
+      };
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  app.post('/api/media/import-image-url', async (req, res) => {
+    try {
+      const rawUrl = String(req.body?.url || '').trim();
+      const validation = validateExternalVideoUrl(rawUrl, {
+        allowLoopback: process.env.ALLOW_LOOPBACK_MEDIA_IMPORT === 'true',
+      });
+      if (!validation.ok) {
+        return res.status(400).json({ success: false, error: validation.error });
+      }
+
+      const targetUrl = validation.url.toString();
+
+      // 1. Direct image binary check
+      const directImage = await downloadImageStreamToDisk(targetUrl).catch((err) => {
+        if (err?.message?.includes('20 MB')) throw err;
+        return null;
+      });
+      if (directImage) {
+        return res.json({ success: true, ...directImage });
+      }
+
+      // 2. Social/HTML page image extraction (Telegram post, Instagram post, Pinterest pin, web page)
+      const igShortcode = extractInstagramShortcode(targetUrl);
+      const htmlFetchUrl = igShortcode
+        ? `https://www.instagram.com/p/${igShortcode}/embed/captioned/`
+        : /t\.me\/[^/]+\/\d+/i.test(targetUrl) && !targetUrl.includes('embed=1')
+          ? `${targetUrl}${targetUrl.includes('?') ? '&' : '?'}embed=1&mode=tme`
+          : targetUrl;
+
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 15000);
+      try {
+        const pageRes = await fetch(htmlFetchUrl, {
+          headers: {
+            ...VIDEO_BROWSER_HEADERS,
+            Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+          },
+          redirect: 'follow',
+          signal: controller.signal,
+        });
+        if (pageRes.ok) {
+          const pageCt = String(pageRes.headers.get('content-type') || '').toLowerCase();
+          if (pageCt.includes('text/html') || pageCt.includes('application/xhtml')) {
+            const html = (await pageRes.text()).slice(0, 1_500_000);
+            const candidates = extractImageUrlsFromHtml(html, pageRes.url || htmlFetchUrl);
+            for (const candidate of candidates.slice(0, 6)) {
+              const saved = await downloadImageStreamToDisk(candidate, targetUrl).catch(() => null);
+              if (saved) {
+                return res.json({ success: true, ...saved });
+              }
+            }
+          }
+        }
+      } catch {
+        // ignore fetch error and fall through to 422
+      } finally {
+        clearTimeout(timer);
+      }
+
+      return res.status(422).json({
+        success: false,
+        error: "Ushbu havoladan rasm faylini yuklab bo'lmadi. To'g'ridan-to'g'ri rasm havolasi kiriting yoki qurilmadan yuklang.",
+      });
+    } catch (err: any) {
+      return res.status(500).json({
+        success: false,
+        error: err?.message || "Rasmni havoladan yuklashda xatolik yuz berdi.",
+      });
+    }
+  });
 
   app.post('/api/media/import-video-url', async (req, res) => {
     try {
@@ -1195,8 +1481,11 @@ async function startServer() {
           const pageCt = String(pageRes.headers.get('content-type') || '').toLowerCase();
           if (pageCt.includes('text/html') || pageCt.includes('application/xhtml')) {
             const html = (await pageRes.text()).slice(0, 1_500_000);
-            const candidates = extractVideoUrlsFromHtml(html, pageRes.url || htmlFetchUrl);
-            for (const candidate of candidates.slice(0, 5)) {
+            const resolvedPageUrl = pageRes.url || htmlFetchUrl;
+            const audioCandidates = extractAudioUrlsFromHtml(html, resolvedPageUrl);
+            const videoCandidates = extractVideoUrlsFromHtml(html, resolvedPageUrl);
+            const candidates = [...audioCandidates, ...videoCandidates.filter((u) => !audioCandidates.includes(u))];
+            for (const candidate of candidates.slice(0, 6)) {
               const converted = await downloadAudioStreamAsMp3(candidate, targetUrl).catch(() => null);
               if (converted) return replyMp3(converted);
             }
@@ -2018,8 +2307,16 @@ async function startServer() {
         } else if (isPlaceholderOrUsername(user.name, tgHandle || cleanUsername, cleanPhone)) {
           user.name = botFullName || '';
         }
-        // Always prioritize Face ID photo over any Telegram profile photo
-        if (user.faceId?.capturedPhotoUrl) {
+        if (user.name && !isPlaceholderOrUsername(user.name, tgHandle || cleanUsername, cleanPhone)) {
+          user.firstName = user.name;
+          user.first_name = user.name;
+          user.lastName = '';
+          user.last_name = '';
+        }
+        // Preserve explicitly uploaded custom avatar; otherwise prioritize Face ID photo over Telegram photo
+        if (user.hasCustomAvatar && user.avatar && !isPlaceholderAvatar(user.avatar)) {
+          // keep custom avatar intact
+        } else if (user.faceId?.capturedPhotoUrl) {
           user.avatar = user.faceId.capturedPhotoUrl;
         } else if (!user.faceId?.verified && user.avatar && user.avatar.includes('api.telegram.org/file/')) {
           user.avatar = '';
@@ -2038,6 +2335,7 @@ async function startServer() {
         normalizeAndReleaseUser(user);
         usersStore.set(user.uid, user);
         saveUsersToDisk();
+        void contentRepository.upsertUser(user);
         io.emit('user_updated', user);
       }
 
@@ -2110,19 +2408,20 @@ async function startServer() {
         }
       }
 
-      // Enrich Telegram name/avatar if stored values are missing, @username, or Unsplash fallback
+      // Enrich Telegram name/avatar ONLY when stored values are missing/placeholder (never overwrite edited profile!)
       const tgHandle = normalizeTelegramHandle(matchedUser.telegram);
       const chatId = matchedUser.telegramChatId || matchedUser.chatId;
       if (chatId || tgHandle) {
         const resolvedBot = findStoredBotUser(chatId, undefined, tgHandle || undefined, matchedUser.phone);
         const finalChatId = chatId || resolvedBot?.chatId;
         if (finalChatId) {
+          const hasValidStoredName = !isPlaceholderOrUsername(matchedUser.name, tgHandle, matchedUser.phone);
           const freshBot = await registerBotUser(
             Number(finalChatId),
             {
               username: resolvedBot?.username || tgHandle || undefined,
-              first_name: resolvedBot?.firstName,
-              last_name: resolvedBot?.lastName,
+              first_name: hasValidStoredName ? matchedUser.name : resolvedBot?.firstName,
+              last_name: hasValidStoredName ? '' : resolvedBot?.lastName,
               avatar: resolvedBot?.avatar,
             },
             matchedUser.phone
@@ -2133,22 +2432,31 @@ async function startServer() {
             username: freshBot.username || tgHandle,
             phone: freshBot.phone || matchedUser.phone,
           });
-          if (freshName && isPlaceholderOrUsername(matchedUser.name, tgHandle, matchedUser.phone)) {
+          if (!hasValidStoredName && freshName) {
             matchedUser.name = freshName;
           }
-          const freshAvatar = pickPreferredAvatar(freshBot.avatar, matchedUser.avatar);
-          if (freshAvatar) {
-            matchedUser.avatar = freshAvatar;
-          } else if (isPlaceholderAvatar(matchedUser.avatar)) {
-            matchedUser.avatar = '';
+          if (matchedUser.hasCustomAvatar && matchedUser.avatar && !isPlaceholderAvatar(matchedUser.avatar)) {
+            // preserve custom edited avatar
+          } else if (matchedUser.faceId?.capturedPhotoUrl) {
+            matchedUser.avatar = matchedUser.faceId.capturedPhotoUrl;
+          } else if (!matchedUser.avatar || isPlaceholderAvatar(matchedUser.avatar)) {
+            const freshAvatar = pickPreferredAvatar(freshBot.avatar);
+            matchedUser.avatar = freshAvatar || '';
           }
           matchedUser.telegramChatId = Number(finalChatId);
         }
+      }
+      if (matchedUser.name && !isPlaceholderOrUsername(matchedUser.name, tgHandle, matchedUser.phone)) {
+        matchedUser.firstName = matchedUser.name;
+        matchedUser.first_name = matchedUser.name;
+        matchedUser.lastName = '';
+        matchedUser.last_name = '';
       }
 
       normalizeAndReleaseUser(matchedUser);
       usersStore.set(matchedUser.uid, matchedUser);
       saveUsersToDisk();
+      void contentRepository.upsertUser(matchedUser);
 
       res.json({
         success: true,
@@ -2472,8 +2780,12 @@ Suhbatlashish qoidalaringiz:
     u.followingCount = u.following.length > 0 ? u.following.length : (typeof u.followingCount === 'number' ? u.followingCount : 0);
     u.likesCount = typeof u.likesCount === 'number' ? u.likesCount : 0;
     u.coins = typeof u.coins === 'number' ? u.coins : 100;
-    u.diamonds = typeof u.diamonds === 'number' ? u.diamonds : 0;
-    u.diamondProgress = typeof u.diamondProgress === 'number' ? u.diamondProgress : 0;
+    u.diamonds = typeof u.diamonds === 'number' ? roundDiamonds(u.diamonds) : 0;
+    u.diamondProgress = typeof u.diamondProgress === 'number' ? roundDiamonds(u.diamondProgress) : 0;
+    if (typeof u.dailyLimitResetAt === 'number' && u.dailyLimitResetAt <= Date.now()) {
+      u.diamondProgress = 0;
+      u.dailyLimitResetAt = null;
+    }
     if (!Array.isArray(u.pendingDiamondBatches)) u.pendingDiamondBatches = [];
     if (!u.locationVisibility) u.locationVisibility = 'everyone';
     if (u.isLocationEnabled === undefined) u.isLocationEnabled = true;
@@ -2741,7 +3053,9 @@ Suhbatlashish qoidalaringiz:
     for (const mu of mongoUsers) {
       if (mu && mu.uid && canPersistUserProfile(mu)) {
         const existingLocal = usersStore.get(mu.uid);
-        if (!existingLocal) {
+        const mongoUpdatedMs = new Date(mu.updatedAt || 0).getTime();
+        const localUpdatedMs = new Date(existingLocal?.updatedAt || 0).getTime();
+        if (!existingLocal || mongoUpdatedMs > localUpdatedMs) {
           normalizeAndReleaseUser(mu);
           usersStore.set(mu.uid, mu);
         }
@@ -3147,13 +3461,29 @@ Suhbatlashish qoidalaringiz:
         user.uid?.startsWith('tg_')
       );
       let knownChatId = incomingTgChatId || existing.telegramChatId;
+      const incomingValidName =
+        typeof user.name === 'string' &&
+        user.name.trim() &&
+        !isPlaceholderOrUsername(user.name, incomingTgHandle || existing.telegram, incomingPhone || existing.phone)
+          ? user.name.trim()
+          : '';
+      const existingValidName =
+        typeof existing.name === 'string' &&
+        existing.name.trim() &&
+        !isPlaceholderOrUsername(existing.name, incomingTgHandle || existing.telegram, incomingPhone || existing.phone)
+          ? existing.name.trim()
+          : '';
+
       let fetchedAvatar = pickPreferredAvatar(user.avatar, existing.avatar);
-      let fetchedName = buildTelegramDisplayName({
-        firstName: user.name,
-        username: incomingTgHandle || existing.telegram,
-        phone: incomingPhone || existing.phone,
-        existingName: existing.name,
-      });
+      let fetchedName =
+        incomingValidName ||
+        buildTelegramDisplayName({
+          firstName: user.firstName || user.first_name || existingValidName,
+          lastName: user.lastName || user.last_name,
+          username: incomingTgHandle || existing.telegram,
+          phone: incomingPhone || existing.phone,
+          existingName: existingValidName,
+        });
 
       if (!knownChatId && (incomingTgHandle || incomingPhone)) {
         const found = findStoredBotUser(undefined, undefined, incomingTgHandle || undefined, incomingPhone || undefined);
@@ -3162,7 +3492,20 @@ Suhbatlashish qoidalaringiz:
         }
       }
 
-      const faceIdAvatar = user.faceId?.capturedPhotoUrl || existing.faceId?.capturedPhotoUrl || '';
+      const incomingFaceIdUrl = user.faceId?.capturedPhotoUrl || '';
+      const existingFaceIdUrl = existing.faceId?.capturedPhotoUrl || '';
+      const faceIdAvatar = incomingFaceIdUrl || existingFaceIdUrl || '';
+      const isAlreadyCompleted = Boolean(existing?.isProfileCompleted === true);
+      const isNewFaceIdCapture = Boolean(incomingFaceIdUrl && incomingFaceIdUrl !== existingFaceIdUrl);
+      const incomingAvatarClean = pickPreferredAvatar(user.avatar);
+      const hasExplicitCustomAvatar = Boolean(
+        !isNewFaceIdCapture &&
+        (
+          user.hasCustomAvatar === true ||
+          (isAlreadyCompleted && incomingAvatarClean && incomingAvatarClean !== faceIdAvatar && incomingAvatarClean !== existing.avatar) ||
+          (existing.hasCustomAvatar === true && (!incomingAvatarClean || incomingAvatarClean === existing.avatar))
+        )
+      );
 
       if (knownChatId) {
         const botRecord = await registerBotUser(
@@ -3170,6 +3513,7 @@ Suhbatlashish qoidalaringiz:
           {
             username: incomingTgHandle || undefined,
             first_name: fetchedName || undefined,
+            last_name: incomingValidName ? '' : undefined,
             avatar: fetchedAvatar || undefined,
           },
           incomingPhone || existing.phone
@@ -3180,13 +3524,11 @@ Suhbatlashish qoidalaringiz:
           username: botRecord.username || incomingTgHandle,
           phone: botRecord.phone || incomingPhone,
         });
-        if (botName && isPlaceholderOrUsername(fetchedName, botRecord.username || incomingTgHandle, incomingPhone)) {
-          fetchedName = botName;
-        } else if (!fetchedName && botName) {
+        if (!fetchedName && botName) {
           fetchedName = botName;
         }
-        // Only use Telegram photo if no Face ID photo exists AND account is admin or already completed profile
-        if (!faceIdAvatar && (!isTelegramAccount || isAdminTelegramUser(existing) || isAdminTelegramUser(user))) {
+        // Only use Telegram photo if no Face ID photo & no custom avatar exists AND account is admin or completed
+        if (!faceIdAvatar && !hasExplicitCustomAvatar && (!isTelegramAccount || isAdminTelegramUser(existing) || isAdminTelegramUser(user))) {
           const preferredBotAvatar = pickPreferredAvatar(botRecord.avatar, fetchedAvatar);
           if (preferredBotAvatar) {
             fetchedAvatar = preferredBotAvatar;
@@ -3221,7 +3563,6 @@ Suhbatlashish qoidalaringiz:
         return a > 0 ? a : Number(fallbackAge || 22);
       };
 
-      const isAlreadyCompleted = Boolean(existing?.isProfileCompleted === true);
       const incomingGender = user.gender === 'male' || user.gender === 'female' ? user.gender : '';
       const existingGender = existing.gender === 'male' || existing.gender === 'female' ? existing.gender : '';
       if (!isAdminAccount && !isAlreadyCompleted && user.isProfileCompleted === true && !incomingGender) {
@@ -3248,6 +3589,30 @@ Suhbatlashish qoidalaringiz:
       const rawSyncedPhone = user.phone !== undefined ? String(user.phone) : String(existing.phone || '');
       const formattedSyncedPhone = rawSyncedPhone.trim() ? formatPhoneNumberPretty(rawSyncedPhone) : '';
 
+      // Strip undefined keys so incoming client payloads never erase server-only fields like password
+      const cleanIncomingUser: Record<string, any> = {};
+      for (const [k, v] of Object.entries(user)) {
+        if (v !== undefined) {
+          cleanIncomingUser[k] = v;
+        }
+      }
+
+      const finalResolvedName =
+        incomingValidName ||
+        fetchedName ||
+        existingValidName ||
+        (isTelegramAccount ? '' : 'Foydalanuvchi');
+
+      const customAvatarResolved = hasExplicitCustomAvatar
+        ? (incomingAvatarClean || pickPreferredAvatar(existing.avatar))
+        : '';
+
+      const finalResolvedAvatar =
+        customAvatarResolved ||
+        faceIdAvatar ||
+        (isTelegramAccount && !isAdminAccount && !isAlreadyCompleted ? '' : fetchedAvatar) ||
+        fallbackAvatar;
+
       const currentlyOnline = presenceRegistry.isUidOnline(targetUid);
       const mergedUser = {
         isVerified: false,
@@ -3260,16 +3625,19 @@ Suhbatlashish qoidalaringiz:
         diamondProgress: 0,
         pendingDiamondBatches: [],
         ...existing,
-        ...user,
+        ...cleanIncomingUser,
         gender: lockedGender,
         birthDate: lockedBirthDate,
         age: lockedAge,
         phone: formattedSyncedPhone,
         username: rawUsername,
-        name: (user.name && user.name.trim() && !isPlaceholderOrUsername(user.name, incomingTgHandle, incomingPhone)) 
-          ? user.name.trim() 
-          : (fetchedName || (!isPlaceholderOrUsername(existing.name, incomingTgHandle, incomingPhone) ? existing.name : '') || (isTelegramAccount ? '' : 'Foydalanuvchi')),
-        avatar: faceIdAvatar || (isTelegramAccount && !isAdminAccount && !isAlreadyCompleted ? '' : fetchedAvatar) || fallbackAvatar,
+        name: finalResolvedName,
+        firstName: finalResolvedName,
+        first_name: finalResolvedName,
+        lastName: '',
+        last_name: '',
+        hasCustomAvatar: Boolean(customAvatarResolved),
+        avatar: finalResolvedAvatar,
         banner: user.banner !== undefined ? user.banner : (existing.banner || ''),
         coins: (existing && existing.coins !== undefined) ? existing.coins : (user.coins !== undefined ? user.coins : 100),
         diamonds: (existing && existing.diamonds !== undefined) ? existing.diamonds : (user.diamonds !== undefined ? user.diamonds : 0),
@@ -3296,6 +3664,7 @@ Suhbatlashish qoidalaringiz:
       }
       saveUsersToDisk();
       await contentRepository.upsertUser(mergedUser);
+      syncAuthorSnapshotInPosts(mergedUser);
       io.emit('user_updated', mergedUser);
 
       res.json({ success: true, exists: true, isNewUser: false, user: mergedUser });
@@ -3322,13 +3691,22 @@ Suhbatlashish qoidalaringiz:
             sanitizedUpdates.age = existing.age;
           }
         }
+        if (typeof sanitizedUpdates.name === 'string' && sanitizedUpdates.name.trim()) {
+          const trimmed = sanitizedUpdates.name.trim();
+          sanitizedUpdates.name = trimmed;
+          sanitizedUpdates.firstName = trimmed;
+          sanitizedUpdates.first_name = trimmed;
+          sanitizedUpdates.lastName = '';
+          sanitizedUpdates.last_name = '';
+        }
         if (sanitizedUpdates.phone) {
           sanitizedUpdates.phone = formatPhoneNumberPretty(String(sanitizedUpdates.phone));
         }
-        if (sanitizedUpdates.faceId?.capturedPhotoUrl) {
+        if (sanitizedUpdates.faceId?.capturedPhotoUrl && !sanitizedUpdates.hasCustomAvatar) {
           sanitizedUpdates.avatar = sanitizedUpdates.faceId.capturedPhotoUrl;
         } else if (
           existing.faceId?.capturedPhotoUrl &&
+          !existing.hasCustomAvatar &&
           (!sanitizedUpdates.avatar || isPlaceholderAvatar(sanitizedUpdates.avatar))
         ) {
           sanitizedUpdates.avatar = existing.faceId.capturedPhotoUrl;
@@ -3351,6 +3729,7 @@ Suhbatlashish qoidalaringiz:
         usersStore.set(uid, updated);
         saveUsersToDisk();
         void contentRepository.upsertUser(updated);
+        syncAuthorSnapshotInPosts(updated);
         io.emit('user_updated', updated);
         return res.json({ success: true, user: updated });
       }
@@ -3548,49 +3927,53 @@ Suhbatlashish qoidalaringiz:
         void walletRepository.syncUserWallet(caller);
       }
 
-      // Female participants automatically earn diamonds per connected minute
+      // Female participants automatically earn diamonds per connected minute (up to 120 / 24h daily cap)
       let earnedDiamonds = 0;
       const diamondBeneficiary = callee.gender === 'female' ? callee : (caller.gender === 'female' ? caller : null);
       if (diamondBeneficiary) {
-        earnedDiamonds = billing.diamondReward;
         const progressResult = applyDiamondProgress(
           diamondBeneficiary.diamondProgress || 0,
           diamondBeneficiary.pendingDiamondBatches || [],
-          earnedDiamonds,
-          Date.now()
+          billing.diamondReward,
+          Date.now(),
+          diamondBeneficiary.dailyLimitResetAt
         );
+        earnedDiamonds = progressResult.acceptedDiamonds;
         diamondBeneficiary.diamondProgress = progressResult.diamondProgress;
+        diamondBeneficiary.dailyLimitResetAt = progressResult.dailyLimitResetAt;
         diamondBeneficiary.pendingDiamondBatches = progressResult.pendingDiamondBatches;
-        diamondBeneficiary.totalEarnedDiamonds = (diamondBeneficiary.totalEarnedDiamonds || 0) + earnedDiamonds;
+        diamondBeneficiary.totalEarnedDiamonds = roundDiamonds((diamondBeneficiary.totalEarnedDiamonds || 0) + earnedDiamonds);
         diamondBeneficiary.updatedAt = new Date().toISOString();
         normalizeAndReleaseUser(diamondBeneficiary);
         usersStore.set(diamondBeneficiary.uid, diamondBeneficiary);
         void walletRepository.syncUserWallet(diamondBeneficiary);
 
-        const callTx = {
-          id: 'tx_call_' + Date.now() + Math.random().toString(36).substring(2, 5),
-          sender: caller.uid,
-          receiver: diamondBeneficiary.uid,
-          type: mode === 'audio' ? 'audio_call_minute' : 'video_call_minute',
-          coinAmount: billing.coinCost,
-          diamondAmount: earnedDiamonds,
-          uzsAmount: billing.uzsEquivalent,
-          status: 'completed',
-          note: `${mode === 'audio' ? 'Audio' : 'Video'} qo'ng'iroq (${minuteIndex}-daqiqa): +${earnedDiamonds} olmos (${billing.uzsEquivalent.toLocaleString()} so'm)`,
-          createdAt: new Date().toISOString(),
-        };
-        transactionsStore.unshift(callTx);
-        void walletRepository.recordTransaction(callTx);
+        if (earnedDiamonds > 0) {
+          const callTx = {
+            id: 'tx_call_' + Date.now() + Math.random().toString(36).substring(2, 5),
+            sender: caller.uid,
+            receiver: diamondBeneficiary.uid,
+            type: mode === 'audio' ? 'audio_call_minute' : 'video_call_minute',
+            coinAmount: billing.coinCost,
+            diamondAmount: earnedDiamonds,
+            uzsAmount: calculateDiamondsToUzs(earnedDiamonds),
+            status: 'completed',
+            note: `${mode === 'audio' ? 'Audio' : 'Video'} qo'ng'iroq (${minuteIndex}-daqiqa): +${earnedDiamonds} olmos (${calculateDiamondsToUzs(earnedDiamonds).toLocaleString()} so'm)`,
+            createdAt: new Date().toISOString(),
+          };
+          transactionsStore.unshift(callTx);
+          void walletRepository.recordTransaction(callTx);
+        }
 
-        if (progressResult.newlyLockedCount > 0) {
+        if (progressResult.limitReached && earnedDiamonds > 0) {
           const lockTx = {
             id: 'tx_limit_' + Date.now() + Math.random().toString(36).substring(2, 5),
             receiver: diamondBeneficiary.uid,
             type: 'diamond_limit_locked',
-            diamondAmount: progressResult.newlyLockedCount * 100,
-            uzsAmount: calculateDiamondsToUzs(progressResult.newlyLockedCount * 100),
+            diamondAmount: DIAMOND_LIMIT_TARGET,
+            uzsAmount: calculateDiamondsToUzs(DIAMOND_LIMIT_TARGET),
             status: 'pending',
-            note: '100 ta olmos limiti to\'ldi — 12 soat ichida asosiy hamyonga qo\'shiladi',
+            note: `Kunlik ${DIAMOND_LIMIT_TARGET} ta olmos limiti to'ldi — yig'ilgan olmoslar 12 soat ichida hamyonga qo'shiladi`,
             createdAt: new Date().toISOString(),
           };
           transactionsStore.unshift(lockTx);
@@ -3617,9 +4000,16 @@ Suhbatlashish qoidalaringiz:
     }
   });
 
+  // Disabled for self-service: coins must ONLY be credited manually by admin after payment verification
   app.post('/api/wallet/topup', (req, res) => {
     try {
-      const { uid, coinAmount, paymentMethod = 'click' } = req.body;
+      const { adminUid, uid, coinAmount, paymentMethod = 'manual' } = req.body || {};
+      if (!adminUid || !getVerifiedAdmin(adminUid)) {
+        return res.status(403).json({
+          success: false,
+          error: 'Moneta avtomatik qo\'shilmaydi. Buyurtma yuboring — admin to\'lovdan so\'ng qo\'lda o\'tkazadi.'
+        });
+      }
       if (!uid || !coinAmount || coinAmount <= 0) {
         return res.status(400).json({ error: 'Valid uid and coinAmount required' });
       }
@@ -3641,7 +4031,7 @@ Suhbatlashish qoidalaringiz:
         coinAmount: Number(coinAmount),
         paymentMethod,
         status: 'completed',
-        note: `${coinAmount} moneta xarid qilindi (${paymentMethod.toUpperCase()})`,
+        note: `Admin qo'lda qo'shdi: +${coinAmount} moneta`,
         createdAt: new Date().toISOString()
       };
       transactionsStore.unshift(tx);
@@ -3655,13 +4045,17 @@ Suhbatlashish qoidalaringiz:
     }
   });
 
-  // Coin Shop Purchase Request ("Ariza") — lands in Admin Panel for approval
+  // Coin Shop Purchase Order ("Ariza") — lands in Admin Panel Arizalar with contactInfo, NEVER auto-credits coins
   app.post('/api/wallet/topup-request', (req, res) => {
     try {
-      const { uid, coinAmount, paymentMethod = 'click', note = '' } = req.body || {};
+      const { uid, coinAmount, paymentMethod = 'click', contactInfo = '', note = '' } = req.body || {};
       const parsedAmount = Math.floor(Number(coinAmount));
-      if (!uid || !parsedAmount || parsedAmount <= 0) {
-        return res.status(400).json({ success: false, error: 'Yaroqli foydalanuvchi va moneta miqdorini tanlang' });
+      if (!uid || !parsedAmount || parsedAmount < 1000) {
+        return res.status(400).json({ success: false, error: 'Minimal moneta buyurtmasi 1 000 moneta (50 000 so\'m)' });
+      }
+      const cleanContact = String(contactInfo || '').trim();
+      if (cleanContact.length < 3) {
+        return res.status(400).json({ success: false, error: 'Admin aloqaga chiqishi uchun Telegram username yoki telefon raqamingizni kiriting' });
       }
       const user = usersStore.get(uid);
       if (!user) {
@@ -3672,6 +4066,7 @@ Suhbatlashish qoidalaringiz:
         user,
         coinAmount: parsedAmount,
         paymentMethod,
+        contactInfo: cleanContact,
         note,
       });
 
@@ -3686,7 +4081,7 @@ Suhbatlashish qoidalaringiz:
         uzsAmount: coinReq.uzsAmount,
         paymentMethod: coinReq.paymentMethod,
         status: 'pending',
-        note: `${coinReq.coinAmount} moneta (${coinReq.uzsAmount.toLocaleString()} so'm) xarid arizasi yuborildi`,
+        note: `${coinReq.coinAmount} moneta (${coinReq.uzsAmount.toLocaleString()} so'm) buyurtmasi — Aloqa: ${cleanContact}`,
         createdAt: coinReq.createdAt,
       };
       transactionsStore.unshift(tx);
@@ -3708,11 +4103,11 @@ Suhbatlashish qoidalaringiz:
 
   app.post('/api/wallet/withdraw', (req, res) => {
     try {
-      const { uid, diamondAmount, bankCard } = req.body;
+      const { uid, diamondAmount, bankCard, contactInfo = '' } = req.body || {};
       const user = usersStore.get(uid);
       if (!user) return res.status(404).json({ error: 'Foydalanuvchi topilmadi' });
 
-      const count = Math.floor(Number(diamondAmount));
+      const count = roundDiamonds(Number(diamondAmount));
       if (isNaN(count) || count < 100) {
         return res.status(400).json({ error: 'Minimal yechib olish miqdori 100 almaz (10 000 so\'m)' });
       }
@@ -3722,10 +4117,13 @@ Suhbatlashish qoidalaringiz:
       if (!bankCard || bankCard.trim().replace(/\D/g, '').length < 16) {
         return res.status(400).json({ error: '16 xonali Humo/Uzcard karta raqamini kiriting' });
       }
+      const cleanContact = String(contactInfo || user.telegram || user.phone || '').trim();
+      if (cleanContact.length < 3) {
+        return res.status(400).json({ error: 'Admin aloqaga chiqishi uchun Telegram username yoki telefon raqamingizni kiriting' });
+      }
 
       const uzsAmount = calculateDiamondsToUzs(count);
-      user.diamonds = (user.diamonds || 0) - count;
-      user.totalWithdrawnUzs = (user.totalWithdrawnUzs || 0) + uzsAmount;
+      user.diamonds = roundDiamonds((user.diamonds || 0) - count);
       user.bankCard = bankCard.trim();
       user.updatedAt = new Date().toISOString();
       normalizeAndReleaseUser(user);
@@ -3737,6 +4135,10 @@ Suhbatlashish qoidalaringiz:
         id: 'wd_' + Date.now() + Math.random().toString(36).substring(2, 6),
         userUid: uid,
         userName: user.name,
+        userUsername: user.username || '',
+        userTelegram: user.telegram || '',
+        userPhone: user.phone || '',
+        contactInfo: cleanContact,
         userCard: bankCard.trim(),
         diamondAmount: count,
         uzsAmount,
@@ -3754,7 +4156,7 @@ Suhbatlashish qoidalaringiz:
         diamondAmount: count,
         uzsAmount,
         status: 'pending',
-        note: `${count} almaz (${uzsAmount.toLocaleString()} so'm) yechib olish uchun ariza`,
+        note: `${count} almaz (${uzsAmount.toLocaleString()} so'm) yechib olish arizasi — Aloqa: ${cleanContact}`,
         createdAt: new Date().toISOString()
       };
       transactionsStore.unshift(tx);
@@ -3762,6 +4164,7 @@ Suhbatlashish qoidalaringiz:
       saveTransactionsToDisk();
 
       io.emit('user_updated', user);
+      io.emit('withdrawal_created', wReq);
       res.json({ success: true, user, wallet: user.wallet, withdrawal: wReq });
     } catch (err: any) {
       res.status(500).json({ error: err.message });
@@ -3794,9 +4197,10 @@ Suhbatlashish qoidalaringiz:
         usersStore.set(senderUid, sender);
       }
 
-      const diamondEarned = Math.floor(cost * 0.6);
-      recipient.diamonds = (recipient.diamonds || 0) + diamondEarned;
-      recipient.totalEarnedDiamonds = (recipient.totalEarnedDiamonds || 0) + diamondEarned;
+      // 10 moneta -> 2.5 olmos (0.25x ratio)
+      const diamondEarned = coinsToDiamonds(cost);
+      recipient.diamonds = roundDiamonds((recipient.diamonds || 0) + diamondEarned);
+      recipient.totalEarnedDiamonds = roundDiamonds((recipient.totalEarnedDiamonds || 0) + diamondEarned);
       normalizeAndReleaseUser(sender);
       normalizeAndReleaseUser(recipient);
       usersStore.set(senderUid, sender);
@@ -3885,6 +4289,67 @@ Suhbatlashish qoidalaringiz:
   });
 
   // --- Social Posts CRUD (Photo, Video, Music, Text + Likes & Comments) ---
+  function syncAuthorSnapshotInPosts(author: any) {
+    if (!author?.uid) return;
+    let changed = false;
+    for (let i = 0; i < postsStore.length; i++) {
+      const p = postsStore[i];
+      let postChanged = false;
+      const nextComments = Array.isArray(p.comments)
+        ? p.comments.map((c) => {
+            if (c.authorUid === author.uid || (author.id && c.authorId === author.id)) {
+              const nextC = {
+                ...c,
+                authorName: author.name || c.authorName,
+                authorUsername: author.username !== undefined ? author.username : c.authorUsername,
+                authorAvatar: author.avatar !== undefined ? author.avatar : c.authorAvatar,
+              };
+              if (
+                nextC.authorName !== c.authorName ||
+                nextC.authorUsername !== c.authorUsername ||
+                nextC.authorAvatar !== c.authorAvatar
+              ) {
+                postChanged = true;
+              }
+              return nextC;
+            }
+            return c;
+          })
+        : p.comments;
+
+      if (p.authorUid === author.uid || (author.id && p.authorId === author.id)) {
+        const nextPost: PostItem = {
+          ...p,
+          authorName: author.name || p.authorName,
+          authorUsername: author.username !== undefined ? author.username : p.authorUsername,
+          authorAvatar: author.avatar !== undefined ? author.avatar : p.authorAvatar,
+          authorVerified: Boolean(author.faceId?.verified || author.isVerified || p.authorVerified),
+          comments: nextComments,
+        };
+        if (
+          nextPost.authorName !== p.authorName ||
+          nextPost.authorUsername !== p.authorUsername ||
+          nextPost.authorAvatar !== p.authorAvatar ||
+          postChanged
+        ) {
+          postsStore[i] = nextPost;
+          changed = true;
+          void contentRepository.upsertPost(nextPost);
+          io.emit('post_updated', enrichPost(nextPost));
+        }
+      } else if (postChanged) {
+        const nextPost: PostItem = { ...p, comments: nextComments };
+        postsStore[i] = nextPost;
+        changed = true;
+        void contentRepository.upsertPost(nextPost);
+        io.emit('post_updated', enrichPost(nextPost));
+      }
+    }
+    if (changed) {
+      savePostsToDisk();
+    }
+  }
+
   function findUserByUidOrId(key: string): any | undefined {
     const clean = String(key || '').trim();
     if (!clean) return undefined;
@@ -4206,11 +4671,11 @@ Suhbatlashish qoidalaringiz:
 
       if (action === 'set_balances') {
         if (coins !== undefined && !isNaN(Number(coins))) target.coins = Math.max(0, Math.floor(Number(coins)));
-        if (diamonds !== undefined && !isNaN(Number(diamonds))) target.diamonds = Math.max(0, Math.floor(Number(diamonds)));
+        if (diamonds !== undefined && !isNaN(Number(diamonds))) target.diamonds = roundDiamonds(Math.max(0, Number(diamonds)));
       } else if (action === 'unlock_pending_diamonds') {
         const pendingTotal = getPendingDiamondsTotal(target.pendingDiamondBatches);
         if (pendingTotal > 0) {
-          target.diamonds = (target.diamonds || 0) + pendingTotal;
+          target.diamonds = roundDiamonds((target.diamonds || 0) + pendingTotal);
           target.pendingDiamondBatches = [];
           transactionsStore.unshift({
             id: 'tx_admin_unlock_' + Date.now(),
@@ -4295,18 +4760,23 @@ Suhbatlashish qoidalaringiz:
       saveWithdrawalsToDisk();
 
       let updatedUser: any = null;
-      if (action === 'reject') {
-        const user = usersStore.get(wReq.userUid);
-        if (user) {
-          user.diamonds = (user.diamonds || 0) + Number(wReq.diamondAmount || 0);
-          user.updatedAt = new Date().toISOString();
-          usersStore.set(user.uid, user);
-          saveUsersToDisk();
-          io.emit('user_updated', user);
-          updatedUser = user;
+      const user = usersStore.get(wReq.userUid);
+      if (user) {
+        if (action === 'approve') {
+          user.totalWithdrawnUzs = (user.totalWithdrawnUzs || 0) + Number(wReq.uzsAmount || 0);
+        } else if (action === 'reject') {
+          user.diamonds = roundDiamonds((user.diamonds || 0) + Number(wReq.diamondAmount || 0));
         }
+        user.updatedAt = new Date().toISOString();
+        normalizeAndReleaseUser(user);
+        usersStore.set(user.uid, user);
+        saveUsersToDisk();
+        void walletRepository.syncUserWallet(user);
+        io.emit('user_updated', user);
+        updatedUser = user;
       }
 
+      io.emit('withdrawal_updated', wReq);
       res.json({ success: true, withdrawal: wReq, user: updatedUser });
     } catch (err: any) {
       res.status(500).json({ success: false, error: err.message });
@@ -4319,7 +4789,7 @@ Suhbatlashish qoidalaringiz:
       if (!getVerifiedAdmin(adminUid)) {
         return res.status(403).json({ success: false, error: 'Admin huquqi talab qilinadi' });
       }
-      if (action !== 'approve' && action !== 'reject') {
+      if (action !== 'approve' && action !== 'complete_manual' && action !== 'reject') {
         return res.status(400).json({ success: false, error: 'Noto\'g\'ri amal' });
       }
       const reqItem = coinRequestsStore.find((r) => r.id === requestId);
@@ -4330,15 +4800,15 @@ Suhbatlashish qoidalaringiz:
         return res.status(400).json({ success: false, error: 'Bu ariza allaqachon ko\'rib chiqilgan' });
       }
 
-      reqItem.status = action === 'approve' ? 'approved' : 'rejected';
+      reqItem.status = action === 'reject' ? 'rejected' : 'approved';
       reqItem.reviewedAt = new Date().toISOString();
       reqItem.reviewedBy = adminUid;
       saveCoinRequestsToDisk();
 
       let updatedUser: any = null;
-      if (action === 'approve') {
+      if (action === 'approve' || action === 'complete_manual') {
         const user = usersStore.get(reqItem.userUid);
-        if (user) {
+        if (action === 'approve' && user) {
           user.coins = (user.coins || 0) + Number(reqItem.coinAmount || 0);
           user.updatedAt = new Date().toISOString();
           normalizeAndReleaseUser(user);
@@ -4356,7 +4826,10 @@ Suhbatlashish qoidalaringiz:
           uzsAmount: Number(reqItem.uzsAmount || 0),
           paymentMethod: reqItem.paymentMethod,
           status: 'completed',
-          note: `Admin tasdiqladi: +${reqItem.coinAmount} moneta (${reqItem.paymentMethod.toUpperCase()})`,
+          note:
+            action === 'complete_manual'
+              ? `Admin to'lovni qabul qilib qo'lda o'tkazdi: ${reqItem.coinAmount} moneta`
+              : `Admin tasdiqladi: +${reqItem.coinAmount} moneta (${reqItem.paymentMethod.toUpperCase()})`,
           createdAt: new Date().toISOString(),
         };
         transactionsStore.unshift(tx);
@@ -4662,14 +5135,14 @@ Suhbatlashish qoidalaringiz:
         io.emit('user_updated', senderUser);
       }
 
-      // If female user replies to a male user, convert pending transactions and fill 0-100% diamond limit
+      // If female user replies to a male user, convert pending transactions and credit daily 120-diamond 24h cap (all earned diamonds queue into wallet even if < 120)
       if (senderUser && senderUser.gender === 'female' && recipientUser && recipientUser.gender === 'male') {
         let totalNewDiamonds = 0;
         for (const tx of transactionsStore) {
           if (tx.sender === recipientId && tx.receiver === senderId && tx.type === 'message_paid' && tx.status === 'pending') {
             tx.status = 'completed';
             tx.note = 'Xabarga javob berildi (limitga qo\'shildi)';
-            totalNewDiamonds += (tx.diamondAmount || MESSAGE_DIAMOND_REWARD);
+            totalNewDiamonds = roundDiamonds(totalNewDiamonds + roundDiamonds(tx.diamondAmount || MESSAGE_DIAMOND_REWARD));
           }
         }
         if (totalNewDiamonds > 0) {
@@ -4677,21 +5150,23 @@ Suhbatlashish qoidalaringiz:
             senderUser.diamondProgress || 0,
             senderUser.pendingDiamondBatches || [],
             totalNewDiamonds,
-            Date.now()
+            Date.now(),
+            senderUser.dailyLimitResetAt
           );
           senderUser.diamondProgress = progressResult.diamondProgress;
+          senderUser.dailyLimitResetAt = progressResult.dailyLimitResetAt;
           senderUser.pendingDiamondBatches = progressResult.pendingDiamondBatches;
-          senderUser.totalEarnedDiamonds = (senderUser.totalEarnedDiamonds || 0) + totalNewDiamonds;
+          senderUser.totalEarnedDiamonds = roundDiamonds((senderUser.totalEarnedDiamonds || 0) + progressResult.acceptedDiamonds);
           normalizeAndReleaseUser(senderUser);
-          if (progressResult.newlyLockedCount > 0) {
+          if (progressResult.limitReached && progressResult.acceptedDiamonds > 0) {
             const lockTx = {
               id: 'tx_limit_' + Date.now() + Math.random().toString(36).substring(2, 5),
               receiver: senderId,
               type: 'diamond_limit_locked',
-              diamondAmount: progressResult.newlyLockedCount * 100,
-              uzsAmount: calculateDiamondsToUzs(progressResult.newlyLockedCount * 100),
+              diamondAmount: DIAMOND_LIMIT_TARGET,
+              uzsAmount: calculateDiamondsToUzs(DIAMOND_LIMIT_TARGET),
               status: 'pending',
-              note: '100 ta olmos limiti to\'ldi — 12 soat ichida asosiy hamyonga qo\'shiladi',
+              note: `Kunlik ${DIAMOND_LIMIT_TARGET} ta olmos limiti to'ldi — yig'ilgan olmoslar 12 soat ichida hamyonga qo'shiladi`,
               createdAt: new Date().toISOString()
             };
             transactionsStore.unshift(lockTx);

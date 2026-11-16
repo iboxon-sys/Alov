@@ -2,11 +2,14 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   MESSAGE_COIN_COST,
+  MESSAGE_DIAMOND_REWARD,
   AUDIO_CALL_COIN_COST_PER_MIN,
   AUDIO_CALL_DIAMOND_PER_MIN,
   VIDEO_CALL_COIN_COST_PER_MIN,
   VIDEO_CALL_DIAMOND_PER_MIN,
   DIAMOND_LIMIT_TARGET,
+  DAILY_LIMIT_WINDOW_HOURS,
+  DAILY_LIMIT_WINDOW_MS,
   DIAMOND_TO_UZS_RATE,
   DIAMOND_UNLOCK_HOURS,
   DIAMOND_UNLOCK_DURATION_MS,
@@ -14,6 +17,8 @@ import {
   ADMIN_FULL_DIAMONDS,
   isAdminTelegramUser,
   canChargeForMessage,
+  coinsToDiamonds,
+  formatDiamondsDisplay,
   applyDiamondProgress,
   releaseMatureDiamondBatches,
   getDiamondProgressPercent,
@@ -23,18 +28,26 @@ import {
   computeCountdownParts,
 } from './tokenomics.ts';
 
-describe('tokenomics, wallet, 12h unlock & call billing helpers', () => {
-  it('sets message price, audio/video call pricing, and exchange rate (100 diamonds = 10,000 UZS)', () => {
-    assert.equal(MESSAGE_COIN_COST, 5);
+describe('tokenomics, wallet, 24h 120-diamond cap, 12h unlock & call billing helpers', () => {
+  it('sets 10 coins -> 2.5 diamonds, call pricing, 120 daily target, and exchange rate', () => {
+    assert.equal(MESSAGE_COIN_COST, 10);
+    assert.equal(MESSAGE_DIAMOND_REWARD, 2.5);
     assert.equal(AUDIO_CALL_COIN_COST_PER_MIN, 10);
-    assert.equal(AUDIO_CALL_DIAMOND_PER_MIN, 10);
+    assert.equal(AUDIO_CALL_DIAMOND_PER_MIN, 2.5);
     assert.equal(VIDEO_CALL_COIN_COST_PER_MIN, 20);
-    assert.equal(VIDEO_CALL_DIAMOND_PER_MIN, 20);
+    assert.equal(VIDEO_CALL_DIAMOND_PER_MIN, 5);
+    assert.equal(coinsToDiamonds(10), 2.5);
+    assert.equal(coinsToDiamonds(40), 10);
+    assert.equal(DIAMOND_LIMIT_TARGET, 120);
+    assert.equal(DAILY_LIMIT_WINDOW_HOURS, 24);
     assert.equal(DIAMOND_TO_UZS_RATE, 100);
     assert.equal(DIAMOND_UNLOCK_HOURS, 12);
     assert.equal(DIAMOND_UNLOCK_DURATION_MS, 12 * 60 * 60 * 1000);
+    assert.equal(calculateDiamondsToUzs(2.5), 250);
     assert.equal(calculateDiamondsToUzs(100), 10000);
-    assert.equal(calculateDiamondsToUzs(250), 25000);
+    assert.equal(calculateDiamondsToUzs(120), 12000);
+    assert.equal(formatDiamondsDisplay(2.5), '2.5');
+    assert.equal(formatDiamondsDisplay(120), '120');
     assert.ok(ADMIN_FULL_COINS >= 999999);
     assert.ok(ADMIN_FULL_DIAMONDS >= 999999);
   });
@@ -42,13 +55,13 @@ describe('tokenomics, wallet, 12h unlock & call billing helpers', () => {
   it('computes per-minute billing accurately for audio and video calls', () => {
     const audioBill = calculateCallMinuteBilling('audio');
     assert.equal(audioBill.coinCost, 10);
-    assert.equal(audioBill.diamondReward, 10);
-    assert.equal(audioBill.uzsEquivalent, 1000);
+    assert.equal(audioBill.diamondReward, 2.5);
+    assert.equal(audioBill.uzsEquivalent, 250);
 
     const videoBill = calculateCallMinuteBilling('video');
     assert.equal(videoBill.coinCost, 20);
-    assert.equal(videoBill.diamondReward, 20);
-    assert.equal(videoBill.uzsEquivalent, 2000);
+    assert.equal(videoBill.diamondReward, 5);
+    assert.equal(videoBill.uzsEquivalent, 500);
   });
 
   it('recognizes @Salikh_07 and https://t.me/Salikh_07 as platform admin', () => {
@@ -67,51 +80,61 @@ describe('tokenomics, wallet, 12h unlock & call billing helpers', () => {
     assert.equal(canChargeForMessage({ senderGender: 'male', isAdminSender: true }), false);
   });
 
-  it('fills 0-100% diamond progress and creates 12h locked batch at 100 diamonds', () => {
+  it('queues even partial (<120) 2.5-diamond earnings for wallet release and caps 24h earnings at 120', () => {
     const t0 = 1_700_000_000_000;
-    const step1 = applyDiamondProgress(0, [], 35, t0);
-    assert.equal(step1.diamondProgress, 35);
-    assert.equal(getDiamondProgressPercent(step1.diamondProgress), 35);
-    assert.equal(step1.pendingDiamondBatches.length, 0);
+    const step1 = applyDiamondProgress(0, [], 2.5, t0, null);
+    assert.equal(step1.diamondProgress, 2.5);
+    assert.equal(step1.acceptedDiamonds, 2.5);
+    assert.equal(step1.dailyLimitResetAt, t0 + DAILY_LIMIT_WINDOW_MS);
+    assert.equal(step1.pendingDiamondBatches.length, 1);
+    assert.equal(step1.pendingDiamondBatches[0].amount, 2.5);
+    assert.equal(step1.limitReached, false);
 
-    const step2 = applyDiamondProgress(step1.diamondProgress, step1.pendingDiamondBatches, 70, t0);
-    assert.equal(step2.diamondProgress, 5);
-    assert.equal(step2.newlyLockedCount, 1);
-    assert.equal(step2.pendingDiamondBatches.length, 1);
-    assert.equal(step2.pendingDiamondBatches[0].amount, DIAMOND_LIMIT_TARGET);
-    assert.equal(step2.pendingDiamondBatches[0].unlockAt, t0 + 12 * 60 * 60 * 1000);
+    // Partial earnings (even 42.5 < 120) still release to wallet after 12h!
+    const step2 = applyDiamondProgress(step1.diamondProgress, step1.pendingDiamondBatches, 40, t0 + 1000, step1.dailyLimitResetAt);
+    assert.equal(step2.diamondProgress, 42.5);
+    assert.equal(step2.acceptedDiamonds, 40);
+    assert.equal(step2.pendingDiamondBatches[0].amount, 42.5);
 
-    // Before 12h: wallet should stay 10
-    const beforeUnlock = releaseMatureDiamondBatches(10, step2.pendingDiamondBatches, t0 + DIAMOND_UNLOCK_DURATION_MS - 1000);
-    assert.equal(beforeUnlock.diamonds, 10);
-    assert.equal(beforeUnlock.releasedAmount, 0);
-    assert.equal(beforeUnlock.pendingDiamondBatches.length, 1);
+    const after12h = releaseMatureDiamondBatches(10, step2.pendingDiamondBatches, t0 + DIAMOND_UNLOCK_DURATION_MS);
+    assert.equal(after12h.diamonds, 52.5);
+    assert.equal(after12h.releasedAmount, 42.5);
+    assert.equal(after12h.pendingDiamondBatches.length, 0);
 
-    // After 12h: 100 diamonds released into wallet
-    const afterUnlock = releaseMatureDiamondBatches(10, step2.pendingDiamondBatches, t0 + DIAMOND_UNLOCK_DURATION_MS);
-    assert.equal(afterUnlock.diamonds, 110);
-    assert.equal(afterUnlock.releasedAmount, 100);
-    assert.equal(afterUnlock.pendingDiamondBatches.length, 0);
+    // Remaining daily cap is 120 - 42.5 = 77.5; requesting 90 caps at 77.5
+    const step3 = applyDiamondProgress(step2.diamondProgress, [], 90, t0 + 2 * 3600 * 1000, step2.dailyLimitResetAt);
+    assert.equal(step3.acceptedDiamonds, 77.5);
+    assert.equal(step3.diamondProgress, 120);
+    assert.equal(step3.limitReached, true);
+    assert.equal(getDiamondProgressPercent(step3.diamondProgress), 100);
+
+    // After 24h window expires, counter resets cleanly to 0 for the next day
+    const nextDay = applyDiamondProgress(step3.diamondProgress, [], 2.5, t0 + DAILY_LIMIT_WINDOW_MS + 1000, step3.dailyLimitResetAt);
+    assert.equal(nextDay.diamondProgress, 2.5);
+    assert.equal(nextDay.acceptedDiamonds, 2.5);
+    assert.equal(nextDay.limitReached, false);
   });
 
-  it('builds consistent wallet snapshot with UZS balance and pending totals', () => {
+  it('builds consistent wallet snapshot with decimal UZS balance and 120 daily target', () => {
     const t0 = 1_700_000_000_000;
     const snapshot = buildUserWalletSnapshot({
       uid: 'u_female_1',
-      diamonds: 150,
-      diamondProgress: 40,
+      diamonds: 152.5,
+      diamondProgress: 42.5,
+      dailyLimitResetAt: t0 + DAILY_LIMIT_WINDOW_MS,
       pendingDiamondBatches: [
-        { id: 'b1', amount: 100, createdAt: t0, unlockAt: t0 + DIAMOND_UNLOCK_DURATION_MS },
+        { id: 'b1', amount: 42.5, createdAt: t0, unlockAt: t0 + DIAMOND_UNLOCK_DURATION_MS },
       ],
       totalWithdrawnUzs: 20000,
     }, t0);
 
     assert.equal(snapshot.uid, 'u_female_1');
-    assert.equal(snapshot.balanceDiamonds, 150);
-    assert.equal(snapshot.balanceUzs, 15000);
-    assert.equal(snapshot.pendingDiamonds, 100);
-    assert.equal(snapshot.pendingUzs, 10000);
-    assert.equal(snapshot.diamondProgress, 40);
+    assert.equal(snapshot.balanceDiamonds, 152.5);
+    assert.equal(snapshot.balanceUzs, 15250);
+    assert.equal(snapshot.pendingDiamonds, 42.5);
+    assert.equal(snapshot.pendingUzs, 4250);
+    assert.equal(snapshot.diamondProgress, 42.5);
+    assert.equal(snapshot.dailyLimitTarget, 120);
     assert.equal(snapshot.exchangeRateUzs, 100);
     assert.equal(snapshot.unlockWindowHours, 12);
     assert.equal(snapshot.nextUnlockAt, t0 + DIAMOND_UNLOCK_DURATION_MS);

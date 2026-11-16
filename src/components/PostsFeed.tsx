@@ -1,4 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import {
   Heart,
   MessageCircle,
@@ -34,12 +35,13 @@ import { getApiUrl, resolveApiMediaUrl } from '../config/api';
 
 interface MusicPlayerCardProps {
   mediaUrl: string;
+  embedUrl?: string;
   title?: string;
   artist?: string;
   coverUrl?: string;
 }
 
-export const MusicPlayerCard: React.FC<MusicPlayerCardProps> = ({ mediaUrl, title, artist, coverUrl }) => {
+export const MusicPlayerCard: React.FC<MusicPlayerCardProps> = ({ mediaUrl, embedUrl, title, artist, coverUrl }) => {
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const [isPlaying, setIsPlaying] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
@@ -48,6 +50,7 @@ export const MusicPlayerCard: React.FC<MusicPlayerCardProps> = ({ mediaUrl, titl
   const resolvedMediaUrl = resolveApiMediaUrl(mediaUrl);
   const resolvedCoverUrl = coverUrl ? resolveApiMediaUrl(coverUrl) : '';
   const isLocalMedia = resolvedMediaUrl.includes('/api/media/');
+  const isDirectAudioFile = isLocalMedia || /\.(mp3|wav|ogg|m4a|aac|flac)(\?.*)?$/i.test(resolvedMediaUrl) || resolvedMediaUrl.startsWith('data:audio/') || resolvedMediaUrl.startsWith('blob:');
   const downloadFileName = sanitizeMp3DownloadFilename(title);
   const downloadHref = isLocalMedia
     ? `${resolvedMediaUrl}?download=1&filename=${encodeURIComponent(downloadFileName)}`
@@ -58,7 +61,21 @@ export const MusicPlayerCard: React.FC<MusicPlayerCardProps> = ({ mediaUrl, titl
     setCurrentTime(0);
     setDuration(0);
     setLoadError(false);
-  }, [resolvedMediaUrl]);
+  }, [resolvedMediaUrl, embedUrl]);
+
+  if (embedUrl && !isDirectAudioFile) {
+    return (
+      <div className="relative overflow-hidden rounded-2xl bg-[#12141E] border border-white/10 shadow-lg">
+        <iframe
+          src={embedUrl}
+          title={title || 'Musiqiy pleyer'}
+          className="w-full h-[152px] border-0"
+          allow="autoplay; clipboard-write; encrypted-media; fullscreen; picture-in-picture"
+          loading="lazy"
+        />
+      </div>
+    );
+  }
 
   const togglePlay = () => {
     const audio = audioRef.current;
@@ -257,10 +274,41 @@ export const PostsFeed: React.FC<PostsFeedProps> = ({
 
   const handleApplyLink = async (urlToParse: string) => {
     const raw = (urlToParse || '').trim();
-    if (!raw) return;
+    if (!raw || uploadingMedia) return;
     setDraftError('');
 
     const parsed = parseMediaLink(raw, draftType);
+
+    if (draftType === 'photo' && !raw.startsWith('/api/media/') && !raw.startsWith('blob:') && !raw.startsWith('data:')) {
+      setUploadingMedia(true);
+      try {
+        const res = await fetch(getApiUrl('/api/media/import-image-url'), {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ url: parsed.normalizedUrl || raw }),
+        });
+        const data = await res.json();
+        if (!res.ok || !data?.success || !data?.url) {
+          setDraftError(
+            data?.error ||
+              "Havoladan rasmni yuklab bo'lmadi. To'g'ridan-to'g'ri rasm havolasi kiriting yoki qurilmadan rasm yuklang."
+          );
+          return;
+        }
+        setMediaUrl(data.url);
+        setEmbedUrl('');
+        setMediaProvider('direct');
+        setLinkInputText('');
+        setShowLinkInput(false);
+        if (onNotify) onNotify('Rasm kerakli formatda yuklandi');
+        return;
+      } catch {
+        setDraftError("Rasm havolasini yuklab olishda server bilan aloqa uzildi.");
+        return;
+      } finally {
+        setUploadingMedia(false);
+      }
+    }
 
     if (draftType === 'video' && !raw.startsWith('/api/media/') && !raw.startsWith('blob:') && !raw.startsWith('data:')) {
       setUploadingMedia(true);
@@ -283,6 +331,7 @@ export const PostsFeed: React.FC<PostsFeedProps> = ({
           setEmbedUrl(data.embedUrl);
           setMediaProvider(data.provider || parsed.provider || 'direct');
           setIsVerticalVideo(Boolean(data.isVertical));
+          setLinkInputText('');
           return;
         }
         if (!data.url) {
@@ -295,6 +344,8 @@ export const PostsFeed: React.FC<PostsFeedProps> = ({
         setEmbedUrl('');
         setMediaProvider('direct');
         setIsVerticalVideo(Boolean(data.isVertical));
+        setLinkInputText('');
+        if (onNotify) onNotify('Video MP4 formatida yuklandi');
         return;
       } catch {
         setDraftError("Video havolasini yuklab olishda server bilan aloqa uzildi.");
@@ -324,6 +375,7 @@ export const PostsFeed: React.FC<PostsFeedProps> = ({
           setMediaUrl(data.url || parsed.normalizedUrl || raw);
           setEmbedUrl(data.embedUrl);
           setMediaProvider(data.provider || parsed.provider || 'direct');
+          setLinkInputText('');
           return;
         }
         if (!data.url) {
@@ -333,6 +385,7 @@ export const PostsFeed: React.FC<PostsFeedProps> = ({
         setMediaUrl(data.url);
         setEmbedUrl('');
         setMediaProvider('direct');
+        setLinkInputText('');
         if (!audioTitle && data.title) setAudioTitle(data.title);
         if (!audioArtist && data.artist) setAudioArtist(data.artist);
         if (onNotify) onNotify('Video/audio MP3 formatida yuklandi');
@@ -350,10 +403,6 @@ export const PostsFeed: React.FC<PostsFeedProps> = ({
     setMediaProvider(parsed.provider || 'direct');
     setIsVerticalVideo(Boolean(parsed.isVertical));
 
-    if (parsed.detectedType && draftType !== parsed.detectedType) {
-      setDraftType(parsed.detectedType);
-    }
-
     if (draftType === 'music' && !audioTitle) {
       const meta = parseAudioFilenameMetadata(raw);
       if (meta.title) setAudioTitle(meta.title);
@@ -365,14 +414,14 @@ export const PostsFeed: React.FC<PostsFeedProps> = ({
     if (!file) return;
     setDraftError('');
 
-    if (file.size > 40 * 1024 * 1024) {
-      setDraftError('Fayl hajmi 40 MB dan oshmasligi kerak.');
+    if (file.size > 45 * 1024 * 1024) {
+      setDraftError('Fayl hajmi 45 MB dan oshmasligi kerak.');
       return;
     }
 
     setUploadingMedia(true);
     try {
-      const res = await fetch(getApiUrl('/api/media/upload-raw'), {
+      const res = await fetch(getApiUrl(`/api/media/upload-raw?type=${encodeURIComponent(typeHint)}`), {
         method: 'POST',
         headers: {
           'Content-Type': file.type || 'application/octet-stream',
@@ -534,7 +583,11 @@ export const PostsFeed: React.FC<PostsFeedProps> = ({
         ref={galleryInputRef}
         type="file"
         accept="image/*"
-        onChange={(e) => handleFileUpload(e.target.files?.[0], 'photo')}
+        onChange={(e) => {
+          const file = e.target.files?.[0];
+          e.target.value = '';
+          handleFileUpload(file, 'photo');
+        }}
         className="hidden"
         data-testid="hidden-gallery-input"
       />
@@ -543,7 +596,11 @@ export const PostsFeed: React.FC<PostsFeedProps> = ({
         type="file"
         accept="image/*"
         capture="environment"
-        onChange={(e) => handleFileUpload(e.target.files?.[0], 'photo')}
+        onChange={(e) => {
+          const file = e.target.files?.[0];
+          e.target.value = '';
+          handleFileUpload(file, 'photo');
+        }}
         className="hidden"
         data-testid="hidden-camera-input"
       />
@@ -551,15 +608,23 @@ export const PostsFeed: React.FC<PostsFeedProps> = ({
         ref={videoInputRef}
         type="file"
         accept="video/*"
-        onChange={(e) => handleFileUpload(e.target.files?.[0], 'video')}
+        onChange={(e) => {
+          const file = e.target.files?.[0];
+          e.target.value = '';
+          handleFileUpload(file, 'video');
+        }}
         className="hidden"
         data-testid="hidden-video-input"
       />
       <input
         ref={audioInputRef}
         type="file"
-        accept="audio/*,.mp3,.wav,.ogg,.m4a"
-        onChange={(e) => handleFileUpload(e.target.files?.[0], 'music')}
+        accept="audio/*,.mp3,.wav,.ogg,.m4a,.aac,.flac"
+        onChange={(e) => {
+          const file = e.target.files?.[0];
+          e.target.value = '';
+          handleFileUpload(file, 'music');
+        }}
         className="hidden"
         data-testid="hidden-audio-input"
       />
@@ -585,29 +650,30 @@ export const PostsFeed: React.FC<PostsFeedProps> = ({
         </motion.button>
       )}
 
-      {/* Post Compose Modal Dialog */}
-      <AnimatePresence>
-        {showComposeModal && (
-          <motion.div
-            initial={{ opacity: 0 }}
-            animate={{ opacity: 1 }}
-            exit={{ opacity: 0 }}
-            transition={{ duration: 0.18 }}
-            className="fixed inset-0 z-[150] bg-black/75 backdrop-blur-md flex items-center justify-center p-3 sm:p-4"
-            onClick={() => setShowComposeModal(false)}
-            data-testid="compose-modal-backdrop"
-          >
+      {/* Post Compose Modal Dialog (Portaled to document.body so header/dock never clip it) */}
+      {typeof document !== 'undefined' && createPortal(
+        <AnimatePresence>
+          {showComposeModal && (
             <motion.div
-              initial={{ opacity: 0, scale: 0.96, y: 12 }}
-              animate={{ opacity: 1, scale: 1, y: 0 }}
-              exit={{ opacity: 0, scale: 0.96, y: 10 }}
-              transition={{ duration: 0.22, ease: [0.16, 1, 0.3, 1] }}
-              className="bg-[#11131B] w-full max-w-xl rounded-[28px] shadow-[0_30px_90px_rgba(0,0,0,0.8)] border border-white/10 overflow-hidden flex flex-col max-h-[92vh] text-zinc-100"
-              onClick={(e) => e.stopPropagation()}
-              data-testid="post-compose-modal"
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              transition={{ duration: 0.18 }}
+              className="fixed inset-0 z-[160] bg-black/75 backdrop-blur-md flex items-center justify-center p-3 sm:p-4"
+              onClick={() => setShowComposeModal(false)}
+              data-testid="compose-modal-backdrop"
             >
-              {/* Modal Header */}
-              <div className="px-5 py-4 border-b border-white/[0.08] flex items-center justify-between bg-[#151822]">
+              <motion.div
+                initial={{ opacity: 0, scale: 0.96, y: 12 }}
+                animate={{ opacity: 1, scale: 1, y: 0 }}
+                exit={{ opacity: 0, scale: 0.96, y: 10 }}
+                transition={{ duration: 0.22, ease: [0.16, 1, 0.3, 1] }}
+                className="bg-[#11131B] w-full max-w-xl rounded-[28px] shadow-[0_30px_90px_rgba(0,0,0,0.8)] border border-white/10 overflow-hidden flex flex-col max-h-[92vh] text-zinc-100"
+                onClick={(e) => e.stopPropagation()}
+                data-testid="post-compose-modal"
+              >
+                {/* Modal Header */}
+                <div className="px-5 py-4 border-b border-white/[0.08] flex items-center justify-between bg-[#151822] shrink-0">
                 <div className="flex items-center gap-3">
                   <div className="w-10 h-10 rounded-2xl bg-rose-500/15 border border-rose-500/30 flex items-center justify-center text-rose-400">
                     <Sparkles className="w-5 h-5" />
@@ -649,6 +715,9 @@ export const PostsFeed: React.FC<PostsFeedProps> = ({
                           setDraftType(m.key);
                           setMediaUrl('');
                           setEmbedUrl('');
+                          setMediaProvider('direct');
+                          setIsVerticalVideo(false);
+                          setLinkInputText('');
                           setDraftError('');
                           setShowLinkInput(false);
                         }}
@@ -741,16 +810,25 @@ export const PostsFeed: React.FC<PostsFeedProps> = ({
                               type="url"
                               value={linkInputText}
                               onChange={(e) => setLinkInputText(e.target.value)}
-                              placeholder="https://... rasm havolasini kiriting"
+                              onKeyDown={(e) => {
+                                if (e.key === 'Enter') {
+                                  e.preventDefault();
+                                  handleApplyLink(linkInputText);
+                                }
+                              }}
+                              placeholder="https://... yoki Pinterest/Telegram rasm havolasi"
                               data-testid="post-photo-link-input"
                               className="flex-1 px-3.5 py-2 bg-[#161923] border border-white/10 rounded-xl text-xs text-zinc-100 placeholder-zinc-500 focus:outline-none focus:border-rose-500"
                             />
                             <button
                               type="button"
+                              disabled={uploadingMedia || !linkInputText.trim()}
                               onClick={() => handleApplyLink(linkInputText)}
-                              className="px-3.5 py-2 rounded-xl bg-white/10 hover:bg-white/20 text-white text-xs font-bold transition cursor-pointer"
+                              data-testid="post-photo-link-submit-btn"
+                              className="px-3.5 py-2 rounded-xl bg-[#E11D48] hover:bg-[#BE123C] text-white text-xs font-bold transition cursor-pointer disabled:opacity-50 flex items-center gap-1.5 shrink-0"
                             >
-                              Tasdiqlash
+                              {uploadingMedia && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
+                              <span>{uploadingMedia ? 'Yuklanmoqda...' : 'Yuklash'}</span>
                             </button>
                           </div>
                         )}
@@ -798,6 +876,12 @@ export const PostsFeed: React.FC<PostsFeedProps> = ({
                               type="url"
                               value={linkInputText}
                               onChange={(e) => setLinkInputText(e.target.value)}
+                              onKeyDown={(e) => {
+                                if (e.key === 'Enter') {
+                                  e.preventDefault();
+                                  handleApplyLink(linkInputText);
+                                }
+                              }}
                               placeholder="TikTok, Instagram, YouTube, X, Telegram yoki .mp4 havola"
                               data-testid="post-video-link-input"
                               className="flex-1 px-3.5 py-2.5 bg-[#0D0F16] border border-white/10 rounded-xl text-xs text-zinc-100 placeholder-zinc-500 focus:outline-none focus:border-rose-500"
@@ -899,6 +983,12 @@ export const PostsFeed: React.FC<PostsFeedProps> = ({
                           type="url"
                           value={linkInputText}
                           onChange={(e) => setLinkInputText(e.target.value)}
+                          onKeyDown={(e) => {
+                            if (e.key === 'Enter') {
+                              e.preventDefault();
+                              handleApplyLink(linkInputText);
+                            }
+                          }}
                           placeholder="YouTube, TikTok, Instagram, Telegram yoki .mp4/.mp3 havola"
                           data-testid="post-audio-link-input"
                           className="flex-1 px-3.5 py-2.5 bg-[#0D0F16] border border-white/10 rounded-xl text-xs text-zinc-100 placeholder-zinc-500 focus:outline-none focus:border-rose-500"
@@ -973,7 +1063,7 @@ export const PostsFeed: React.FC<PostsFeedProps> = ({
                             Olib tashlash
                           </button>
                         </div>
-                        <MusicPlayerCard mediaUrl={mediaUrl} title={audioTitle} artist={audioArtist} />
+                        <MusicPlayerCard mediaUrl={mediaUrl} embedUrl={embedUrl} title={audioTitle} artist={audioArtist} />
                       </div>
                     )}
                   </div>
@@ -1010,7 +1100,9 @@ export const PostsFeed: React.FC<PostsFeedProps> = ({
             </motion.div>
           </motion.div>
         )}
-      </AnimatePresence>
+      </AnimatePresence>,
+      document.body
+      )}
 
       {/* Filter Tabs for Global Feed */}
       {!authorUid && (
@@ -1288,6 +1380,7 @@ export const PostsFeed: React.FC<PostsFeedProps> = ({
                   <div className="px-4 sm:px-5 pb-3">
                     <MusicPlayerCard
                       mediaUrl={post.mediaUrl}
+                      embedUrl={post.embedUrl}
                       title={post.audioTitle}
                       artist={post.audioArtist || authorName}
                       coverUrl={post.coverUrl}

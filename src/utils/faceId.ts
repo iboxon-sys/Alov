@@ -237,12 +237,17 @@ export function requiresFaceIdForUser(user: {
 
 export function resolveEffectiveProfileAvatar(user: {
   avatar?: string | null;
+  hasCustomAvatar?: boolean | null;
   faceId?: { verified?: boolean; capturedPhotoUrl?: string | null } | null;
 } | null | undefined): string {
   if (!user) return '';
+  const rawAvatar = String(user.avatar || '').trim();
+  if (user.hasCustomAvatar === true && rawAvatar) {
+    return rawAvatar;
+  }
   const facePhoto = String(user.faceId?.capturedPhotoUrl || '').trim();
   if (facePhoto) return facePhoto;
-  return String(user.avatar || '').trim();
+  return rawAvatar;
 }
 
 export function formatFaceIdDateUz(isoDate?: string | null): string {

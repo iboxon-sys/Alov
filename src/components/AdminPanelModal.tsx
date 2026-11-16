@@ -20,7 +20,7 @@ import {
   Inbox,
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { getPendingDiamondsTotal } from '../utils/tokenomics';
+import { formatDiamondsDisplay, getPendingDiamondsTotal } from '../utils/tokenomics';
 import { resolveEffectiveProfileAvatar } from '../utils/faceId';
 import { resolveApiMediaUrl } from '../config/api';
 import type { CoinPurchaseRequest } from '../utils/coinRequests';
@@ -104,11 +104,21 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
     const handleCoinReqUpdated = (req: CoinPurchaseRequest) => {
       setCoinRequests((prev) => prev.map((r) => (r.id === req.id ? req : r)));
     };
+    const handleWithdrawalCreated = (w: any) => {
+      setWithdrawals((prev) => (prev.some((item) => item.id === w.id) ? prev : [w, ...prev]));
+    };
+    const handleWithdrawalUpdated = (w: any) => {
+      setWithdrawals((prev) => prev.map((item) => (item.id === w.id ? w : item)));
+    };
     socket.on('coin_request_created', handleCoinReqCreated);
     socket.on('coin_request_updated', handleCoinReqUpdated);
+    socket.on('withdrawal_created', handleWithdrawalCreated);
+    socket.on('withdrawal_updated', handleWithdrawalUpdated);
     return () => {
       socket.off('coin_request_created', handleCoinReqCreated);
       socket.off('coin_request_updated', handleCoinReqUpdated);
+      socket.off('withdrawal_created', handleWithdrawalCreated);
+      socket.off('withdrawal_updated', handleWithdrawalUpdated);
     };
   }, [socket]);
 
@@ -163,7 +173,10 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
     }
   };
 
-  const handleCoinRequestAction = async (requestId: string, action: 'approve' | 'reject') => {
+  const handleCoinRequestAction = async (
+    requestId: string,
+    action: 'approve' | 'complete_manual' | 'reject'
+  ) => {
     setBusyId(requestId);
     setError('');
     try {
@@ -182,6 +195,8 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
         setNotice(
           action === 'approve'
             ? `Ariza tasdiqlandi va +${data.request?.coinAmount || ''} moneta hisobga qo'shildi`
+            : action === 'complete_manual'
+            ? "Ariza qo'lda bajarilgan deb belgilandi (moneta qayta qo'shilmadi)"
             : 'Moneta xaridi arizasi rad etildi'
         );
         await fetchOverview();
@@ -352,7 +367,7 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
           <div className="px-4 sm:px-5 py-3 flex flex-col justify-between gap-1">
             <div className="flex items-center justify-between gap-2">
               <p className="text-[11px] font-semibold uppercase tracking-wider text-zinc-400 whitespace-nowrap">Jami Moneta</p>
-              <span className="text-[11px] text-zinc-400 font-mono whitespace-nowrap">1 xabar = 5</span>
+              <span className="text-[11px] text-zinc-400 font-mono whitespace-nowrap">1 xabar = 10</span>
             </div>
             <p className="text-2xl font-mono font-bold text-amber-400 tabular-nums">
               {(stats.totalCoins ?? 0).toLocaleString()}
@@ -363,11 +378,11 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
             <div className="flex items-center justify-between gap-2">
               <p className="text-[11px] font-semibold uppercase tracking-wider text-zinc-400 whitespace-nowrap">Wallet Almaz</p>
               <span className="text-[11px] text-amber-300 font-mono tabular-nums whitespace-nowrap">
-                Kutish: {stats.pendingDiamonds ?? 0}
+                Kutish: {formatDiamondsDisplay(stats.pendingDiamonds ?? 0)}
               </span>
             </div>
             <p className="text-2xl font-mono font-bold text-cyan-400 tabular-nums">
-              {(stats.totalDiamonds ?? 0).toLocaleString()}
+              {formatDiamondsDisplay(stats.totalDiamonds ?? 0)}
             </p>
           </div>
 
@@ -551,6 +566,8 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
                           resolveEffectiveProfileAvatar(linkedUser) || req.userAvatar
                         );
                         const displayName = linkedUser?.name || req.userName || req.userUid;
+                        const contactDisplay =
+                          req.contactInfo || req.userTelegram || req.userPhone || linkedUser?.telegram || linkedUser?.phone || req.userUid;
 
                         return (
                           <div
@@ -588,25 +605,29 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
                                     </button>
                                     <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-amber-500/15 border border-amber-400/25 text-amber-300 text-[10px] font-bold">
                                       <ShoppingBag className="w-3 h-3" />
-                                      <span>Moneta xaridi</span>
+                                      <span>Moneta buyurtmasi</span>
                                     </span>
                                   </div>
                                   <p className="text-xs text-zinc-400 truncate mt-0.5">
                                     {req.userUsername ? `@${req.userUsername.replace(/^@/, '')} · ` : ''}
-                                    {req.userTelegram || req.userPhone || req.userUid}
-                                    {req.createdAt ? ` · ${new Date(req.createdAt).toLocaleString()}` : ''}
+                                    {req.createdAt ? new Date(req.createdAt).toLocaleString() : req.userUid}
                                   </p>
                                 </div>
                               </div>
 
                               <div className="text-left sm:text-right shrink-0">
                                 <p className="text-base font-mono font-bold text-amber-400 tabular-nums">
-                                  +{Number(req.coinAmount || 0).toLocaleString()} moneta
+                                  {Number(req.coinAmount || 0).toLocaleString()} moneta
                                 </p>
                                 <p className="text-xs font-mono text-zinc-300 tabular-nums">
                                   {Number(req.uzsAmount || 0).toLocaleString()} so'm · {PAYMENT_LABELS[req.paymentMethod] || req.paymentMethod}
                                 </p>
                               </div>
+                            </div>
+
+                            <div className="flex flex-wrap items-center gap-2 text-xs bg-[#0B0C12] px-3.5 py-2 rounded-xl border border-amber-500/20">
+                              <span className="text-zinc-400 font-semibold">Aloqa (Telegram / Tel):</span>
+                              <span className="font-mono font-bold text-amber-300 select-all">{contactDisplay}</span>
                             </div>
 
                             {req.note && (
@@ -626,14 +647,25 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
                                 }`}
                               >
                                 {req.status === 'approved'
-                                  ? 'Tasdiqlangan'
+                                  ? 'Bajarilgan'
                                   : req.status === 'rejected'
                                   ? 'Rad etilgan'
-                                  : 'Tasdiq kutilmoqda'}
+                                  : "To'lov va admin o'tkazmasi kutilmoqda"}
                               </span>
 
                               {req.status === 'pending' && (
-                                <div className="flex items-center gap-2">
+                                <div className="flex flex-wrap items-center gap-2">
+                                  <button
+                                    type="button"
+                                    disabled={busyId === req.id}
+                                    data-testid={`admin-complete-manual-coin-${req.id}`}
+                                    onClick={() => handleCoinRequestAction(req.id, 'complete_manual')}
+                                    className="px-3 py-1.5 rounded-xl bg-white/10 hover:bg-white/15 border border-white/15 text-zinc-100 text-xs font-bold transition flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
+                                    title="Agar monetni Foydalanuvchilar bo'limidan qo'lda tashlab bo'lgan bo'lsangiz"
+                                  >
+                                    <Check className="w-3.5 h-3.5 text-emerald-400" />
+                                    <span>Qo'lda berildi (Yopish)</span>
+                                  </button>
                                   <button
                                     type="button"
                                     disabled={busyId === req.id}
@@ -642,7 +674,7 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
                                     className="px-3.5 py-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold transition flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
                                   >
                                     <Check className="w-3.5 h-3.5" />
-                                    <span>Tasdiqlash</span>
+                                    <span>+{Number(req.coinAmount || 0).toLocaleString()} o'tkazish</span>
                                   </button>
                                   <button
                                     type="button"
@@ -665,9 +697,16 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
                       const linkedUser = usersByUid.get(w.userUid);
                       const avatar = resolveApiMediaUrl(resolveEffectiveProfileAvatar(linkedUser));
                       const displayName = linkedUser?.name || w.userName || w.userUid;
+                      const withdrawalContact =
+                        w.contactInfo || w.userTelegram || w.userPhone || linkedUser?.telegram || linkedUser?.phone || w.userUid;
+                      const withdrawalUsername = w.userUsername || linkedUser?.username;
 
                       return (
-                        <div key={w.id} className="p-4 sm:px-5 hover:bg-white/[0.02] transition space-y-2.5">
+                        <div
+                          key={w.id}
+                          data-testid={`admin-withdrawal-request-${w.id}`}
+                          className="p-4 sm:px-5 hover:bg-white/[0.02] transition space-y-2.5"
+                        >
                           <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
                             <div className="flex items-center gap-3.5 min-w-0">
                               <button
@@ -697,10 +736,11 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
                                   </button>
                                   <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-cyan-500/15 border border-cyan-400/25 text-cyan-300 text-[10px] font-bold">
                                     <Banknote className="w-3 h-3" />
-                                    <span>Pul yechish</span>
+                                    <span>Pul yechish buyurtmasi</span>
                                   </span>
                                 </div>
                                 <p className="text-xs font-mono text-zinc-400 mt-0.5">
+                                  {withdrawalUsername ? `@${String(withdrawalUsername).replace(/^@/, '')} · ` : ''}
                                   Karta: {w.userCard}
                                   {w.createdAt ? ` · ${new Date(w.createdAt).toLocaleString()}` : ''}
                                 </p>
@@ -712,9 +752,14 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
                                 {Number(w.uzsAmount || 0).toLocaleString()} so'm
                               </p>
                               <p className="text-xs font-mono text-cyan-300 tabular-nums">
-                                {w.diamondAmount} almaz
+                                {formatDiamondsDisplay(w.diamondAmount)} almaz
                               </p>
                             </div>
+                          </div>
+
+                          <div className="flex flex-wrap items-center gap-2 text-xs bg-[#0B0C12] px-3.5 py-2 rounded-xl border border-cyan-500/20">
+                            <span className="text-zinc-400 font-semibold">Aloqa (Telegram / Tel):</span>
+                            <span className="font-mono font-bold text-cyan-300 select-all">{withdrawalContact}</span>
                           </div>
 
                           <div className="flex flex-wrap items-center justify-between gap-2 pt-1">
@@ -728,10 +773,10 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
                               }`}
                             >
                               {w.status === 'approved'
-                                ? 'Tasdiqlangan'
+                                ? "To'lab berilgan"
                                 : w.status === 'rejected'
-                                ? 'Rad etilgan'
-                                : 'Kutilmoqda'}
+                                ? 'Rad etilgan (almaz qaytarilgan)'
+                                : "Admin aloqasi va to'lov kutilmoqda"}
                             </span>
 
                             {w.status === 'pending' && (
@@ -739,15 +784,17 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
                                 <button
                                   type="button"
                                   disabled={busyId === w.id}
+                                  data-testid={`admin-approve-withdrawal-${w.id}`}
                                   onClick={() => handleWithdrawalAction(w.id, 'approve')}
                                   className="px-3.5 py-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold transition flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
                                 >
                                   <Check className="w-3.5 h-3.5" />
-                                  <span>Tasdiqlash</span>
+                                  <span>To'landi (Yopish)</span>
                                 </button>
                                 <button
                                   type="button"
                                   disabled={busyId === w.id}
+                                  data-testid={`admin-reject-withdrawal-${w.id}`}
                                   onClick={() => handleWithdrawalAction(w.id, 'reject')}
                                   className="px-3.5 py-1.5 rounded-xl bg-rose-600/90 hover:bg-rose-600 text-white text-xs font-bold transition flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
                                 >
@@ -886,8 +933,8 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
 
                             <div className="text-right shrink-0 text-xs font-mono font-bold space-y-0.5 tabular-nums">
                               <p className="text-amber-400">{Number(u.coins ?? 0).toLocaleString()} moneta</p>
-                              <p className="text-cyan-400">{Number(u.diamonds ?? 0).toLocaleString()} almaz</p>
-                              {pending24h > 0 && <p className="text-purple-300">{pending24h} kutilmoqda</p>}
+                              <p className="text-cyan-400">{formatDiamondsDisplay(u.diamonds ?? 0)} almaz</p>
+                              {pending24h > 0 && <p className="text-purple-300">{formatDiamondsDisplay(pending24h)} kutilmoqda</p>}
                             </div>
                           </div>
 
@@ -906,6 +953,7 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
                                 <label className="text-[10px] font-semibold text-zinc-400 block mb-1">Almaz</label>
                                 <input
                                   type="number"
+                                  step="0.5"
                                   value={balanceForm.diamonds}
                                   onChange={(e) => setBalanceForm((p) => ({ ...p, diamonds: e.target.value }))}
                                   className="w-full px-2.5 py-1.5 rounded-lg border border-white/15 text-xs font-mono font-bold bg-[#131520] text-white outline-none focus:border-cyan-400"

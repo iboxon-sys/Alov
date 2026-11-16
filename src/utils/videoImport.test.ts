@@ -2,8 +2,11 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   validateExternalVideoUrl,
+  inferImageFileExtension,
   inferVideoFileExtension,
+  extractImageUrlsFromHtml,
   extractVideoUrlsFromHtml,
+  extractAudioUrlsFromHtml,
   isDirectPlayableVideoUrl,
   isHlsStreamUrl,
   extractTwitterStatusPath,
@@ -11,6 +14,7 @@ import {
   isSocialVideoHost,
   inferAudioFileExtension,
   buildFfmpegMp3Args,
+  buildFfmpegMp4Args,
   deriveAudioMetadataFromUrl,
   sanitizeMp3DownloadFilename,
 } from './videoImport';
@@ -38,20 +42,54 @@ describe('Video link import & MP4 resolution helpers', () => {
     assert.equal(inferVideoFileExtension('text/html; charset=utf-8', 'https://site.com/watch'), null);
   });
 
-  it('extracts direct video URLs from og:video tags, video tags, and JSON payloads', () => {
-    const html = `
+  it('infers image extensions accurately and rejects HTML pages', () => {
+    assert.equal(inferImageFileExtension('image/jpeg', 'https://cdn.site/photo'), '.jpg');
+    assert.equal(inferImageFileExtension('image/png', 'https://cdn.site/p'), '.png');
+    assert.equal(inferImageFileExtension('image/webp', 'https://cdn.site/p'), '.webp');
+    assert.equal(inferImageFileExtension('application/octet-stream', 'https://i.pinimg.com/736x/a/b/c.jpg'), '.jpg');
+    assert.equal(inferImageFileExtension('text/html; charset=utf-8', 'https://www.pinterest.com/pin/123/'), null);
+  });
+
+  it('extracts direct image, video (including m3u8), and audio URLs from HTML', () => {
+    const videoHtml = `
       <html>
         <head>
           <meta property="og:video" content="https://cdn.example.uz/stream/sample.mp4?tag=1&amp;hd=1" />
         </head>
         <body>
-          <script>window.__DATA__ = {"video_url":"https:\\/\\/cdn.example.uz\\/alt\\/clip.webm"};</script>
+          <script>window.__DATA__ = {"video_url":"https:\\/\\/cdn.example.uz\\/alt\\/clip.webm","hls":"https://cdn.example.uz/live/stream.m3u8"};</script>
         </body>
       </html>
     `;
-    const urls = extractVideoUrlsFromHtml(html, 'https://example.uz/post/1');
-    assert.ok(urls.includes('https://cdn.example.uz/stream/sample.mp4?tag=1&hd=1'));
-    assert.ok(urls.includes('https://cdn.example.uz/alt/clip.webm'));
+    const videoUrls = extractVideoUrlsFromHtml(videoHtml, 'https://example.uz/post/1');
+    assert.ok(videoUrls.includes('https://cdn.example.uz/stream/sample.mp4?tag=1&hd=1'));
+    assert.ok(videoUrls.includes('https://cdn.example.uz/alt/clip.webm'));
+    assert.ok(videoUrls.includes('https://cdn.example.uz/live/stream.m3u8'));
+
+    const imageHtml = `
+      <html>
+        <head>
+          <meta property="og:image" content="https://i.pinimg.com/736x/aa/bb/cc.jpg" />
+        </head>
+        <body>
+          <img src="/favicon.ico" />
+          <img src="https://cdn.example.uz/gallery/photo.webp" />
+        </body>
+      </html>
+    `;
+    const imageUrls = extractImageUrlsFromHtml(imageHtml, 'https://www.pinterest.com/pin/123/');
+    assert.equal(imageUrls[0], 'https://i.pinimg.com/736x/aa/bb/cc.jpg');
+    assert.ok(imageUrls.includes('https://cdn.example.uz/gallery/photo.webp'));
+
+    const audioHtml = `
+      <html>
+        <head><meta property="og:audio" content="https://cdn.example.uz/tracks/melody.mp3" /></head>
+        <body><audio src="/clips/voice.ogg"></audio></body>
+      </html>
+    `;
+    const audioUrls = extractAudioUrlsFromHtml(audioHtml, 'https://example.uz/music/1');
+    assert.equal(audioUrls[0], 'https://cdn.example.uz/tracks/melody.mp3');
+    assert.ok(audioUrls.includes('https://example.uz/clips/voice.ogg'));
   });
 
   it('detects directly playable native video URLs and social video platforms', () => {
@@ -66,7 +104,7 @@ describe('Video link import & MP4 resolution helpers', () => {
     assert.equal(isSocialVideoHost('https://soundcloud.com/artist/track'), true);
   });
 
-  it('infers audio extensions and builds deterministic ffmpeg MP3 args', () => {
+  it('infers audio extensions and builds deterministic ffmpeg MP3 & MP4 args', () => {
     assert.equal(inferAudioFileExtension('audio/mpeg', 'https://cdn.site/audio'), '.mp3');
     assert.equal(inferAudioFileExtension('audio/x-m4a', 'https://cdn.site/song'), '.m4a');
     assert.equal(inferAudioFileExtension('application/octet-stream', 'https://cdn.site/track.ogg?v=1'), '.ogg');
@@ -90,6 +128,11 @@ describe('Video link import & MP4 resolution helpers', () => {
       'mp3',
       '/tmp/out.mp3',
     ]);
+
+    const mp4Args = buildFfmpegMp4Args('/tmp/in.mov', '/tmp/out.mp4', { maxBytes: 50_000_000 });
+    assert.ok(mp4Args.includes('libx264'));
+    assert.ok(mp4Args.includes('+faststart'));
+    assert.ok(mp4Args.includes('mp4'));
 
     const meta = deriveAudioMetadataFromUrl('https://cdn.example.uz/clips/toshkent_oqshomi.mp4');
     assert.equal(meta.title, 'toshkent oqshomi');

@@ -93,3 +93,24 @@ export function pickPreferredAvatar(...candidates: Array<string | null | undefin
   }
   return '';
 }
+
+export function getSafeUserDisplayName(user: any, fallback: string = 'Profil'): string {
+  if (!user) return fallback;
+  const identifierFallback = user.telegram || user.username;
+  if (
+    typeof user.name === 'string' &&
+    user.name.trim() &&
+    !isPlaceholderOrUsername(user.name, identifierFallback, user.phone)
+  ) {
+    return user.name.trim();
+  }
+  const fromParts = buildTelegramDisplayName({
+    firstName: user.firstName || user.first_name,
+    lastName: user.lastName || user.last_name,
+    username: identifierFallback,
+    phone: user.phone,
+  });
+  if (fromParts) return fromParts;
+  return fallback;
+}
+

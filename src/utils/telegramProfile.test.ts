@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   buildTelegramDisplayName,
+  getSafeUserDisplayName,
   isPlaceholderAvatar,
   isPlaceholderOrUsername,
   normalizeTelegramHandle,
@@ -65,4 +66,28 @@ test('pickPreferredAvatar skips empty and Unsplash fallback URLs', () => {
     '/api/telegram/avatar/12345'
   );
   assert.equal(pickPreferredAvatar('', unsplash), '');
+});
+
+test('getSafeUserDisplayName prioritizes edited user.name over stale firstName/lastName', () => {
+  assert.equal(
+    getSafeUserDisplayName({
+      name: 'Azizbek',
+      firstName: 'EskiIsm',
+      lastName: 'EskiFamiliya',
+      telegram: 'https://t.me/aziz_tg',
+    }),
+    'Azizbek'
+  );
+
+  assert.equal(
+    getSafeUserDisplayName({
+      name: 'Foydalanuvchi',
+      firstName: 'Malika',
+      lastName: 'Toshmatova',
+      telegram: 'https://t.me/malika_uz',
+    }),
+    'Malika Toshmatova'
+  );
+
+  assert.equal(getSafeUserDisplayName(null, 'Profil'), 'Profil');
 });

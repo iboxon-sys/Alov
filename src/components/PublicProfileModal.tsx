@@ -17,6 +17,7 @@ import { PostItem, computeAuthorTotalLikes } from '../utils/posts';
 import { isUserOnlineStrict, formatLastSeenUz } from '../utils/presence';
 import { formatUsernameDisplay } from '../utils/username';
 import { resolveEffectiveProfileAvatar } from '../utils/faceId';
+import { getSafeUserDisplayName } from '../utils/telegramProfile';
 import { PostsFeed } from './PostsFeed';
 import { resolveApiMediaUrl } from '../config/api';
 
@@ -248,7 +249,7 @@ export const PublicProfileModal: React.FC<PublicProfileModalProps> = ({
                   className="font-editorial text-2xl sm:text-3xl font-bold text-white leading-tight"
                   data-testid="public-profile-name"
                 >
-                  {liveProfile.name || 'Foydalanuvchi'}
+                  {getSafeUserDisplayName(liveProfile, 'Foydalanuvchi')}
                   {liveProfile.age ? `, ${liveProfile.age}` : ''}
                 </h2>
 

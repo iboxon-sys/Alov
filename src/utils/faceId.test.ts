@@ -129,13 +129,21 @@ describe('faceId pure biometric helpers', () => {
     assert.equal(requiresFaceIdForUser({ uid: 'u1', role: 'user', faceId: { verified: true } }), false);
   });
 
-  it('always prefers captured Face ID photo for profile avatar', () => {
+  it('always prefers captured Face ID photo over external provider photos, while respecting custom edited avatars', () => {
     assert.equal(
       resolveEffectiveProfileAvatar({
         avatar: 'https://lh3.googleusercontent.com/old-google-photo',
         faceId: { verified: true, capturedPhotoUrl: '/api/face-id/photo/face_123.jpg' },
       }),
       '/api/face-id/photo/face_123.jpg'
+    );
+    assert.equal(
+      resolveEffectiveProfileAvatar({
+        avatar: '/api/media/custom_avatar.jpg',
+        hasCustomAvatar: true,
+        faceId: { verified: true, capturedPhotoUrl: '/api/face-id/photo/face_123.jpg' },
+      }),
+      '/api/media/custom_avatar.jpg'
     );
     assert.equal(
       resolveEffectiveProfileAvatar({

@@ -9,10 +9,10 @@ export interface CoinShopPackage {
 }
 
 export const COIN_SHOP_PACKAGES: CoinShopPackage[] = [
-  { id: 'pkg_100', coins: 100, uzs: 10000, label: 'Boshlang\'ich', bonusText: '20 ta xabar' },
-  { id: 'pkg_300', coins: 300, uzs: 28000, label: 'Ommabop', bonusText: '60 ta xabar' },
-  { id: 'pkg_500', coins: 500, uzs: 45000, label: 'Tejamkor', bonusText: '100 ta xabar' },
-  { id: 'pkg_1000', coins: 1000, uzs: 80000, label: 'Maksimal', bonusText: '200 ta xabar' },
+  { id: 'pkg_1000', coins: 1000, uzs: 50000, label: 'Minimal', bonusText: '100 ta xabar' },
+  { id: 'pkg_2500', coins: 2500, uzs: 115000, label: 'Ommabop', bonusText: '250 ta xabar · Chegirma' },
+  { id: 'pkg_5000', coins: 5000, uzs: 215000, label: 'Tejamkor', bonusText: '500 ta xabar · -14%' },
+  { id: 'pkg_10000', coins: 10000, uzs: 400000, label: 'VIP Maksimal', bonusText: '1000 ta xabar · -20%' },
 ];
 
 export interface CoinPurchaseRequest {
@@ -23,6 +23,7 @@ export interface CoinPurchaseRequest {
   userUsername?: string;
   userTelegram?: string;
   userPhone?: string;
+  contactInfo: string;
   coinAmount: number;
   uzsAmount: number;
   packageLabel: string;
@@ -37,11 +38,11 @@ export interface CoinPurchaseRequest {
 export function findCoinPackageByAmount(coins: number): CoinShopPackage {
   const found = COIN_SHOP_PACKAGES.find((p) => p.coins === Number(coins));
   if (found) return found;
-  const safeCoins = Math.max(1, Math.floor(Number(coins) || 100));
+  const safeCoins = Math.max(1000, Math.floor(Number(coins) || 1000));
   return {
     id: `custom_${safeCoins}`,
     coins: safeCoins,
-    uzs: safeCoins * 100,
+    uzs: safeCoins * 50,
     label: 'Maxsus paket',
   };
 }
@@ -60,6 +61,7 @@ export function buildCoinPurchaseRequest(params: {
   uzsAmount?: number;
   packageLabel?: string;
   paymentMethod?: string;
+  contactInfo?: string;
   note?: string;
   nowIso?: string;
   id?: string;
@@ -67,6 +69,9 @@ export function buildCoinPurchaseRequest(params: {
   const pkg = findCoinPackageByAmount(params.coinAmount);
   const safeUzs = Number(params.uzsAmount) > 0 ? Math.floor(Number(params.uzsAmount)) : pkg.uzs;
   const resolvedAvatar = String(params.user.faceId?.capturedPhotoUrl || params.user.avatar || '').trim();
+  const resolvedContact = String(
+    params.contactInfo || params.user.telegram || params.user.phone || params.user.username || ''
+  ).trim().slice(0, 120);
 
   return {
     id: params.id || `coinreq_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
@@ -76,6 +81,7 @@ export function buildCoinPurchaseRequest(params: {
     userUsername: params.user.username ? String(params.user.username).trim() : '',
     userTelegram: params.user.telegram ? String(params.user.telegram).trim() : '',
     userPhone: params.user.phone ? String(params.user.phone).trim() : '',
+    contactInfo: resolvedContact,
     coinAmount: pkg.coins,
     uzsAmount: safeUzs,
     packageLabel: String(params.packageLabel || pkg.label),

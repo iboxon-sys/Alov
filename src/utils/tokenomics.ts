@@ -1,13 +1,16 @@
 import { normalizeTelegramHandle } from './telegramProfile';
 
-export const MESSAGE_COIN_COST = 5;
-export const MESSAGE_DIAMOND_REWARD = 5;
+export const MESSAGE_COIN_COST = 10;
+export const MESSAGE_DIAMOND_REWARD = 2.5;
 export const AUDIO_CALL_COIN_COST_PER_MIN = 10;
-export const AUDIO_CALL_DIAMOND_PER_MIN = 10;
+export const AUDIO_CALL_DIAMOND_PER_MIN = 2.5;
 export const VIDEO_CALL_COIN_COST_PER_MIN = 20;
-export const VIDEO_CALL_DIAMOND_PER_MIN = 20;
+export const VIDEO_CALL_DIAMOND_PER_MIN = 5;
+export const COIN_TO_DIAMOND_RATIO = 0.25; // Har 10 moneta uchun 2.5 olmos
 
-export const DIAMOND_LIMIT_TARGET = 100;
+export const DIAMOND_LIMIT_TARGET = 120; // 24 soat ichida yig'ish limiti
+export const DAILY_LIMIT_WINDOW_HOURS = 24;
+export const DAILY_LIMIT_WINDOW_MS = DAILY_LIMIT_WINDOW_HOURS * 60 * 60 * 1000;
 export const DIAMOND_TO_UZS_RATE = 100; // 100 olmos = 10,000 UZS (1 olmos = 100 UZS)
 export const DIAMOND_UNLOCK_HOURS = 12;
 export const DIAMOND_UNLOCK_DURATION_MS = DIAMOND_UNLOCK_HOURS * 60 * 60 * 1000;
@@ -28,6 +31,8 @@ export interface UserWalletSnapshot {
   balanceDiamonds: number;
   pendingDiamonds: number;
   diamondProgress: number;
+  dailyLimitTarget: number;
+  dailyLimitResetAt: number | null;
   balanceUzs: number;
   pendingUzs: number;
   totalEarnedDiamonds: number;
@@ -38,9 +43,25 @@ export interface UserWalletSnapshot {
   updatedAt: string;
 }
 
+export function roundDiamonds(value: number): number {
+  const num = Number(value);
+  if (!Number.isFinite(num) || num <= 0) return 0;
+  return Math.round(num * 100) / 100;
+}
+
+export function formatDiamondsDisplay(value: number | undefined | null): string {
+  const rounded = roundDiamonds(Number(value) || 0);
+  return Number.isInteger(rounded) ? rounded.toLocaleString() : rounded.toFixed(1).replace(/\.0$/, '');
+}
+
+export function coinsToDiamonds(coins: number): number {
+  const safeCoins = Math.max(0, Number(coins) || 0);
+  return roundDiamonds(safeCoins * COIN_TO_DIAMOND_RATIO);
+}
+
 export function calculateDiamondsToUzs(diamonds: number): number {
-  const safe = Math.max(0, Math.floor(Number(diamonds) || 0));
-  return safe * DIAMOND_TO_UZS_RATE;
+  const safe = roundDiamonds(Number(diamonds) || 0);
+  return Math.round(safe * DIAMOND_TO_UZS_RATE);
 }
 
 export function calculateCallMinuteBilling(callType: 'audio' | 'video'): {
@@ -88,34 +109,60 @@ export function applyDiamondProgress(
   currentProgress: number,
   existingBatches: PendingDiamondBatch[],
   earnedDiamonds: number,
-  nowMs: number = Date.now()
+  nowMs: number = Date.now(),
+  dailyLimitResetAt?: number | null
 ): {
   diamondProgress: number;
+  dailyLimitResetAt: number | null;
   pendingDiamondBatches: PendingDiamondBatch[];
+  acceptedDiamonds: number;
   newlyLockedCount: number;
+  limitReached: boolean;
 } {
-  const safeEarned = Math.max(0, Math.floor(Number(earnedDiamonds) || 0));
-  let totalProgress = Math.max(0, Math.floor(Number(currentProgress) || 0)) + safeEarned;
-  const nextBatches: PendingDiamondBatch[] = Array.isArray(existingBatches)
-    ? existingBatches.map(b => ({ ...b }))
-    : [];
-  let newlyLockedCount = 0;
+  const hasActiveWindow =
+    typeof dailyLimitResetAt === 'number' &&
+    Number.isFinite(dailyLimitResetAt) &&
+    dailyLimitResetAt > nowMs;
 
-  while (totalProgress >= DIAMOND_LIMIT_TARGET) {
-    totalProgress -= DIAMOND_LIMIT_TARGET;
-    newlyLockedCount += 1;
-    nextBatches.push({
-      id: `dbatch_${nowMs}_${Math.random().toString(36).slice(2, 7)}`,
-      amount: DIAMOND_LIMIT_TARGET,
-      createdAt: nowMs,
-      unlockAt: nowMs + DIAMOND_UNLOCK_DURATION_MS,
-    });
+  const activeProgress = hasActiveWindow ? roundDiamonds(Number(currentProgress) || 0) : 0;
+  const remainingCap = roundDiamonds(Math.max(0, DIAMOND_LIMIT_TARGET - activeProgress));
+  const requested = roundDiamonds(Number(earnedDiamonds) || 0);
+  const acceptedDiamonds = roundDiamonds(Math.min(requested, remainingCap));
+  const nextProgress = roundDiamonds(activeProgress + acceptedDiamonds);
+  const nextResetAt =
+    acceptedDiamonds > 0 || hasActiveWindow
+      ? (hasActiveWindow ? (dailyLimitResetAt as number) : nowMs + DAILY_LIMIT_WINDOW_MS)
+      : null;
+
+  const nextBatches: PendingDiamondBatch[] = Array.isArray(existingBatches)
+    ? existingBatches.map((b) => ({ ...b }))
+    : [];
+
+  let newlyLockedCount = 0;
+  if (acceptedDiamonds > 0) {
+    const targetUnlockAt = nowMs + DIAMOND_UNLOCK_DURATION_MS;
+    const lastBatch = nextBatches[nextBatches.length - 1];
+    // Merge earnings within 60s into the same batch while always queueing even partial (<120) earnings
+    if (lastBatch && Math.abs(lastBatch.unlockAt - targetUnlockAt) <= 60_000) {
+      lastBatch.amount = roundDiamonds(lastBatch.amount + acceptedDiamonds);
+    } else {
+      nextBatches.push({
+        id: `dbatch_${nowMs}_${Math.random().toString(36).slice(2, 7)}`,
+        amount: acceptedDiamonds,
+        createdAt: nowMs,
+        unlockAt: targetUnlockAt,
+      });
+    }
+    newlyLockedCount = 1;
   }
 
   return {
-    diamondProgress: totalProgress,
+    diamondProgress: nextProgress,
+    dailyLimitResetAt: nextResetAt,
     pendingDiamondBatches: nextBatches,
+    acceptedDiamonds,
     newlyLockedCount,
+    limitReached: nextProgress >= DIAMOND_LIMIT_TARGET,
   };
 }
 
@@ -128,7 +175,7 @@ export function releaseMatureDiamondBatches(
   pendingDiamondBatches: PendingDiamondBatch[];
   releasedAmount: number;
 } {
-  const safeWallet = Math.max(0, Math.floor(Number(currentWalletDiamonds) || 0));
+  const safeWallet = roundDiamonds(Number(currentWalletDiamonds) || 0);
   const batches = Array.isArray(existingBatches) ? existingBatches : [];
   let releasedAmount = 0;
   const stillPending: PendingDiamondBatch[] = [];
@@ -136,27 +183,27 @@ export function releaseMatureDiamondBatches(
   for (const batch of batches) {
     if (!batch || typeof batch.amount !== 'number') continue;
     if (batch.unlockAt <= nowMs) {
-      releasedAmount += Math.max(0, Math.floor(batch.amount));
+      releasedAmount = roundDiamonds(releasedAmount + roundDiamonds(batch.amount));
     } else {
       stillPending.push(batch);
     }
   }
 
   return {
-    diamonds: safeWallet + releasedAmount,
+    diamonds: roundDiamonds(safeWallet + releasedAmount),
     pendingDiamondBatches: stillPending,
     releasedAmount,
   };
 }
 
 export function getDiamondProgressPercent(progress: number): number {
-  const clamped = Math.max(0, Math.min(DIAMOND_LIMIT_TARGET, Math.floor(Number(progress) || 0)));
+  const clamped = Math.max(0, Math.min(DIAMOND_LIMIT_TARGET, roundDiamonds(Number(progress) || 0)));
   return Math.round((clamped / DIAMOND_LIMIT_TARGET) * 100);
 }
 
 export function getPendingDiamondsTotal(batches: PendingDiamondBatch[] | undefined | null): number {
   if (!Array.isArray(batches)) return 0;
-  return batches.reduce((sum, b) => sum + Math.max(0, Number(b?.amount) || 0), 0);
+  return roundDiamonds(batches.reduce((sum, b) => sum + roundDiamonds(Number(b?.amount) || 0), 0));
 }
 
 export function getNextUnlockTimestamp(batches: PendingDiamondBatch[] | undefined | null): number | null {
@@ -176,19 +223,26 @@ export function buildUserWalletSnapshot(
     id?: string;
     diamonds?: number;
     diamondProgress?: number;
+    dailyLimitResetAt?: number | null;
     pendingDiamondBatches?: PendingDiamondBatch[];
     totalEarnedDiamonds?: number;
     totalWithdrawnUzs?: number;
   },
   nowMs: number = Date.now()
 ): UserWalletSnapshot {
-  const balanceDiamonds = Math.max(0, Math.floor(Number(user?.diamonds) || 0));
-  const diamondProgress = Math.max(0, Math.floor(Number(user?.diamondProgress) || 0));
+  const balanceDiamonds = roundDiamonds(Number(user?.diamonds) || 0);
+  const hasActiveWindow =
+    typeof user?.dailyLimitResetAt === 'number' &&
+    Number.isFinite(user.dailyLimitResetAt) &&
+    user.dailyLimitResetAt > nowMs;
+  const diamondProgress = hasActiveWindow || !user?.dailyLimitResetAt
+    ? roundDiamonds(Number(user?.diamondProgress) || 0)
+    : 0;
   const pendingDiamonds = getPendingDiamondsTotal(user?.pendingDiamondBatches);
   const nextUnlockAt = getNextUnlockTimestamp(user?.pendingDiamondBatches);
   const totalEarnedDiamonds = Math.max(
-    balanceDiamonds + pendingDiamonds + diamondProgress,
-    Math.floor(Number(user?.totalEarnedDiamonds) || 0)
+    roundDiamonds(balanceDiamonds + pendingDiamonds),
+    roundDiamonds(Number(user?.totalEarnedDiamonds) || 0)
   );
 
   return {
@@ -196,6 +250,8 @@ export function buildUserWalletSnapshot(
     balanceDiamonds,
     pendingDiamonds,
     diamondProgress,
+    dailyLimitTarget: DIAMOND_LIMIT_TARGET,
+    dailyLimitResetAt: hasActiveWindow ? (user?.dailyLimitResetAt ?? null) : null,
     balanceUzs: calculateDiamondsToUzs(balanceDiamonds),
     pendingUzs: calculateDiamondsToUzs(pendingDiamonds),
     totalEarnedDiamonds,

@@ -1,4 +1,5 @@
 export type SupportedVideoExt = '.mp4' | '.webm' | '.mov' | '.m4v';
+export type SupportedImageExt = '.jpg' | '.jpeg' | '.png' | '.webp' | '.gif' | '.avif';
 
 const PRIVATE_HOST_PATTERNS = [
   /^localhost$/i,
@@ -22,7 +23,7 @@ export function validateExternalVideoUrl(
 ): { ok: true; url: URL } | { ok: false; error: string } {
   const trimmed = String(rawUrl || '').trim();
   if (!trimmed) {
-    return { ok: false, error: 'Video havolasini kiriting.' };
+    return { ok: false, error: 'Media havolasini kiriting.' };
   }
 
   const hasExplicitScheme = /^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(trimmed);
@@ -49,6 +50,40 @@ export function validateExternalVideoUrl(
   }
 
   return { ok: true, url: parsed };
+}
+
+export function inferImageFileExtension(
+  contentType: string = '',
+  sourceUrl: string = ''
+): SupportedImageExt | null {
+  const ct = String(contentType || '').toLowerCase().split(';')[0].trim();
+  let urlPath = '';
+  try {
+    urlPath = new URL(sourceUrl).pathname.toLowerCase();
+  } catch {
+    urlPath = String(sourceUrl || '').toLowerCase().split('?')[0];
+  }
+
+  if (ct === 'image/jpeg' || ct === 'image/jpg') return '.jpg';
+  if (ct === 'image/png') return '.png';
+  if (ct === 'image/webp') return '.webp';
+  if (ct === 'image/gif') return '.gif';
+  if (ct === 'image/avif') return '.avif';
+
+  if (ct.startsWith('text/html') || ct.includes('json') || ct.includes('xml') || ct.startsWith('video/') || ct.startsWith('audio/')) {
+    return null;
+  }
+
+  if (urlPath.endsWith('.jpeg')) return '.jpeg';
+  if (urlPath.endsWith('.jpg')) return '.jpg';
+  if (urlPath.endsWith('.png')) return '.png';
+  if (urlPath.endsWith('.webp')) return '.webp';
+  if (urlPath.endsWith('.gif')) return '.gif';
+  if (urlPath.endsWith('.avif')) return '.avif';
+
+  if (ct.startsWith('image/') && !ct.includes('svg')) return '.jpg';
+
+  return null;
 }
 
 export function inferVideoFileExtension(
@@ -87,6 +122,50 @@ function unescapeExtractedUrl(raw: string): string {
     .trim();
 }
 
+export function extractImageUrlsFromHtml(html: string, baseUrl: string): string[] {
+  if (!html) return [];
+  const candidates: string[] = [];
+
+  const patterns: RegExp[] = [
+    /<meta[^>]+(?:property|name)=["'](?:og:image:secure_url|og:image:url|og:image|twitter:image:src|twitter:image)["'][^>]+content=["']([^"']+)["']/gi,
+    /<meta[^>]+content=["']([^"']+)["'][^>]+(?:property|name)=["'](?:og:image:secure_url|og:image:url|og:image|twitter:image:src|twitter:image)["']/gi,
+    /"(?:orig|image_url|imageUrl|display_url|src)"\s*:\s*"(https?:[^"\\]*(?:\\.[^"\\]*)*\.(?:jpg|jpeg|png|webp|gif)(?:\?[^"\\]*)?)"/gi,
+    /(https?:\/\/i\.pinimg\.com\/(?:originals|736x|564x)\/[^"'\\\s<>]+\.(?:jpg|jpeg|png|webp))/gi,
+    /<img[^>]+(?:data-src|src)=["']([^"']+)["']/gi,
+    /(https?:\/\/[^"'\\\s<>]+\.(?:jpg|jpeg|png|webp|gif)(?:\?[^"'\\\s<>]*)?)/gi,
+  ];
+
+  for (const regex of patterns) {
+    let match: RegExpExecArray | null;
+    while ((match = regex.exec(html)) !== null) {
+      const cleaned = unescapeExtractedUrl(match[1] || '');
+      if (!cleaned || cleaned.startsWith('data:')) continue;
+      try {
+        const resolved = new URL(cleaned, baseUrl).toString();
+        if (!/^https?:\/\//i.test(resolved)) continue;
+        if (/(?:favicon|apple-touch-icon|logo-icon|sprite|blank\.gif|1x1|pixel\.gif|\.svg(\?|$))/i.test(resolved)) {
+          continue;
+        }
+        if (!candidates.includes(resolved)) {
+          candidates.push(resolved);
+        }
+      } catch {
+        // ignore invalid candidate URLs
+      }
+    }
+  }
+
+  return candidates.sort((a, b) => {
+    const score = (u: string) => {
+      const lower = u.toLowerCase();
+      if (/i\.pinimg\.com\/(?:originals|736x)/i.test(lower)) return 0;
+      if (/\.(jpg|jpeg|png|webp)(\?|$)/i.test(lower)) return 1;
+      return 2;
+    };
+    return score(a) - score(b);
+  });
+}
+
 export function extractVideoUrlsFromHtml(html: string, baseUrl: string): string[] {
   if (!html) return [];
   const candidates: string[] = [];
@@ -96,7 +175,7 @@ export function extractVideoUrlsFromHtml(html: string, baseUrl: string): string[
     /<meta[^>]+content=["']([^"']+)["'][^>]+(?:property|name)=["'](?:og:video:secure_url|og:video:url|og:video|twitter:player:stream)["']/gi,
     /<(?:video|source)[^>]+src=["']([^"']+)["']/gi,
     /"(?:hdplay|playAddr|play_addr|video_url|videoUrl|contentUrl|playbackUrl|fallback_url|url)"\s*:\s*"(https?:[^"\\]*(?:\\.[^"\\]*)*)"/gi,
-    /(https?:\/\/[^"'\\\s<>]+\.(?:mp4|webm|mov|m4v)(?:\?[^"'\\\s<>]*)?)/gi,
+    /(https?:\/\/[^"'\\\s<>]+\.(?:mp4|webm|mov|m4v|m3u8)(?:\?[^"'\\\s<>]*)?)/gi,
   ];
 
   for (const regex of patterns) {
@@ -107,7 +186,6 @@ export function extractVideoUrlsFromHtml(html: string, baseUrl: string): string[
       try {
         const resolved = new URL(cleaned, baseUrl).toString();
         if (!/^https?:\/\//i.test(resolved)) continue;
-        // Skip obvious iframe / player HTML pages if a direct media file is available
         if (!candidates.includes(resolved)) {
           candidates.push(resolved);
         }
@@ -117,12 +195,52 @@ export function extractVideoUrlsFromHtml(html: string, baseUrl: string): string[
     }
   }
 
-  // Prioritize explicit video file extensions first
   return candidates.sort((a, b) => {
     const score = (u: string) => {
       const lower = u.toLowerCase();
       if (/\.(mp4|webm|mov|m4v)(\?|$)/i.test(lower)) return 0;
-      if (/video|cdn|stream|play/i.test(lower)) return 1;
+      if (/\.m3u8(\?|$)/i.test(lower)) return 1;
+      if (/video|cdn|stream|play/i.test(lower)) return 2;
+      return 3;
+    };
+    return score(a) - score(b);
+  });
+}
+
+export function extractAudioUrlsFromHtml(html: string, baseUrl: string): string[] {
+  if (!html) return [];
+  const candidates: string[] = [];
+
+  const patterns: RegExp[] = [
+    /<meta[^>]+(?:property|name)=["'](?:og:audio:secure_url|og:audio:url|og:audio|twitter:player:stream)["'][^>]+content=["']([^"']+)["']/gi,
+    /<meta[^>]+content=["']([^"']+)["'][^>]+(?:property|name)=["'](?:og:audio:secure_url|og:audio:url|og:audio|twitter:player:stream)["']/gi,
+    /<(?:audio|source)[^>]+src=["']([^"']+)["']/gi,
+    /"(?:audioUrl|audio_url|streamUrl|stream_url|preview_url|mp3|music|audio)"\s*:\s*"(https?:[^"\\]*(?:\\.[^"\\]*)*)"/gi,
+    /(https?:\/\/[^"'\\\s<>]+\.(?:mp3|m4a|wav|ogg|aac|flac)(?:\?[^"'\\\s<>]*)?)/gi,
+  ];
+
+  for (const regex of patterns) {
+    let match: RegExpExecArray | null;
+    while ((match = regex.exec(html)) !== null) {
+      const cleaned = unescapeExtractedUrl(match[1] || '');
+      if (!cleaned) continue;
+      try {
+        const resolved = new URL(cleaned, baseUrl).toString();
+        if (!/^https?:\/\//i.test(resolved)) continue;
+        if (!candidates.includes(resolved)) {
+          candidates.push(resolved);
+        }
+      } catch {
+        // ignore invalid candidate URLs
+      }
+    }
+  }
+
+  return candidates.sort((a, b) => {
+    const score = (u: string) => {
+      const lower = u.toLowerCase();
+      if (/\.mp3(\?|$)/i.test(lower)) return 0;
+      if (/\.(m4a|wav|ogg|aac|flac)(\?|$)/i.test(lower)) return 1;
       return 2;
     };
     return score(a) - score(b);
@@ -225,6 +343,37 @@ export function buildFfmpegMp3Args(
     'mp3',
     outputMp3Path
   );
+  return args;
+}
+
+export function buildFfmpegMp4Args(
+  inputSource: string,
+  outputMp4Path: string,
+  options: { maxBytes?: number } = {}
+): string[] {
+  const args: string[] = [
+    '-y',
+    '-i',
+    inputSource,
+    '-c:v',
+    'libx264',
+    '-preset',
+    'fast',
+    '-crf',
+    '23',
+    '-pix_fmt',
+    'yuv420p',
+    '-c:a',
+    'aac',
+    '-b:a',
+    '128k',
+    '-movflags',
+    '+faststart',
+  ];
+  if (options.maxBytes && options.maxBytes > 0) {
+    args.push('-fs', String(Math.floor(options.maxBytes)));
+  }
+  args.push('-f', 'mp4', outputMp4Path);
   return args;
 }
 

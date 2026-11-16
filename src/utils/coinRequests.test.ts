@@ -10,14 +10,16 @@ import {
 } from './coinRequests.ts';
 
 describe('coinRequests pure shop & admin approval helpers', () => {
-  it('resolves predefined shop packages cleanly', () => {
-    const pkg = findCoinPackageByAmount(300);
-    assert.equal(pkg.coins, 300);
-    assert.equal(pkg.uzs, 28000);
+  it('resolves predefined shop packages starting at 1,000 coins = 50,000 UZS', () => {
+    const minPkg = findCoinPackageByAmount(1000);
+    assert.equal(minPkg.coins, 1000);
+    assert.equal(minPkg.uzs, 50000);
+    assert.equal(COIN_SHOP_PACKAGES[0].coins, 1000);
+    assert.equal(COIN_SHOP_PACKAGES[0].uzs, 50000);
     assert.equal(COIN_SHOP_PACKAGES.length, 4);
   });
 
-  it('builds pending coin purchase request using Face ID photo when available', () => {
+  it('builds pending coin purchase request with required contactInfo and Face ID photo', () => {
     const req = buildCoinPurchaseRequest({
       user: {
         uid: 'u_99',
@@ -26,8 +28,9 @@ describe('coinRequests pure shop & admin approval helpers', () => {
         avatar: 'https://old.example/avatar.jpg',
         faceId: { capturedPhotoUrl: '/api/face-id/photo/face_u_99.jpg' },
       },
-      coinAmount: 500,
+      coinAmount: 2500,
       paymentMethod: 'payme',
+      contactInfo: '@aziz_tg',
       note: 'Karta oxiri 4412',
       nowIso: '2026-11-15T10:00:00.000Z',
     });
@@ -36,8 +39,9 @@ describe('coinRequests pure shop & admin approval helpers', () => {
     assert.equal(req.userUid, 'u_99');
     assert.equal(req.userName, 'Azizbek');
     assert.equal(req.userAvatar, '/api/face-id/photo/face_u_99.jpg');
-    assert.equal(req.coinAmount, 500);
-    assert.equal(req.uzsAmount, 45000);
+    assert.equal(req.contactInfo, '@aziz_tg');
+    assert.equal(req.coinAmount, 2500);
+    assert.equal(req.uzsAmount, 115000);
     assert.equal(req.paymentMethod, 'payme');
     assert.equal(canReviewCoinRequest(req), true);
   });

@@ -54,6 +54,8 @@
       "balanceDiamonds": 999999,
       "pendingDiamonds": 0,
       "diamondProgress": 0,
+      "dailyLimitTarget": 120,
+      "dailyLimitResetAt": null,
       "balanceUzs": 99999900,
       "pendingUzs": 0,
       "totalEarnedDiamonds": 999999,
@@ -61,7 +63,7 @@
       "exchangeRateUzs": 100,
       "unlockWindowHours": 12,
       "nextUnlockAt": null,
-      "updatedAt": "2026-11-16T11:17:53.863Z"
+      "updatedAt": "2026-11-16T12:05:35.779Z"
     }
   }
 ]

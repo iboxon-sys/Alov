@@ -11,6 +11,7 @@ import {
   browserLocalPersistence,
   signInWithEmailAndPassword,
   createUserWithEmailAndPassword,
+  updateProfile,
   User 
 } from 'firebase/auth';
 import firebaseConfig from '../firebase-applet-config.json';
@@ -37,6 +38,7 @@ export {
   setPersistence,
   browserLocalPersistence,
   signInWithEmailAndPassword,
-  createUserWithEmailAndPassword
+  createUserWithEmailAndPassword,
+  updateProfile
 };
 export type { User };

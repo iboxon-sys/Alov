@@ -25,27 +25,34 @@ import { FollowListModal } from './components/FollowListModal';
 import { PostsFeed } from './components/PostsFeed';
 import { PublicProfileModal } from './components/PublicProfileModal';
 import { SmartPhoneInput } from './components/SmartPhoneInput';
+import { ChatMediaPicker, type ChatMediaKind } from './components/ChatMediaPicker';
 import { callNotification } from './services/callNotification';
 import { VideoPlayer, VoiceMessage } from './components/ChatMedia';
 import { CandidateSkeleton, ChatSkeleton } from './components/Skeleton';
 import { 
   auth, googleProvider, GoogleAuthProvider,
   signInWithPopup, signInWithRedirect, getRedirectResult, signOut, onAuthStateChanged, 
-  setPersistence, browserLocalPersistence, signInWithEmailAndPassword, createUserWithEmailAndPassword, User
+  setPersistence, browserLocalPersistence, signInWithEmailAndPassword, createUserWithEmailAndPassword, updateProfile, User
 } from './firebase';
 import { getApiUrl, getBaseUrl, safeFetchJson } from './config/api';
 import { io, Socket } from 'socket.io-client';
 import {
   buildTelegramDisplayName,
+  getSafeUserDisplayName,
   isPlaceholderAvatar,
   isPlaceholderOrUsername,
   pickPreferredAvatar
 } from './utils/telegramProfile';
 import {
   MESSAGE_COIN_COST,
+  MESSAGE_DIAMOND_REWARD,
   DIAMOND_LIMIT_TARGET,
+  DAILY_LIMIT_WINDOW_HOURS,
+  DIAMOND_UNLOCK_HOURS,
   ADMIN_FULL_COINS,
   ADMIN_FULL_DIAMONDS,
+  calculateDiamondsToUzs,
+  formatDiamondsDisplay,
   isAdminTelegramUser,
   getDiamondProgressPercent,
   getPendingDiamondsTotal,
@@ -85,21 +92,6 @@ function resolveAvatarUrl(rawUrl?: string | null): string {
     return `${getBaseUrl()}${clean}`;
   }
   return clean;
-}
-
-function getSafeUserDisplayName(user: any, fallback: string = 'Profil'): string {
-  if (!user) return fallback;
-  const fromParts = buildTelegramDisplayName({
-    firstName: user.firstName || user.first_name || user.name,
-    lastName: user.lastName || user.last_name,
-    username: user.telegram || user.username,
-    phone: user.phone,
-  });
-  if (fromParts) return fromParts;
-  if (user.name && !isPlaceholderOrUsername(user.name, user.telegram || user.username, user.phone)) {
-    return user.name;
-  }
-  return fallback;
 }
 
 /** Utility for Tailwind class merging */
@@ -407,18 +399,22 @@ export default function App() {
   const [showTopUpModal, setShowTopUpModal] = useState(false);
   const [showWithdrawModal, setShowWithdrawModal] = useState(false);
   const [showGiftModal, setShowGiftModal] = useState(false);
-  const [topUpPackage, setTopUpPackage] = useState<{ coins: number; uzs: number }>({ coins: 300, uzs: 28000 });
+  const [topUpPackage, setTopUpPackage] = useState<{ coins: number; uzs: number }>({ coins: 1000, uzs: 50000 });
   const [paymentProvider, setPaymentProvider] = useState<'click' | 'payme' | 'uzum' | 'telegram_stars'>('click');
+  const [coinRequestContact, setCoinRequestContact] = useState('');
   const [coinRequestNote, setCoinRequestNote] = useState('');
   const [isSubmittingCoinRequest, setIsSubmittingCoinRequest] = useState(false);
   const [userCoinRequests, setUserCoinRequests] = useState<CoinPurchaseRequest[]>([]);
   const [withdrawCardNumber, setWithdrawCardNumber] = useState('');
+  const [withdrawContact, setWithdrawContact] = useState('');
   const [withdrawAmount, setWithdrawAmount] = useState<number>(100);
   const [walletNoticeMsg, setWalletNoticeMsg] = useState('');
 
   const [selectedChatUser, setSelectedChatUser] = useState<any>(null);
   const [chatMessages, setChatMessages] = useState<Record<string, any[]>>({});
   const [inputMessage, setInputMessage] = useState('');
+  const [showChatMediaPicker, setShowChatMediaPicker] = useState(false);
+  const [isUploadingChatMedia, setIsUploadingChatMedia] = useState(false);
   const [isTyping, setIsTyping] = useState(false);
   const typingTimeoutRef = useRef<any>(null);
 
@@ -845,9 +841,20 @@ export default function App() {
       const myUid = currentUserRef.current?.uid;
       if (myUid && updatedReq.userUid === myUid) {
         if (updatedReq.status === 'approved') {
-          showToast(`Arizangiz tasdiqlandi: +${updatedReq.coinAmount} moneta qo'shildi`);
+          showToast(`Moneta buyurtmangiz yakunlandi: +${updatedReq.coinAmount} moneta`);
         } else if (updatedReq.status === 'rejected') {
-          showToast('Moneta xaridi arizangiz rad etildi');
+          showToast('Moneta buyurtmasi rad etildi');
+        }
+      }
+    });
+
+    socket.on('withdrawal_updated', (updatedW: any) => {
+      const myUid = currentUserRef.current?.uid;
+      if (myUid && updatedW?.userUid === myUid) {
+        if (updatedW.status === 'approved') {
+          showToast(`Pul yechib olish arizangiz bajarildi: ${Number(updatedW.uzsAmount || 0).toLocaleString()} so'm`);
+        } else if (updatedW.status === 'rejected') {
+          showToast('Pul yechib olish arizasi rad etildi, olmoslar hamyonga qaytarildi');
         }
       }
     });
@@ -876,6 +883,7 @@ export default function App() {
       socket.off('friendship_updated');
       socket.off('insufficient_coins');
       socket.off('coin_request_updated');
+      socket.off('withdrawal_updated');
       socket.disconnect();
     };
   }, []);
@@ -1913,6 +1921,7 @@ export default function App() {
   // Device Image File Upload Handler -> Opens Avatar Image Crop Modal
   const handleImageUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
+    e.target.value = '';
     if (file) {
       const reader = new FileReader();
       reader.onloadend = () => {
@@ -1977,28 +1986,34 @@ export default function App() {
   const handleApplyCrop = () => {
     if (!cropImageSrc) return;
     const img = new Image();
-    img.crossOrigin = 'anonymous';
-    img.src = cropImageSrc;
-    img.onload = () => {
+    let handled = false;
+    const renderAndSave = () => {
+      if (handled) return;
+      handled = true;
       const size = 300;
+      const previewSize = 224; // w-56 h-56 preview container
+      const panRatio = size / previewSize;
       const canvas = document.createElement('canvas');
       canvas.width = size;
       canvas.height = size;
       const ctx = canvas.getContext('2d');
-      if (!ctx) return;
+      if (!ctx) {
+        setShowCropModal(false);
+        return;
+      }
 
-      // Clean white canvas background
-      ctx.fillStyle = '#FFFFFF';
+      // Dark obsidian canvas background matching circular preview container
+      ctx.fillStyle = '#09090D';
       ctx.fillRect(0, 0, size, size);
 
       ctx.save();
-      // Translate to canvas center
-      ctx.translate(size / 2, size / 2);
+      ctx.translate(size / 2 + cropPan.x * panRatio, size / 2 + cropPan.y * panRatio);
       ctx.scale(cropScale, cropScale);
-      ctx.translate(cropPan.x, cropPan.y);
 
-      // Draw image keeping ratio
-      const aspect = img.width / img.height;
+      // Draw image keeping object-cover aspect ratio
+      const naturalW = img.naturalWidth || img.width || size;
+      const naturalH = img.naturalHeight || img.height || size;
+      const aspect = naturalW / naturalH;
       let drawW = size;
       let drawH = size;
       if (aspect > 1) {
@@ -2009,11 +2024,31 @@ export default function App() {
       ctx.drawImage(img, -drawW / 2, -drawH / 2, drawW, drawH);
       ctx.restore();
 
-      const croppedBase64 = canvas.toDataURL('image/jpeg', 0.88);
-      setRegAvatar(croppedBase64);
+      try {
+        const croppedBase64 = canvas.toDataURL('image/jpeg', 0.9);
+        setRegAvatar(croppedBase64);
+      } catch {
+        setRegAvatar(cropImageSrc);
+      }
       setShowCropModal(false);
       setCropImageSrc(null);
     };
+
+    img.onload = renderAndSave;
+    img.onerror = () => {
+      if (handled) return;
+      handled = true;
+      setRegAvatar(cropImageSrc);
+      setShowCropModal(false);
+      setCropImageSrc(null);
+    };
+    if (!cropImageSrc.startsWith('data:') && !cropImageSrc.startsWith('blob:')) {
+      img.crossOrigin = 'anonymous';
+    }
+    img.src = cropImageSrc;
+    if (img.complete && img.naturalWidth > 0) {
+      renderAndSave();
+    }
   };
 
   // Toggle Live Location with strict physical GPS options & clear user guidance alerts
@@ -2123,8 +2158,13 @@ export default function App() {
 
   const handleSaveProfile = async (e: React.FormEvent) => {
     e.preventDefault();
-    const activeUid = firebaseUser?.uid || currentUser?.uid;
+    const activeUid = currentUser?.uid || firebaseUser?.uid;
     if (!activeUid) return;
+    const trimmedName = regName.trim();
+    if (!trimmedName) {
+      setErrorMsg("Iltimos, ismingizni kiriting!");
+      return;
+    }
     setErrorMsg('');
     setIsSavingProfile(true);
 
@@ -2143,30 +2183,67 @@ export default function App() {
         finalUsername = uRes.normalized;
       }
 
+      let resolvedSavedAvatar = pickPreferredAvatar(
+        regAvatar,
+        currentUser?.hasCustomAvatar ? currentUser?.avatar : '',
+        currentUser?.faceId?.capturedPhotoUrl,
+        currentUser?.avatar,
+        firebaseUser?.photoURL
+      );
+      if (resolvedSavedAvatar && resolvedSavedAvatar.startsWith('data:image/')) {
+        try {
+          const uploadRes = await safeFetchJson(getApiUrl('/api/media/upload'), {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              dataUrl: resolvedSavedAvatar,
+              fileName: `avatar_${activeUid}.jpg`,
+              mimeType: 'image/jpeg',
+            }),
+          });
+          if (uploadRes?.success && uploadRes.url) {
+            resolvedSavedAvatar = uploadRes.url;
+          }
+        } catch {}
+      }
+
+      const facePhotoUrl = String(currentUser?.faceId?.capturedPhotoUrl || '').trim();
+      const hasCustomAvatar = Boolean(
+        resolvedSavedAvatar &&
+          ((facePhotoUrl && resolvedSavedAvatar !== facePhotoUrl) ||
+            Boolean(currentUser?.hasCustomAvatar && resolvedSavedAvatar === currentUser?.avatar))
+      );
+
       const isPrimaryLocked = Boolean(currentUser?.isProfileCompleted === true);
       const lockedGender = isPrimaryLocked && (currentUser?.gender === 'male' || currentUser?.gender === 'female')
         ? currentUser.gender
         : regGender;
       const lockedBirthDate = isPrimaryLocked && currentUser?.birthDate ? currentUser.birthDate : regBirthDate;
       const computedAge = calculateAge(lockedBirthDate, Number(currentUser?.age || regAge));
-      const formattedPhone = formatPhoneNumberPretty(regPhone || firebaseUser?.phoneNumber || currentUser?.phone || '');
+      const trimmedPhone = regPhone.trim();
+      const formattedPhone = trimmedPhone && trimmedPhone !== '+' ? formatPhoneNumberPretty(trimmedPhone) : '';
       const newUserData = {
         ...currentUser,
         id: currentUser?.id || `ALOV-${activeUid.slice(0, 5).toUpperCase()}`,
         uid: activeUid,
-        name: regName || firebaseUser?.displayName || currentUser?.name || '',
+        name: trimmedName,
+        firstName: trimmedName,
+        first_name: trimmedName,
+        lastName: '',
+        last_name: '',
         username: finalUsername,
         birthDate: lockedBirthDate,
         age: computedAge,
         gender: lockedGender,
         region: regRegion,
         district: regDistrict,
-        neighborhood: regNeighborhood,
+        neighborhood: regNeighborhood.trim(),
         phone: formattedPhone,
-        telegram: regTelegram || currentUser?.telegram || '@user_tg',
-        instagram: regInstagram || currentUser?.instagram || '@user_insta',
-        bio: regBio,
-        avatar: pickPreferredAvatar(regAvatar, currentUser?.faceId?.capturedPhotoUrl, currentUser?.avatar, firebaseUser?.photoURL),
+        telegram: regTelegram.trim(),
+        instagram: regInstagram.trim(),
+        bio: regBio.trim(),
+        hasCustomAvatar,
+        avatar: resolvedSavedAvatar,
         banner: showProfileModal ? regBanner : (regBanner || currentUser?.banner || ''),
         videoUrl: currentUser?.videoUrl || 'https://assets.mixkit.co/videos/preview/mixkit-young-woman-looking-at-camera-in-a-park-41686-large.mp4',
         followersCount: currentUser?.followersCount ?? 0,
@@ -2190,18 +2267,36 @@ export default function App() {
       }
       const savedUser = data.user;
 
+      if (auth.currentUser && trimmedName) {
+        updateProfile(auth.currentUser, { displayName: trimmedName }).catch(() => {});
+      }
+
       try {
         localStorage.setItem('alov_current_user', JSON.stringify(savedUser));
-        localStorage.setItem('alov_user_' + activeUid, JSON.stringify(savedUser));
+        localStorage.setItem('alov_user_' + (savedUser.uid || activeUid), JSON.stringify(savedUser));
       } catch (e) {}
 
       setCurrentUser(savedUser);
+      setRegName(getSafeUserDisplayName(savedUser, trimmedName));
+      setRegAvatar(resolveEffectiveProfileAvatar(savedUser));
       setUsersList(prev => {
         const userMap = new Map<string, any>();
         prev.forEach(u => userMap.set(u.uid || u.id, u));
-        userMap.set(activeUid, savedUser);
+        userMap.set(savedUser.uid || activeUid, savedUser);
         return Array.from(userMap.values());
       });
+      setPostsList(prev =>
+        prev.map(p =>
+          p.authorUid === (savedUser.uid || activeUid)
+            ? {
+                ...p,
+                authorName: savedUser.name || trimmedName,
+                authorUsername: savedUser.username ?? p.authorUsername,
+                authorAvatar: resolveEffectiveProfileAvatar(savedUser) || p.authorAvatar,
+              }
+            : p
+        )
+      );
       setShowProfileModal(false);
       if (activeTab === 'landing') {
         setActiveTab('discover');
@@ -3153,11 +3248,14 @@ export default function App() {
     }, 2000);
   };
 
-  const handleSendChatMessage = async (type: 'text' | 'image' | 'video' | 'audio' | 'voice' = 'text', fileUrl?: string) => {
+  const handleSendChatMessage = async (type: 'text' | 'image' | 'video' | 'audio' | 'voice' = 'text', fileUrl?: string, customCaption?: string) => {
     if (!selectedChatUser) return;
     if (type === 'text' && !inputMessage.trim()) return;
     
-    const text = type === 'text' ? inputMessage.trim() : (type === 'image' ? "Rasm 🖼️" : (type === 'video' ? "Video 🎥" : (type === 'voice' ? "Ovozli xabar 🎤" : "Fayl 📎")));
+    const text =
+      type === 'text'
+        ? inputMessage.trim()
+        : (customCaption?.trim() || (type === 'image' ? "Rasm 🖼️" : (type === 'video' ? "Video 🎥" : (type === 'voice' ? "Ovozli xabar 🎤" : "Audio 🎵"))));
     if (type === 'text') setInputMessage('');
 
     const myUid = currentUser?.uid || firebaseUser?.uid;
@@ -3350,12 +3448,28 @@ export default function App() {
   useEffect(() => {
     if (showTopUpModal) {
       fetchMyCoinRequests();
+      if (!coinRequestContact.trim()) {
+        const fallback = currentUser?.telegram || currentUser?.phone || (currentUser?.username ? `@${currentUser.username.replace(/^@/, '')}` : '');
+        if (fallback) setCoinRequestContact(fallback);
+      }
     }
   }, [showTopUpModal, currentUser?.uid]);
+
+  useEffect(() => {
+    if (showWithdrawModal && !withdrawContact.trim()) {
+      const fallback = currentUser?.telegram || currentUser?.phone || (currentUser?.username ? `@${currentUser.username.replace(/^@/, '')}` : '');
+      if (fallback) setWithdrawContact(fallback);
+    }
+  }, [showWithdrawModal, currentUser?.uid]);
 
   const handleExecuteTopUp = async () => {
     const myUid = currentUser?.uid || firebaseUser?.uid;
     if (!myUid) return;
+    const cleanContact = coinRequestContact.trim();
+    if (cleanContact.length < 3) {
+      showToast("Admin aloqaga chiqishi uchun Telegram username yoki telefon raqamingizni kiriting!");
+      return;
+    }
     setIsSubmittingCoinRequest(true);
     try {
       const data = await safeFetchJson(getApiUrl('/api/wallet/topup-request'), {
@@ -3365,6 +3479,7 @@ export default function App() {
           uid: myUid,
           coinAmount: topUpPackage.coins,
           paymentMethod: paymentProvider,
+          contactInfo: cleanContact,
           note: coinRequestNote.trim(),
         })
       });
@@ -3372,9 +3487,9 @@ export default function App() {
         setUserCoinRequests((prev) => [data.request, ...prev.filter((r) => r.id !== data.request.id)]);
         setCoinRequestNote('');
         setWalletNoticeMsg('');
-        showToast(`${topUpPackage.coins} moneta bo'yicha arizangiz adminga yuborildi!`);
+        showToast(`${topUpPackage.coins.toLocaleString()} moneta buyurtmasi adminga yuborildi! Admin siz bilan bog'lanadi.`);
       } else {
-        showToast(data?.error || "Arizani yuborishda xatolik.");
+        showToast(data?.error || "Buyurtmani yuborishda xatolik.");
       }
     } catch (e: any) {
       showToast(e.message || "Xatolik yuz berdi");
@@ -3391,8 +3506,13 @@ export default function App() {
       showToast("Iltimos, 16 xonali Humo yoki Uzcard karta raqamini kiriting!");
       return;
     }
+    const cleanContact = withdrawContact.trim();
+    if (cleanContact.length < 3) {
+      showToast("Admin aloqaga chiqishi uchun Telegram username yoki telefon raqamingizni kiriting!");
+      return;
+    }
     if (withdrawAmount < 100) {
-      showToast("Minimal yechib olish miqdori 100 almaz (100,000 so'm)!");
+      showToast("Minimal yechib olish miqdori 100 almaz (10,000 so'm)!");
       return;
     }
 
@@ -3403,13 +3523,14 @@ export default function App() {
         body: JSON.stringify({
           uid: myUid,
           diamondAmount: withdrawAmount,
-          bankCard: withdrawCardNumber
+          bankCard: withdrawCardNumber,
+          contactInfo: cleanContact,
         })
       });
       if (data && data.success && data.user) {
         setCurrentUser(data.user);
         setShowWithdrawModal(false);
-        showToast(`Pul yechib olish arizangiz qabul qilindi: ${(withdrawAmount * 1000).toLocaleString()} so'm`);
+        showToast(`Pul yechish arizangiz adminga yuborildi (${calculateDiamondsToUzs(withdrawAmount).toLocaleString()} so'm). Admin siz bilan bog'lanadi!`);
       } else {
         showToast(data?.error || "Arizani yuborishda xatolik.");
       }
@@ -3418,18 +3539,38 @@ export default function App() {
     }
   };
 
-  const handleMediaUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file || !firebaseUser || !selectedChatUser) return;
-
-    const type = file.type.startsWith('image/') ? 'image' : (file.type.startsWith('video/') ? 'video' : 'audio');
-    const reader = new FileReader();
-    reader.onloadend = () => {
-      if (typeof reader.result === 'string') {
-        handleSendChatMessage(type, reader.result);
+  const handleSendPickedChatMedia = async (file: File, kind: ChatMediaKind, caption?: string) => {
+    if (!file || !selectedChatUser) return;
+    setIsUploadingChatMedia(true);
+    try {
+      const res = await fetch(getApiUrl('/api/media/upload-raw'), {
+        method: 'POST',
+        headers: {
+          'Content-Type': file.type || 'application/octet-stream',
+          'x-file-name': encodeURIComponent(file.name || `chat_media`),
+        },
+        body: file,
+      });
+      const data = await res.json().catch(() => null);
+      if (res.ok && data?.success && data?.url) {
+        await handleSendChatMessage(kind, data.url, caption);
+        setShowChatMediaPicker(false);
+      } else {
+        // Fallback to DataURL for tiny files if upload fails
+        const reader = new FileReader();
+        reader.onloadend = async () => {
+          if (typeof reader.result === 'string') {
+            await handleSendChatMessage(kind, reader.result, caption);
+            setShowChatMediaPicker(false);
+          }
+        };
+        reader.readAsDataURL(file);
       }
-    };
-    reader.readAsDataURL(file);
+    } catch (err: any) {
+      showToast(err?.message || "Media yuklashda xatolik yuz berdi");
+    } finally {
+      setIsUploadingChatMedia(false);
+    }
   };
 
   const startRecording = async () => {
@@ -4015,7 +4156,7 @@ export default function App() {
                                 <button
                                   type="button"
                                   onClick={handleToggleFriendship}
-                                  title={isFriendActive ? "Do'stlashishni bekor qilish (5 moneta yechiladi)" : "Do'stlashish — yigitdan moneta yechilmaydi"}
+                                  title={isFriendActive ? `Do'stlashishni bekor qilish (${MESSAGE_COIN_COST} moneta yechiladi)` : "Do'stlashish — yigitdan moneta yechilmaydi"}
                                   className={cn(
                                     "px-2.5 py-1.5 rounded-full text-[10px] font-bold flex items-center space-x-1 transition active:scale-95 whitespace-nowrap shrink-0 cursor-pointer",
                                     isFriendActive
@@ -4069,8 +4210,8 @@ export default function App() {
                         if (currentUser?.gender === 'female') {
                           return (
                             <div className="bg-cyan-500/10 border-b border-cyan-500/20 text-cyan-200 px-3.5 py-1.5 text-[10.5px] font-semibold flex items-center justify-between shrink-0">
-                              <span>💎 Har bir javobingiz uchun +5 Almaz limitga qo'shiladi</span>
-                              <span className="font-mono text-cyan-300 font-bold whitespace-nowrap tabular-nums">Wallet: {currentUser?.diamonds ?? 0}</span>
+                              <span>💎 Har bir javobingiz uchun +{MESSAGE_DIAMOND_REWARD} Almaz limitga qo'shiladi</span>
+                              <span className="font-mono text-cyan-300 font-bold whitespace-nowrap tabular-nums">Wallet: {formatDiamondsDisplay(currentUser?.diamonds)}</span>
                             </div>
                           );
                         }
@@ -4200,8 +4341,8 @@ export default function App() {
                             <div className="bg-[#11131C] border-t border-white/[0.08] px-3.5 pt-2 pb-1.5 shrink-0 space-y-1">
                               <div className="flex items-center justify-between text-[10.5px] font-bold">
                                 <span className="text-zinc-300 flex items-center gap-1">
-                                  <span>💎 Olmos limiti:</span>
-                                  <span className="text-cyan-300 tabular-nums">{progressVal} / {DIAMOND_LIMIT_TARGET}</span>
+                                  <span>💎 Kunlik limit ({DAILY_LIMIT_WINDOW_HOURS} soat):</span>
+                                  <span className="text-cyan-300 tabular-nums">{formatDiamondsDisplay(progressVal)} / {DIAMOND_LIMIT_TARGET}</span>
                                 </span>
                                 <span className="text-emerald-400 tabular-nums">{progressPct}%</span>
                               </div>
@@ -4215,7 +4356,7 @@ export default function App() {
                                 <div className="flex items-center justify-between text-[10px] font-semibold text-amber-200 bg-amber-500/10 px-2.5 py-1 rounded-lg border border-amber-400/20">
                                   <span className="flex items-center gap-1">
                                     <Clock className="w-3 h-3 shrink-0 text-amber-400" />
-                                    <span>{pendingTotal} 💎 24 soat ichida hisobga qo'shiladi</span>
+                                    <span>{formatDiamondsDisplay(pendingTotal)} 💎 (limit to'lmasa ham) {DIAMOND_UNLOCK_HOURS} soatda hamyonga tushadi</span>
                                   </span>
                                   <span className="font-mono font-bold text-amber-300 tabular-nums">{countdown.formatted}</span>
                                 </div>
@@ -4226,11 +4367,28 @@ export default function App() {
                         return null;
                       })()}
 
-                      <div className="shrink-0 z-20 px-3 py-2.5 pb-safe bg-[#11131C] border-t border-white/[0.08] flex items-end space-x-2">
-                        <label aria-label="Media yuklash" className="p-2.5 rounded-full text-zinc-400 hover:bg-white/[0.06] hover:text-zinc-200 transition active:scale-90 cursor-pointer shrink-0">
-                          <Plus className="w-5 h-5" />
-                          <input type="file" className="hidden" accept="image/*,video/*,audio/*" onChange={handleMediaUpload} />
-                        </label>
+                      <div className="shrink-0 z-20 px-3 pt-2 pb-2.5 pb-safe bg-[#11131C] border-t border-white/[0.08] flex flex-col">
+                        <ChatMediaPicker
+                          isOpen={showChatMediaPicker}
+                          onToggleOpen={() => setShowChatMediaPicker((prev) => !prev)}
+                          onSendMedia={handleSendPickedChatMedia}
+                          isUploading={isUploadingChatMedia}
+                        />
+                        <div className="flex items-end space-x-2 w-full">
+                        <button
+                          type="button"
+                          onClick={() => setShowChatMediaPicker((prev) => !prev)}
+                          aria-label="Media yuklash"
+                          data-testid="toggle-chat-media-picker"
+                          className={cn(
+                            "p-2.5 rounded-full transition active:scale-90 cursor-pointer shrink-0",
+                            showChatMediaPicker
+                              ? "bg-rose-500/20 text-rose-400"
+                              : "text-zinc-400 hover:bg-white/[0.06] hover:text-zinc-200"
+                          )}
+                        >
+                          <Plus className={cn("w-5 h-5 transition-transform", showChatMediaPicker && "rotate-45")} />
+                        </button>
                         <div className="flex-1 relative">
                           <textarea
                             placeholder="Xabar yozing..."
@@ -4276,6 +4434,7 @@ export default function App() {
                             <Mic className="w-5 h-5" />
                           </button>
                         )}
+                        </div>
                       </div>
                     </div>
                   )}
@@ -4301,7 +4460,7 @@ export default function App() {
                 );
                 const openEditProfileModal = () => {
                   setErrorMsg('');
-                  setRegName(currentUser?.name || '');
+                  setRegName(getSafeUserDisplayName(currentUser, currentUser?.name || ''));
                   setRegUsername(currentUser?.username || '');
                   setRegBirthDate(currentUser?.birthDate || '2002-05-15');
                   setRegAge(String(currentUser?.age || calculateAge(currentUser?.birthDate, 22)));
@@ -4529,7 +4688,7 @@ export default function App() {
                                     </p>
                                     <p className="text-[11px] text-zinc-400 tabular-nums">
                                       {currentUser?.gender === 'female'
-                                        ? `${currentUser?.diamonds ?? 0} olmos mavjud`
+                                        ? `${formatDiamondsDisplay(currentUser?.diamonds)} olmos mavjud`
                                         : `${currentUser?.coins ?? 100} moneta mavjud`}
                                     </p>
                                   </div>
@@ -4555,8 +4714,8 @@ export default function App() {
                                 return (
                                   <div className="space-y-1.5 pb-2 border-b border-white/[0.07]">
                                     <div className="flex items-center justify-between text-[11px] font-bold text-zinc-200">
-                                      <span>Olmos limiti</span>
-                                      <span className="tabular-nums text-cyan-300">{progressVal} / {DIAMOND_LIMIT_TARGET} ({progressPct}%)</span>
+                                      <span>Kunlik olmos limiti ({DAILY_LIMIT_WINDOW_HOURS} soat)</span>
+                                      <span className="tabular-nums text-cyan-300">{formatDiamondsDisplay(progressVal)} / {DIAMOND_LIMIT_TARGET} ({progressPct}%)</span>
                                     </div>
                                     <div className="w-full h-1.5 bg-white/[0.08] rounded-full overflow-hidden">
                                       <div
@@ -4564,9 +4723,12 @@ export default function App() {
                                         style={{ width: `${progressPct}%` }}
                                       />
                                     </div>
+                                    <p className="text-[10px] text-zinc-400">
+                                      24 soatlik limit to'lmagan bo'lsa ham, yig'ilgan olmoslar {DIAMOND_UNLOCK_HOURS} soat ichida hamyoningizga tushadi.
+                                    </p>
                                     {pendingTotal > 0 && (
                                       <p className="text-[10.5px] font-semibold text-amber-300 flex items-center justify-between">
-                                        <span>Walletga qo'shilish vaqti ({pendingTotal} olmos):</span>
+                                        <span>Walletga qo'shilish vaqti ({formatDiamondsDisplay(pendingTotal)} olmos):</span>
                                         <span className="font-mono font-bold tabular-nums">{countdown.formatted}</span>
                                       </p>
                                     )}
@@ -5192,15 +5354,41 @@ export default function App() {
 
   if (isAuthChecking) {
     return (
-      <div className="min-h-screen bg-[#09090D] flex flex-col items-center justify-center space-y-4">
-        <div className="relative">
-          <div className="w-12 h-12 rounded-full border-4 border-rose-500/20 border-t-rose-500 animate-spin" />
-          <Flame className="w-5 h-5 text-rose-500 absolute inset-0 m-auto animate-pulse" />
+      <div
+        data-testid="auth-loading-splash"
+        className="relative min-h-screen bg-[#09090D] flex flex-col items-center justify-center px-6 overflow-hidden select-none"
+      >
+        <div
+          aria-hidden="true"
+          className="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_center,rgba(225,29,72,0.16),transparent_55%)]"
+        />
+        <div className="relative z-10 flex flex-col items-center text-center max-w-2xl space-y-6">
+          <div className="relative flex items-center justify-center">
+            <div className="w-16 h-16 rounded-full border-4 border-rose-500/20 border-t-rose-500 animate-spin" />
+            <Flame className="w-7 h-7 text-rose-500 absolute inset-0 m-auto" />
+          </div>
+
+          <div className="space-y-2.5">
+            <h1 className="text-3xl sm:text-5xl font-sans font-extrabold tracking-[0.14em] uppercase text-white leading-tight">
+              ZUHRIDDIN{' '}
+              <span className="bg-gradient-to-r from-rose-400 via-rose-500 to-amber-400 bg-clip-text text-transparent">
+                SYS PRODUCT
+              </span>
+            </h1>
+            <div className="text-xl sm:text-2xl font-editorial font-bold tracking-tight text-zinc-300">
+              alov<span className="text-rose-500">.uz</span>
+            </div>
+          </div>
+
+          <div className="flex flex-col items-center gap-2.5 pt-1">
+            <div className="w-40 h-1 rounded-full bg-white/10 overflow-hidden">
+              <div className="h-full w-1/2 rounded-full bg-gradient-to-r from-rose-500 to-amber-400 animate-pulse" />
+            </div>
+            <p className="text-xs sm:text-sm text-zinc-400 font-medium tracking-wide">
+              Sessiya tiklanmoqda...
+            </p>
+          </div>
         </div>
-        <div className="text-2xl font-editorial font-black tracking-tight text-white">
-          alov<span className="text-rose-500">.uz</span>
-        </div>
-        <p className="text-xs text-zinc-400 font-medium">Sessiya tiklanmoqda...</p>
       </div>
     );
   }
@@ -6886,12 +7074,17 @@ export default function App() {
         </div>
       )}
 
-      {/* --- IMAGE CROP & ZOOM EDITING MODAL (Renders ON TOP with z-[100]) --- */}
+      {/* --- IMAGE CROP & ZOOM EDITING MODAL (Renders ON TOP of Edit Profile modal with z-[210]) --- */}
       {showCropModal && cropImageSrc && (
-        <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/80 backdrop-blur-md">
+        <div
+          data-testid="avatar-crop-modal"
+          onClick={() => setShowCropModal(false)}
+          className="fixed inset-0 z-[210] flex items-center justify-center p-4 bg-black/80 backdrop-blur-md"
+        >
           <motion.div
             initial={{ opacity: 0, scale: 0.96, y: 10 }}
             animate={{ opacity: 1, scale: 1, y: 0 }}
+            onClick={(e) => e.stopPropagation()}
             className="bg-[#11131C] rounded-[28px] max-w-sm w-full p-5 space-y-4 relative select-none shadow-[0_28px_80px_rgba(0,0,0,0.85)] border border-white/10 text-zinc-100"
           >
             <div className="flex items-center justify-between">
@@ -6899,7 +7092,12 @@ export default function App() {
                 <Crop className="w-5 h-5 text-rose-400" />
                 <h3 className="font-bold text-sm text-white">Rasmni moslashtirish</h3>
               </div>
-              <button onClick={() => setShowCropModal(false)} className="p-1.5 rounded-full bg-white/[0.06] text-zinc-400 hover:text-white hover:bg-rose-500/20 transition cursor-pointer">
+              <button
+                type="button"
+                aria-label="Rasm tahrirlash oynasini yopish"
+                onClick={() => setShowCropModal(false)}
+                className="p-1.5 rounded-full bg-white/[0.06] text-zinc-400 hover:text-white hover:bg-rose-500/20 transition cursor-pointer"
+              >
                 <X className="w-4 h-4" />
               </button>
             </div>
@@ -7271,10 +7469,10 @@ export default function App() {
                 <span className="text-[11px] font-bold uppercase tracking-[0.14em]">Moneta Do'koni</span>
               </div>
               <h3 className="text-xl font-editorial font-bold text-white">
-                O'zingizga mos paketni tanlang
+                Moneta buyurtma qilish
               </h3>
               <p className="text-xs text-zinc-400">
-                Narx ustiga bosib ariza yuboring — admin tasdiqlaganidan so'ng monetalar hisobingizga tushadi.
+                Paketni tanlang va Telegram username yoki telefon raqamingizni qoldiring — admin bog'lanib to'lovdan so'ng monetani hisobingizga o'tkazib beradi.
               </p>
             </div>
 
@@ -7286,7 +7484,7 @@ export default function App() {
 
             <div className="space-y-2">
               <label className="block text-[11px] font-bold uppercase tracking-wider text-zinc-400">
-                Moneta Paketlari
+                Moneta Paketlari (Minimal 1 000 = 50 000 so'm)
               </label>
               <div className="grid grid-cols-2 gap-2.5">
                 {COIN_SHOP_PACKAGES.map((pkg) => {
@@ -7306,13 +7504,16 @@ export default function App() {
                     >
                       <div className="flex items-center justify-between gap-1">
                         <span className="text-sm font-mono font-bold text-white tabular-nums">
-                          {pkg.coins} 🪙
+                          {pkg.coins.toLocaleString()} 🪙
                         </span>
                         <span className="text-[10px] font-semibold text-amber-300">{pkg.label}</span>
                       </div>
                       <span className="text-xs font-mono font-bold text-amber-400 block mt-1 tabular-nums">
                         {pkg.uzs.toLocaleString()} so'm
                       </span>
+                      {pkg.bonusText && (
+                        <span className="text-[10px] text-zinc-400 block mt-0.5">{pkg.bonusText}</span>
+                      )}
                     </button>
                   );
                 })}
@@ -7348,6 +7549,24 @@ export default function App() {
             </div>
 
             <div className="space-y-1.5">
+              <label className="block text-[11px] font-bold uppercase tracking-wider text-amber-300">
+                Aloqa uchun Telegram username yoki telefon raqami *
+              </label>
+              <input
+                type="text"
+                required
+                value={coinRequestContact}
+                onChange={(e) => setCoinRequestContact(e.target.value)}
+                data-testid="coin-request-contact-input"
+                placeholder="@username yoki +998 90 123 45 67"
+                className="w-full px-3.5 py-2.5 rounded-xl bg-[#171A26] border border-amber-400/35 text-xs text-white placeholder:text-zinc-500 outline-none focus:border-amber-400"
+              />
+              <p className="text-[10px] text-zinc-400">
+                Admin siz bilan bog'lanib to'lovni tasdiqlaganidan so'ng moneta balansga tushadi.
+              </p>
+            </div>
+
+            <div className="space-y-1.5">
               <label className="block text-[11px] font-bold uppercase tracking-wider text-zinc-400">
                 Izoh (ixtiyoriy)
               </label>
@@ -7356,7 +7575,7 @@ export default function App() {
                 value={coinRequestNote}
                 onChange={(e) => setCoinRequestNote(e.target.value)}
                 data-testid="coin-request-note-input"
-                placeholder="Masalan: @telegram orqali bog'laning..."
+                placeholder="Qo'shimcha xabar..."
                 className="w-full px-3.5 py-2.5 rounded-xl bg-[#171A26] border border-white/10 text-xs text-white placeholder:text-zinc-500 outline-none focus:border-amber-400"
               />
             </div>
@@ -7371,15 +7590,15 @@ export default function App() {
               <CreditCard className="w-4 h-4" />
               <span>
                 {isSubmittingCoinRequest
-                  ? 'Ariza yuborilmoqda...'
-                  : `${topUpPackage.coins} moneta (${topUpPackage.uzs.toLocaleString()} so'm) — Ariza yuborish`}
+                  ? 'Buyurtma yuborilmoqda...'
+                  : `Buyurtma berish — ${topUpPackage.coins.toLocaleString()} moneta (${topUpPackage.uzs.toLocaleString()} so'm)`}
               </span>
             </button>
 
             {userCoinRequests.length > 0 && (
               <div className="pt-3 border-t border-white/10 space-y-2">
                 <p className="text-[11px] font-bold uppercase tracking-wider text-zinc-400">
-                  Mening arizalarim ({userCoinRequests.length})
+                  Mening buyurtmalarim ({userCoinRequests.length})
                 </p>
                 <div className="space-y-1.5 max-h-36 overflow-y-auto pr-1">
                   {userCoinRequests.slice(0, 8).map((req) => (
@@ -7389,7 +7608,7 @@ export default function App() {
                       className="flex items-center justify-between gap-2 px-3 py-2 rounded-xl bg-[#171A26] border border-white/[0.07] text-xs"
                     >
                       <div className="min-w-0">
-                        <span className="font-mono font-bold text-white">+{req.coinAmount} 🪙</span>
+                        <span className="font-mono font-bold text-white">+{req.coinAmount.toLocaleString()} 🪙</span>
                         <span className="text-zinc-400 ml-2 text-[11px]">{req.uzsAmount.toLocaleString()} so'm</span>
                       </div>
                       <span
@@ -7423,9 +7642,11 @@ export default function App() {
           <motion.div
             initial={{ opacity: 0, scale: 0.96, y: 12 }}
             animate={{ opacity: 1, scale: 1, y: 0 }}
-            className="bg-[#11131C] rounded-[28px] max-w-sm w-full p-6 space-y-4 relative border border-white/10 shadow-[0_28px_80px_rgba(0,0,0,0.85)] text-zinc-100"
+            className="bg-[#11131C] rounded-[28px] max-w-sm w-full p-6 space-y-4 relative border border-white/10 shadow-[0_28px_80px_rgba(0,0,0,0.85)] text-zinc-100 max-h-[90vh] overflow-y-auto"
           >
             <button 
+              type="button"
+              aria-label="Oynani yopish"
               onClick={() => setShowWithdrawModal(false)}
               className="absolute top-5 right-5 w-8 h-8 rounded-full bg-white/[0.06] hover:bg-rose-500/20 text-zinc-300 hover:text-white flex items-center justify-center transition cursor-pointer"
             >
@@ -7438,17 +7659,17 @@ export default function App() {
                 <span>Pul yechib olish</span>
               </h3>
               <p className="text-xs text-zinc-400 font-medium">
-                Ishlab topilgan almazlarni Humo yoki Uzcard kartangizga pul qilib chiqaring:
+                Karta va Telegram/telefon ma'lumotingizni qoldiring — admin bog'lanib pulni kartangizga qo'lda o'tkazib beradi:
               </p>
             </div>
 
             <div className="bg-cyan-500/10 border border-cyan-400/25 rounded-2xl p-3.5 space-y-1">
               <div className="flex items-center justify-between text-xs font-bold text-cyan-100">
                 <span>Mavjud balans:</span>
-                <span className="text-sm font-mono font-bold text-cyan-300">{currentUser?.diamonds ?? 0} Almaz</span>
+                <span className="text-sm font-mono font-bold text-cyan-300">{formatDiamondsDisplay(currentUser?.diamonds)} Almaz</span>
               </div>
               <p className="text-[10px] text-cyan-300/80 font-medium">
-                Kurs: 1 Almaz = 1,000 So'm • Minimal yechish: 100 Almaz (100,000 So'm)
+                Kurs: 1 Almaz = 100 So'm • Minimal yechish: 100 Almaz (10,000 So'm)
               </p>
             </div>
 
@@ -7457,15 +7678,17 @@ export default function App() {
                 <label className="block text-[11px] font-bold text-zinc-300 mb-1">Yechib olinadigan almaz miqdori:</label>
                 <input 
                   type="number"
+                  step="0.5"
                   min={100}
                   max={currentUser?.diamonds ?? 0}
                   value={withdrawAmount}
                   onChange={(e) => setWithdrawAmount(Number(e.target.value))}
+                  data-testid="withdraw-amount-input"
                   required
                   className="w-full px-3.5 py-2.5 rounded-xl bg-[#171A26] border border-white/10 text-xs font-bold text-white focus:border-cyan-400 outline-none"
                 />
                 <p className="text-[10px] text-zinc-400 mt-1">
-                  Kartangizga o'tkaziladi: <span className="font-bold text-emerald-400">{(withdrawAmount * 1000).toLocaleString()} So'm</span>
+                  Kartangizga o'tkaziladi: <span className="font-bold text-emerald-400">{calculateDiamondsToUzs(withdrawAmount).toLocaleString()} So'm</span>
                 </p>
               </div>
 
@@ -7481,17 +7704,34 @@ export default function App() {
                     const formatted = raw.match(/.{1,4}/g)?.join(' ') || raw;
                     setWithdrawCardNumber(formatted);
                   }}
+                  data-testid="withdraw-card-input"
                   required
                   className="w-full px-3.5 py-2.5 rounded-xl bg-[#171A26] border border-white/10 text-xs font-mono font-bold text-white placeholder:text-zinc-500 focus:border-cyan-400 outline-none"
                 />
               </div>
 
+              <div>
+                <label className="block text-[11px] font-bold text-cyan-300 mb-1">
+                  Aloqa uchun Telegram username yoki telefon raqami *
+                </label>
+                <input 
+                  type="text"
+                  placeholder="@username yoki +998 90 123 45 67"
+                  value={withdrawContact}
+                  onChange={(e) => setWithdrawContact(e.target.value)}
+                  data-testid="withdraw-contact-input"
+                  required
+                  className="w-full px-3.5 py-2.5 rounded-xl bg-[#171A26] border border-cyan-400/35 text-xs font-semibold text-white placeholder:text-zinc-500 focus:border-cyan-400 outline-none"
+                />
+              </div>
+
               <button
                 type="submit"
+                data-testid="submit-withdraw-request-btn"
                 className="w-full py-3.5 rounded-2xl bg-gradient-to-r from-teal-500 to-emerald-600 hover:brightness-110 text-white font-bold text-xs shadow-lg shadow-emerald-950/40 transition active:scale-[0.98] flex items-center justify-center space-x-2 cursor-pointer"
               >
                 <Wallet className="w-4 h-4" />
-                <span>Ariza yuborish (Kartaga o'tkazish)</span>
+                <span>Buyurtma berish (Adminga yuborish)</span>
               </button>
             </form>
           </motion.div>

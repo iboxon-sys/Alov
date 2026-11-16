@@ -22,6 +22,10 @@ export interface WalletWithdrawalRecord {
   id: string;
   userUid: string;
   userName?: string;
+  userUsername?: string;
+  userTelegram?: string;
+  userPhone?: string;
+  contactInfo?: string;
   userCard: string;
   diamondAmount: number;
   uzsAmount: number;

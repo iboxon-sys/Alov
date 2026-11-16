@@ -18,12 +18,20 @@ import {
   Check,
   XCircle,
   Inbox,
+  Send,
+  BellRing,
+  Link2,
+  AlertTriangle,
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { formatDiamondsDisplay, getPendingDiamondsTotal } from '../utils/tokenomics';
 import { resolveEffectiveProfileAvatar } from '../utils/faceId';
 import { resolveApiMediaUrl } from '../config/api';
 import type { CoinPurchaseRequest } from '../utils/coinRequests';
+import {
+  DEFAULT_MANDATORY_SUBSCRIPTION_CONFIG,
+  type MandatorySubscriptionConfig,
+} from '../utils/telegramBotUtils';
 
 interface AdminPanelModalProps {
   currentUser: any;
@@ -49,7 +57,7 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
   onUserUpdated,
   onOpenUserProfile,
 }) => {
-  const [activeSubTab, setActiveSubTab] = useState<'requests' | 'users' | 'transactions'>('requests');
+  const [activeSubTab, setActiveSubTab] = useState<'requests' | 'users' | 'transactions' | 'telegram'>('requests');
   const [requestTypeFilter, setRequestTypeFilter] = useState<'all' | 'coins' | 'withdrawals'>('all');
   const [onlyPending, setOnlyPending] = useState(false);
   const [userSegment, setUserSegment] = useState<'all' | 'verified' | 'banned' | 'admins'>('all');
@@ -66,6 +74,19 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
   const [confirmPurgeNonAdmins, setConfirmPurgeNonAdmins] = useState(false);
   const [editingBalanceUid, setEditingBalanceUid] = useState<string | null>(null);
   const [balanceForm, setBalanceForm] = useState<{ coins: string; diamonds: string }>({ coins: '0', diamonds: '0' });
+
+  // Admin Bot Broadcast & Mandatory Channel Subscription states
+  const [broadcastText, setBroadcastText] = useState('');
+  const [broadcastLinkUrl, setBroadcastLinkUrl] = useState('');
+  const [broadcastButtonText, setBroadcastButtonText] = useState('');
+  const [broadcastTargetMode, setBroadcastTargetMode] = useState<'all' | 'single'>('all');
+  const [broadcastTargetInput, setBroadcastTargetInput] = useState('');
+  const [broadcastBusy, setBroadcastBusy] = useState(false);
+  const [broadcastStats, setBroadcastStats] = useState<{ totalTargets: number; sentCount: number; failedCount: number } | null>(null);
+
+  const [subConfig, setSubConfig] = useState<MandatorySubscriptionConfig>(DEFAULT_MANDATORY_SUBSCRIPTION_CONFIG);
+  const [subBusy, setSubBusy] = useState(false);
+  const [subVerifyBusy, setSubVerifyBusy] = useState(false);
 
   const adminUid = currentUser?.uid || '';
 
@@ -84,6 +105,12 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
         setWithdrawals(Array.isArray(data.withdrawals) ? data.withdrawals : []);
         setCoinRequests(Array.isArray(data.coinRequests) ? data.coinRequests : []);
         setTransactions(Array.isArray(data.transactions) ? data.transactions : []);
+      }
+
+      const subRes = await fetch(`${apiBaseUrl}/api/admin/subscription/config?adminUid=${encodeURIComponent(adminUid)}`);
+      const subData = await subRes.json().catch(() => null);
+      if (subData?.success && subData.config) {
+        setSubConfig({ ...DEFAULT_MANDATORY_SUBSCRIPTION_CONFIG, ...subData.config });
       }
     } catch (e: any) {
       setError(e?.message || "Server bilan bog'lanib bo'lmadi");
@@ -232,6 +259,119 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
     }
   };
 
+  const handleSendBotBroadcast = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!broadcastText.trim()) {
+      setError("Botga yuboriladigan xabar matnini kiriting!");
+      return;
+    }
+    setBroadcastBusy(true);
+    setError('');
+    setNotice('');
+    try {
+      const res = await fetch(`${apiBaseUrl}/api/admin/telegram/broadcast`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          adminUid,
+          messageText: broadcastText.trim(),
+          linkUrl: broadcastLinkUrl.trim() || undefined,
+          buttonText: broadcastButtonText.trim() || undefined,
+          targetMode: broadcastTargetMode,
+          targetChatIdOrUid: broadcastTargetMode === 'single' ? broadcastTargetInput.trim() : undefined,
+        }),
+      });
+      const data = await res.json();
+      if (!data.success) {
+        setError(data.error || "Botga xabar yuborishda xatolik");
+      } else {
+        setBroadcastStats({
+          totalTargets: Number(data.totalTargets || 0),
+          sentCount: Number(data.sentCount || 0),
+          failedCount: Number(data.failedCount || 0),
+        });
+        setNotice(`Xabar @alovuz_bot chatlariga yuborildi (${data.sentCount}/${data.totalTargets})`);
+        setBroadcastText('');
+      }
+    } catch (err: any) {
+      setError(err?.message || 'Tarmoq xatoligi');
+    } finally {
+      setBroadcastBusy(false);
+    }
+  };
+
+  const handleVerifyChannelBotAdmin = async () => {
+    if (!subConfig.channelLink.trim() && !subConfig.channelChatId?.trim()) {
+      setError("Tekshirish uchun kanal havolasi (@kanal yoki https://t.me/kanal) kiriting.");
+      return;
+    }
+    setSubVerifyBusy(true);
+    setError('');
+    setNotice('');
+    try {
+      const res = await fetch(`${apiBaseUrl}/api/admin/subscription/verify-bot`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          adminUid,
+          channelLink: subConfig.channelLink.trim(),
+          channelChatId: subConfig.channelChatId?.trim() || undefined,
+        }),
+      });
+      const data = await res.json();
+      if (data.config) {
+        setSubConfig({ ...DEFAULT_MANDATORY_SUBSCRIPTION_CONFIG, ...data.config });
+      }
+      if (data.botIsAdmin) {
+        setNotice(`Tasdiqlandi: @alovuz_bot "${data.channelTitle || subConfig.channelLink}" kanalida admin!`);
+      } else {
+        setError(data.error || "Bot ushbu kanalda admin emas. Avval @alovuz_bot ni kanalga admin qiling.");
+      }
+    } catch (err: any) {
+      setError(err?.message || 'Tarmoq xatoligi');
+    } finally {
+      setSubVerifyBusy(false);
+    }
+  };
+
+  const handleSaveSubscriptionConfig = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setSubBusy(true);
+    setError('');
+    setNotice('');
+    try {
+      const res = await fetch(`${apiBaseUrl}/api/admin/subscription/config`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          adminUid,
+          enabled: subConfig.enabled,
+          messageText: subConfig.messageText,
+          channelLink: subConfig.channelLink,
+          channelChatId: subConfig.channelChatId,
+          buttonText: subConfig.buttonText,
+        }),
+      });
+      const data = await res.json();
+      if (data.config) {
+        setSubConfig({ ...DEFAULT_MANDATORY_SUBSCRIPTION_CONFIG, ...data.config });
+      }
+      if (!data.success) {
+        setError(data.error || "Majburiy obuna sozlamalarini saqlab bo'lmadi");
+      } else {
+        setNotice(
+          data.config?.enabled
+            ? "Majburiy obuna yoqildi va saqlandi!"
+            : "Majburiy obuna sozlamalari saqlandi."
+        );
+      }
+    } catch (err: any) {
+      setError(err?.message || 'Tarmoq xatoligi');
+    } finally {
+      setSubBusy(false);
+    }
+  };
+
   const usersByUid = useMemo(() => {
     const map = new Map<string, any>();
     users.forEach((u) => {
@@ -352,60 +492,61 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
 
         {/* Hairline-divided 4-Metric KPI Strip */}
         <div className="grid grid-cols-2 lg:grid-cols-4 divide-y lg:divide-y-0 lg:divide-x divide-white/[0.08] bg-[#0B0C12] border-b border-white/[0.08] shrink-0">
-          <div className="px-4 sm:px-5 py-3 flex flex-col justify-between gap-1">
-            <div className="flex items-center justify-between gap-2">
-              <p className="text-[11px] font-semibold uppercase tracking-wider text-zinc-400 whitespace-nowrap">Foydalanuvchilar</p>
-              <span className="text-[11px] font-semibold text-emerald-400 tabular-nums whitespace-nowrap">
+          <div className="px-3.5 sm:px-5 py-2.5 sm:py-3 flex flex-col justify-between gap-1">
+            <div className="flex items-center justify-between gap-1.5 min-w-0">
+              <p className="text-[10px] sm:text-[11px] font-semibold uppercase tracking-wider text-zinc-400 truncate">Foydalanuvchilar</p>
+              <span className="text-[10px] sm:text-[11px] font-semibold text-emerald-400 tabular-nums whitespace-nowrap shrink-0">
                 {stats.onlineUsers ?? 0} onlayn
               </span>
             </div>
-            <p className="text-2xl font-mono font-bold text-white tabular-nums">
+            <p className="text-xl sm:text-2xl font-mono font-bold text-white tabular-nums">
               {stats.totalUsers ?? users.length}
             </p>
           </div>
 
-          <div className="px-4 sm:px-5 py-3 flex flex-col justify-between gap-1">
-            <div className="flex items-center justify-between gap-2">
-              <p className="text-[11px] font-semibold uppercase tracking-wider text-zinc-400 whitespace-nowrap">Jami Moneta</p>
-              <span className="text-[11px] text-zinc-400 font-mono whitespace-nowrap">1 xabar = 10</span>
+          <div className="px-3.5 sm:px-5 py-2.5 sm:py-3 flex flex-col justify-between gap-1">
+            <div className="flex items-center justify-between gap-1.5 min-w-0">
+              <p className="text-[10px] sm:text-[11px] font-semibold uppercase tracking-wider text-zinc-400 truncate">Jami Moneta</p>
+              <span className="hidden sm:inline text-[11px] text-zinc-400 font-mono whitespace-nowrap shrink-0">1 xabar = 10</span>
             </div>
-            <p className="text-2xl font-mono font-bold text-amber-400 tabular-nums">
+            <p className="text-xl sm:text-2xl font-mono font-bold text-amber-400 tabular-nums">
               {(stats.totalCoins ?? 0).toLocaleString()}
             </p>
           </div>
 
-          <div className="px-4 sm:px-5 py-3 flex flex-col justify-between gap-1">
-            <div className="flex items-center justify-between gap-2">
-              <p className="text-[11px] font-semibold uppercase tracking-wider text-zinc-400 whitespace-nowrap">Wallet Almaz</p>
-              <span className="text-[11px] text-amber-300 font-mono tabular-nums whitespace-nowrap">
+          <div className="px-3.5 sm:px-5 py-2.5 sm:py-3 flex flex-col justify-between gap-1">
+            <div className="flex items-center justify-between gap-1.5 min-w-0">
+              <p className="text-[10px] sm:text-[11px] font-semibold uppercase tracking-wider text-zinc-400 truncate">Wallet Almaz</p>
+              <span className="text-[10px] sm:text-[11px] text-amber-300 font-mono tabular-nums whitespace-nowrap shrink-0">
                 Kutish: {formatDiamondsDisplay(stats.pendingDiamonds ?? 0)}
               </span>
             </div>
-            <p className="text-2xl font-mono font-bold text-cyan-400 tabular-nums">
+            <p className="text-xl sm:text-2xl font-mono font-bold text-cyan-400 tabular-nums">
               {formatDiamondsDisplay(stats.totalDiamonds ?? 0)}
             </p>
           </div>
 
-          <div className="px-4 sm:px-5 py-3 flex flex-col justify-between gap-1 bg-rose-500/[0.04]">
-            <div className="flex items-center justify-between gap-2">
-              <p className="text-[11px] font-semibold uppercase tracking-wider text-rose-300 whitespace-nowrap">Yangi Arizalar</p>
-              <span className="text-[11px] text-zinc-400 font-mono tabular-nums whitespace-nowrap">
+          <div className="px-3.5 sm:px-5 py-2.5 sm:py-3 flex flex-col justify-between gap-1 bg-rose-500/[0.04]">
+            <div className="flex items-center justify-between gap-1.5 min-w-0">
+              <p className="text-[10px] sm:text-[11px] font-semibold uppercase tracking-wider text-rose-300 truncate">Yangi Arizalar</p>
+              <span className="text-[10px] sm:text-[11px] text-zinc-400 font-mono tabular-nums whitespace-nowrap shrink-0">
                 {pendingCoinCount}m · {pendingWithdrawalsCount}y
               </span>
             </div>
-            <p className="text-2xl font-mono font-bold text-rose-400 tabular-nums">
+            <p className="text-xl sm:text-2xl font-mono font-bold text-rose-400 tabular-nums">
               {totalPendingCount}
             </p>
           </div>
         </div>
 
         {/* Navigation & Sub-Controls Bar */}
-        <div className="px-4 sm:px-7 py-2.5 flex flex-wrap items-center justify-between gap-3 border-b border-white/[0.08] bg-[#11131C] shrink-0">
-          <div className="flex items-center gap-1 bg-[#090A0F] p-1 rounded-xl border border-white/[0.07]">
+        <div className="px-3.5 sm:px-7 py-2.5 flex flex-wrap items-center justify-between gap-2.5 sm:gap-3 border-b border-white/[0.08] bg-[#11131C] shrink-0">
+          <div className="flex flex-wrap sm:flex-nowrap items-center gap-1 bg-[#090A0F] p-1 rounded-xl border border-white/[0.07] w-full sm:w-auto overflow-x-auto">
             {[
               { id: 'requests' as const, label: 'Arizalar', icon: Inbox, count: coinRequests.length + withdrawals.length, highlight: totalPendingCount > 0 },
               { id: 'users' as const, label: 'Foydalanuvchilar', icon: Users, count: users.length, highlight: false },
               { id: 'transactions' as const, label: 'Tarix', icon: Activity, count: transactions.length, highlight: false },
+              { id: 'telegram' as const, label: 'Bot & Obuna', icon: Send, count: subConfig.enabled && subConfig.botIsAdmin ? 'ON' : 'OFF', highlight: subConfig.enabled && subConfig.botIsAdmin },
             ].map((tab) => {
               const Icon = tab.icon;
               const isActive = activeSubTab === tab.id;
@@ -415,7 +556,7 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
                   type="button"
                   onClick={() => setActiveSubTab(tab.id)}
                   data-testid={`admin-tab-${tab.id}`}
-                  className={`relative px-3.5 py-2 rounded-lg text-xs font-bold transition flex items-center gap-2 whitespace-nowrap cursor-pointer ${
+                  className={`relative px-2.5 sm:px-3.5 py-2 rounded-lg text-[11px] sm:text-xs font-bold transition flex items-center gap-1.5 sm:gap-2 whitespace-nowrap cursor-pointer ${
                     isActive ? 'text-white' : 'text-zinc-400 hover:text-zinc-200'
                   }`}
                 >
@@ -1095,6 +1236,265 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
                     ))}
                   </div>
                 )}
+              </motion.div>
+            )}
+
+            {activeSubTab === 'telegram' && (
+              <motion.div
+                key="admin-telegram-view"
+                initial={{ opacity: 0, y: 8 }}
+                animate={{ opacity: 1, y: 0 }}
+                exit={{ opacity: 0, y: -6 }}
+                transition={{ duration: 0.18 }}
+                className="grid grid-cols-1 lg:grid-cols-2 gap-4"
+                data-testid="admin-telegram-panel"
+              >
+                {/* 1. Bot Chatiga Xabar Yuborish */}
+                <form
+                  onSubmit={handleSendBotBroadcast}
+                  className="bg-[#12141E] rounded-2xl p-5 border border-white/10 space-y-4 flex flex-col justify-between"
+                >
+                  <div className="space-y-4">
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="flex items-center gap-3">
+                        <div className="w-10 h-10 rounded-xl bg-[#229ED9]/15 border border-[#229ED9]/30 text-[#38BDF8] flex items-center justify-center shrink-0">
+                          <Send className="w-5 h-5" />
+                        </div>
+                        <div>
+                          <h3 className="text-sm font-bold text-white">Botga Xabar Yuborish (@alovuz_bot)</h3>
+                          <p className="text-[11px] text-zinc-400">Barcha bot foydalanuvchilariga yoki bitta chatga xabar</p>
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="grid grid-cols-2 gap-2 p-1 rounded-xl bg-[#090A0F] border border-white/10">
+                      <button
+                        type="button"
+                        onClick={() => setBroadcastTargetMode('all')}
+                        className={`py-2 rounded-lg text-xs font-bold transition cursor-pointer ${
+                          broadcastTargetMode === 'all' ? 'bg-[#229ED9] text-white' : 'text-zinc-400 hover:text-white'
+                        }`}
+                      >
+                        Barcha bot foydalanuvchilari
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setBroadcastTargetMode('single')}
+                        className={`py-2 rounded-lg text-xs font-bold transition cursor-pointer ${
+                          broadcastTargetMode === 'single' ? 'bg-[#229ED9] text-white' : 'text-zinc-400 hover:text-white'
+                        }`}
+                      >
+                        Bitta Chat ID / Username
+                      </button>
+                    </div>
+
+                    {broadcastTargetMode === 'single' && (
+                      <div>
+                        <label className="block text-[11px] font-bold text-zinc-300 mb-1">
+                          Qabul qiluvchi Chat ID yoki @username
+                        </label>
+                        <input
+                          type="text"
+                          value={broadcastTargetInput}
+                          onChange={(e) => setBroadcastTargetInput(e.target.value)}
+                          placeholder="Masalan: 6621230534 yoki @username"
+                          data-testid="admin-broadcast-target-input"
+                          className="w-full px-3.5 py-2.5 rounded-xl bg-[#0B0C12] border border-white/10 text-xs text-white placeholder:text-zinc-500 outline-none focus:border-[#38BDF8]"
+                        />
+                      </div>
+                    )}
+
+                    <div>
+                      <label className="block text-[11px] font-bold text-zinc-300 mb-1">Xabar matni *</label>
+                      <textarea
+                        rows={4}
+                        value={broadcastText}
+                        onChange={(e) => setBroadcastText(e.target.value)}
+                        placeholder="Foydalanuvchilarga yuboriladigan xabar matnini yozing..."
+                        data-testid="admin-broadcast-text-input"
+                        required
+                        className="w-full px-3.5 py-2.5 rounded-xl bg-[#0B0C12] border border-white/10 text-xs text-white placeholder:text-zinc-500 outline-none focus:border-[#38BDF8] resize-none"
+                      />
+                    </div>
+
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                      <div>
+                        <label className="block text-[11px] font-bold text-zinc-300 mb-1">Havola (ixtiyoriy)</label>
+                        <input
+                          type="url"
+                          value={broadcastLinkUrl}
+                          onChange={(e) => setBroadcastLinkUrl(e.target.value)}
+                          placeholder="https://t.me/..."
+                          data-testid="admin-broadcast-link-input"
+                          className="w-full px-3 py-2 rounded-xl bg-[#0B0C12] border border-white/10 text-xs text-white placeholder:text-zinc-500 outline-none focus:border-[#38BDF8]"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-[11px] font-bold text-zinc-300 mb-1">Tugma nomi (ixtiyoriy)</label>
+                        <input
+                          type="text"
+                          value={broadcastButtonText}
+                          onChange={(e) => setBroadcastButtonText(e.target.value)}
+                          placeholder="Masalan: Ko'rish 🔗"
+                          data-testid="admin-broadcast-btn-label-input"
+                          className="w-full px-3 py-2 rounded-xl bg-[#0B0C12] border border-white/10 text-xs text-white placeholder:text-zinc-500 outline-none focus:border-[#38BDF8]"
+                        />
+                      </div>
+                    </div>
+
+                    {broadcastStats && (
+                      <div className="p-3 rounded-xl bg-emerald-500/10 border border-emerald-500/25 text-[11px] text-emerald-200 flex items-center justify-between">
+                        <span>Natija:</span>
+                        <span className="font-mono font-bold">
+                          Yuborildi: {broadcastStats.sentCount} / {broadcastStats.totalTargets} (Xato: {broadcastStats.failedCount})
+                        </span>
+                      </div>
+                    )}
+                  </div>
+
+                  <button
+                    type="submit"
+                    disabled={broadcastBusy}
+                    data-testid="admin-broadcast-send-btn"
+                    className="w-full py-3 px-4 rounded-xl bg-[#229ED9] hover:bg-[#1b8cc2] text-white text-xs font-bold transition flex items-center justify-center gap-2 disabled:opacity-50 cursor-pointer"
+                  >
+                    <Send className="w-4 h-4" />
+                    <span>{broadcastBusy ? 'Yuborilmoqda...' : 'Bot Chatiga Yuborish'}</span>
+                  </button>
+                </form>
+
+                {/* 2. Majburiy Kanal Obunasi */}
+                <form
+                  onSubmit={handleSaveSubscriptionConfig}
+                  className="bg-[#12141E] rounded-2xl p-5 border border-white/10 space-y-4 flex flex-col justify-between"
+                >
+                  <div className="space-y-4">
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="flex items-center gap-3">
+                        <div className="w-10 h-10 rounded-xl bg-rose-500/15 border border-rose-500/30 text-rose-400 flex items-center justify-center shrink-0">
+                          <BellRing className="w-5 h-5" />
+                        </div>
+                        <div>
+                          <h3 className="text-sm font-bold text-white">Majburiy Kanal Obunasi</h3>
+                          <p className="text-[11px] text-zinc-400">Telegram ichidagi foydalanuvchilar uchun obuna nazorati</p>
+                        </div>
+                      </div>
+
+                      <button
+                        type="button"
+                        role="switch"
+                        aria-checked={subConfig.enabled}
+                        data-testid="admin-sub-enable-toggle"
+                        onClick={() => setSubConfig((p) => ({ ...p, enabled: !p.enabled }))}
+                        className={`px-3 py-1.5 rounded-xl text-[11px] font-bold border transition cursor-pointer shrink-0 ${
+                          subConfig.enabled
+                            ? 'bg-emerald-500/20 border-emerald-500/40 text-emerald-300'
+                            : 'bg-white/5 border-white/15 text-zinc-400'
+                        }`}
+                      >
+                        {subConfig.enabled ? 'Yoqilgan ✓' : "O'chirilgan"}
+                      </button>
+                    </div>
+
+                    <div
+                      className={`p-3 rounded-xl border text-xs flex items-start gap-2.5 ${
+                        subConfig.botIsAdmin
+                          ? 'bg-emerald-500/10 border-emerald-500/25 text-emerald-200'
+                          : 'bg-amber-500/10 border-amber-500/25 text-amber-200'
+                      }`}
+                    >
+                      {subConfig.botIsAdmin ? (
+                        <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0 mt-0.5" />
+                      ) : (
+                        <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
+                      )}
+                      <div className="space-y-0.5 min-w-0">
+                        <p className="font-bold">
+                          {subConfig.botIsAdmin
+                            ? `Bot kanalga admin qilingan${subConfig.channelTitle ? `: ${subConfig.channelTitle}` : ''}`
+                            : 'Bot kanalga adminligi tasdiqlanmagan'}
+                        </p>
+                        {subConfig.botAdminError && !subConfig.botIsAdmin && (
+                          <p className="text-[11px] text-amber-300/90 break-words">{subConfig.botAdminError}</p>
+                        )}
+                      </div>
+                    </div>
+
+                    <div>
+                      <label className="block text-[11px] font-bold text-zinc-300 mb-1">Xabar matni</label>
+                      <textarea
+                        rows={2}
+                        value={subConfig.messageText}
+                        onChange={(e) => setSubConfig((p) => ({ ...p, messageText: e.target.value }))}
+                        placeholder="Ilovadan foydalanish uchun rasmiy kanalimizga obuna bo'ling..."
+                        data-testid="admin-sub-message-input"
+                        className="w-full px-3.5 py-2 rounded-xl bg-[#0B0C12] border border-white/10 text-xs text-white placeholder:text-zinc-500 outline-none focus:border-rose-500 resize-none"
+                      />
+                    </div>
+
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                      <div>
+                        <label className="block text-[11px] font-bold text-zinc-300 mb-1">Kanal havolasi (@kanal yoki t.me/...)</label>
+                        <div className="relative">
+                          <Link2 className="w-3.5 h-3.5 text-zinc-500 absolute left-3 top-1/2 -translate-y-1/2" />
+                          <input
+                            type="text"
+                            value={subConfig.channelLink}
+                            onChange={(e) => setSubConfig((p) => ({ ...p, channelLink: e.target.value }))}
+                            placeholder="https://t.me/alov_uz"
+                            data-testid="admin-sub-link-input"
+                            className="w-full pl-8 pr-3 py-2 rounded-xl bg-[#0B0C12] border border-white/10 text-xs text-white placeholder:text-zinc-500 outline-none focus:border-rose-500"
+                          />
+                        </div>
+                      </div>
+                      <div>
+                        <label className="block text-[11px] font-bold text-zinc-300 mb-1">Tugma nomi</label>
+                        <input
+                          type="text"
+                          value={subConfig.buttonText}
+                          onChange={(e) => setSubConfig((p) => ({ ...p, buttonText: e.target.value }))}
+                          placeholder="Kanalga obuna bo'lish"
+                          data-testid="admin-sub-btn-label-input"
+                          className="w-full px-3 py-2 rounded-xl bg-[#0B0C12] border border-white/10 text-xs text-white placeholder:text-zinc-500 outline-none focus:border-rose-500"
+                        />
+                      </div>
+                    </div>
+
+                    <div>
+                      <label className="block text-[11px] font-bold text-zinc-300 mb-1">
+                        Kanal ID (maxfiy kanallar uchun ixtiyoriy, masalan: -1001234567890)
+                      </label>
+                      <input
+                        type="text"
+                        value={subConfig.channelChatId || ''}
+                        onChange={(e) => setSubConfig((p) => ({ ...p, channelChatId: e.target.value }))}
+                        placeholder="-100..."
+                        data-testid="admin-sub-chatid-input"
+                        className="w-full px-3 py-2 rounded-xl bg-[#0B0C12] border border-white/10 text-xs font-mono text-white placeholder:text-zinc-500 outline-none focus:border-rose-500"
+                      />
+                    </div>
+                  </div>
+
+                  <div className="flex flex-wrap gap-2 pt-1">
+                    <button
+                      type="button"
+                      disabled={subVerifyBusy}
+                      onClick={handleVerifyChannelBotAdmin}
+                      data-testid="admin-sub-verify-bot-btn"
+                      className="flex-1 py-2.5 px-3 rounded-xl bg-white/10 hover:bg-white/15 border border-white/15 text-white text-xs font-bold transition cursor-pointer disabled:opacity-50"
+                    >
+                      {subVerifyBusy ? 'Tekshirilmoqda...' : 'Bot adminligini tekshirish'}
+                    </button>
+                    <button
+                      type="submit"
+                      disabled={subBusy}
+                      data-testid="admin-sub-save-btn"
+                      className="flex-1 py-2.5 px-4 rounded-xl bg-gradient-to-r from-[#E11D48] to-rose-600 hover:brightness-110 text-white text-xs font-bold transition cursor-pointer disabled:opacity-50"
+                    >
+                      {subBusy ? 'Saqlanmoqda...' : 'Saqlash'}
+                    </button>
+                  </div>
+                </form>
               </motion.div>
             )}
           </AnimatePresence>

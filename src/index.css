@@ -266,3 +266,34 @@
   -ms-overflow-style: none !important;
   scrollbar-width: none !important;
 }
+
+/* Non-Admin Screenshot, Print & Media Capture Protection */
+body.alov-capture-protected {
+  -webkit-touch-callout: none;
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+body.alov-capture-protected input,
+body.alov-capture-protected textarea,
+body.alov-capture-protected [contenteditable="true"],
+body.alov-capture-protected .select-all {
+  -webkit-user-select: text;
+  user-select: text;
+}
+
+body.alov-capture-protected img,
+body.alov-capture-protected video,
+body.alov-capture-protected canvas {
+  -webkit-user-drag: none;
+  user-drag: none;
+  -webkit-touch-callout: none;
+}
+
+@media print {
+  body.alov-capture-protected,
+  body.alov-capture-protected * {
+    display: none !important;
+    visibility: hidden !important;
+  }
+}

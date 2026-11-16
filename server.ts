@@ -71,6 +71,19 @@ import {
   canReviewCoinRequest,
   type CoinPurchaseRequest,
 } from './src/utils/coinRequests';
+import {
+  buildCanonicalChatId,
+  mergeChatLists,
+  resolvePartnerUidForChat,
+} from './src/utils/chatList';
+import {
+  DEFAULT_MANDATORY_SUBSCRIPTION_CONFIG,
+  escapeTelegramHtml,
+  formatChatMessageSpoilerNotification,
+  isTelegramMemberSubscribedStatus,
+  parseTelegramChannelReference,
+  type MandatorySubscriptionConfig,
+} from './src/utils/telegramBotUtils';
 
 dotenv.config();
 
@@ -102,13 +115,14 @@ async function startServer() {
             'https://*.firebaseapp.com',
             'https://apis.google.com',
             'https://www.googletagmanager.com',
+            'https://challenges.cloudflare.com',
             'blob:',
           ],
           styleSrc: ["'self'", "'unsafe-inline'", 'https://fonts.googleapis.com', 'https://unpkg.com'],
           fontSrc: ["'self'", 'https://fonts.gstatic.com', 'data:'],
           imgSrc: ["'self'", 'data:', 'blob:', 'https:', 'http:'],
           mediaSrc: ["'self'", 'data:', 'blob:', 'https:', 'http:'],
-          connectSrc: ["'self'", 'ws:', 'wss:', 'https:', 'http:', 'blob:'],
+          connectSrc: ["'self'", 'ws:', 'wss:', 'https:', 'http:', 'blob:', 'https://challenges.cloudflare.com'],
           frameSrc: [
             "'self'",
             'https://www.youtube.com',
@@ -125,6 +139,7 @@ async function startServer() {
             'https://open.spotify.com',
             'https://*.firebaseapp.com',
             'https://oauth.telegram.org',
+            'https://challenges.cloudflare.com',
           ],
           frameAncestors: [
             "'self'",
@@ -256,6 +271,40 @@ async function startServer() {
   }
   if (!fs.existsSync(MEDIA_UPLOADS_DIR)) {
     fs.mkdirSync(MEDIA_UPLOADS_DIR, { recursive: true });
+  }
+  const TURNSTILE_SECRET_KEY =
+    process.env.CLOUDFLARE_TURNSTILE_SECRET_KEY || '0x4AAAAAAGA6CLLSCzZqvM4QVmgY9gAUNs8';
+
+  async function verifyTurnstileToken(token?: string, remoteIp?: string): Promise<{ ok: boolean; error?: string }> {
+    const cleanToken = String(token || '').trim();
+    if (!cleanToken) {
+      return { ok: false, error: 'Iltimos, Cloudflare xavfsizlik tekshiruvini (CAPTCHA) tasdiqlang!' };
+    }
+    try {
+      const form = new URLSearchParams();
+      form.append('secret', TURNSTILE_SECRET_KEY);
+      form.append('response', cleanToken);
+      if (remoteIp) form.append('remoteip', remoteIp);
+
+      const verifyRes = await fetch('https://challenges.cloudflare.com/turnstile/v0/siteverify', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: form.toString(),
+      });
+      const verifyData: any = await verifyRes.json();
+      if (verifyData?.success) {
+        return { ok: true };
+      }
+      return {
+        ok: false,
+        error: "Cloudflare xavfsizlik tekshiruvi muvaffaqiyatsiz tugadi. Iltimos, CAPTCHA ni qayta tasdiqlang.",
+      };
+    } catch (err: any) {
+      return {
+        ok: false,
+        error: err?.message || "Cloudflare tekshiruv serveri bilan bog'lanib bo'lmadi.",
+      };
+    }
   }
 
   app.get('/api/face-id/photo/:filename', async (req, res) => {
@@ -656,7 +705,7 @@ async function startServer() {
     }
 
     try {
-      const args = [
+      const primaryArgs = [
         '--no-playlist',
         '--no-warnings',
         '--max-filesize', '80M',
@@ -668,7 +717,21 @@ async function startServer() {
         '-o', outTemplate,
         targetUrl,
       ];
-      await execFileAsync(bin, args, { timeout: 60000, maxBuffer: 5 * 1024 * 1024 });
+      try {
+        await execFileAsync(bin, primaryArgs, { timeout: 60000, maxBuffer: 5 * 1024 * 1024 });
+      } catch {
+        const fallbackArgs = [
+          '--no-playlist',
+          '--no-warnings',
+          '--max-filesize', '80M',
+          '-f', 'best[ext=mp4]/bestvideo+bestaudio/best',
+          '--merge-output-format', 'mp4',
+          ...(tempCookiesPath ? ['--cookies', tempCookiesPath] : []),
+          '-o', outTemplate,
+          targetUrl,
+        ];
+        await execFileAsync(bin, fallbackArgs, { timeout: 60000, maxBuffer: 5 * 1024 * 1024 });
+      }
 
       const files = fs.readdirSync(MEDIA_UPLOADS_DIR).filter((f) => f.startsWith(`${prefix}.`) && !f.endsWith('.part'));
       if (files.length > 0) {
@@ -705,6 +768,9 @@ async function startServer() {
     }
     return null;
   }
+
+  // Pre-warm yt-dlp binary in background so video/audio link extraction is fast
+  void ensureYtDlpBinary().catch(() => {});
 
   async function downloadVideoStreamToDisk(videoUrl: string, refererUrl?: string): Promise<{ url: string; mimeType: string; format: string; mode: 'mp4'; isVertical: boolean } | null> {
     const check = validateExternalVideoUrl(videoUrl, {
@@ -1091,27 +1157,16 @@ async function startServer() {
         clearTimeout(timer);
       }
 
-      // 7. Universal social media extractor via yt-dlp (YouTube, Instagram, Facebook, VK, Rutube, Vimeo, Dailymotion, Pinterest, Twitch, etc.)
+      // 7. Universal social media extractor via yt-dlp -> real MP4
       const ytDlpResult = await downloadViaYtDlp(targetUrl);
       if (ytDlpResult) {
         return replySuccess(ytDlpResult);
       }
 
-      // 8. Smart chromeless social embed fallback if cloud IP bot-protection prevents server-side MP4 pull (e.g. YouTube / IG Reels / FB / VK)
-      if (parsedSocial.kind === 'embed_iframe' && parsedSocial.embedUrl) {
-        return replySuccess({
-          mode: 'embed',
-          url: parsedSocial.normalizedUrl,
-          embedUrl: parsedSocial.embedUrl,
-          provider: parsedSocial.provider,
-          isVertical: Boolean(parsedSocial.isVertical),
-        });
-      }
-
       return res.status(422).json({
         success: false,
         error:
-          "Ushbu havoladan video faylni aniqlab bo'lmadi. Iltimos, boshqa havola sinab ko'ring yoki qurilmadan video yuklang.",
+          "Ushbu havoladan haqiqiy MP4 video faylni yuklab bo'lmadi. Iltimos, boshqa havola kiriting yoki qurilmadan video yuklang.",
       });
     } catch (err: any) {
       return res.status(500).json({
@@ -1888,17 +1943,60 @@ async function startServer() {
     }
   }
 
+  let botTelegramId: number | null = null;
+
   async function initTelegramBot() {
     if (!TELEGRAM_BOT_TOKEN) return;
     try {
       const res = await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/getMe`);
       const data = await res.json();
-      if (data.ok) {
-        console.log(`Telegram Bot connected successfully: @${data.result.username}`);
+      if (data.ok && data.result) {
+        botTelegramId = Number(data.result.id || 0) || null;
+        console.log(`Telegram Bot connected successfully: @${data.result.username} (id=${botTelegramId})`);
       }
     } catch (err) {
       console.warn("Telegram Bot getMe warning:", err);
     }
+  }
+
+  function resolveUserTelegramChatId(user: any): number | null {
+    if (!user) return null;
+    const direct = Number(user.telegramChatId || user.chatId || 0);
+    if (direct > 0 && Number.isFinite(direct)) return direct;
+
+    const tgHandle = normalizeTelegramHandle(user.telegram || '');
+    const cleanPhone = String(user.phone || '').replace(/\D/g, '');
+    const stored = findStoredBotUser(undefined, undefined, tgHandle || undefined, cleanPhone || undefined);
+    if (stored?.chatId) return Number(stored.chatId);
+
+    const uidStr = String(user.uid || '');
+    const numericMatch = uidStr.match(/^tg_(\d+)$/);
+    if (numericMatch) return Number(numericMatch[1]);
+    return null;
+  }
+
+  async function sendChatSpoilerTelegramNotification(params: {
+    senderUser: any;
+    recipientUser: any;
+    messageText?: string;
+    mediaType?: string;
+  }) {
+    const recipientChatId = resolveUserTelegramChatId(params.recipientUser);
+    if (!recipientChatId) return false;
+    const senderName = params.senderUser?.name || params.senderUser?.firstName || 'Foydalanuvchi';
+    const senderUsername =
+      params.senderUser?.username || normalizeTelegramHandle(params.senderUser?.telegram || '') || undefined;
+    const htmlText = formatChatMessageSpoilerNotification({
+      senderName,
+      senderUsername,
+      messageText: params.messageText || '',
+      mediaType: params.mediaType,
+    });
+    return sendTelegramMessage(recipientChatId, htmlText, {
+      inline_keyboard: [
+        [{ text: "💬 Ilovada javob yozish", web_app: { url: "https://alov.onrender.com/" } }],
+      ],
+    });
   }
 
   let telegramOffset = 0;
@@ -2026,10 +2124,23 @@ async function startServer() {
     }
   }, 120000);
 
+  // Verify Cloudflare Turnstile CAPTCHA token before Firebase Email/Google registration/login
+  app.post('/api/auth/verify-turnstile', async (req, res) => {
+    const check = await verifyTurnstileToken(req.body?.turnstileToken, req.ip);
+    if (!check.ok) {
+      return res.status(400).json({ success: false, error: check.error });
+    }
+    return res.json({ success: true });
+  });
+
   // Endpoint to send OTP via @alovuz_bot directly to user chat
   app.post('/api/auth/send-telegram-code', async (req, res) => {
     try {
-      const { phoneNumber, chatId: frontendChatId } = req.body;
+      const { phoneNumber, chatId: frontendChatId, turnstileToken } = req.body;
+      const captchaCheck = await verifyTurnstileToken(turnstileToken, req.ip);
+      if (!captchaCheck.ok) {
+        return res.status(400).json({ success: false, error: captchaCheck.error });
+      }
       if (!phoneNumber || !phoneNumber.toString().trim()) {
         return res.status(400).json({ success: false, error: 'Telegram username yoki telefon raqam kiritilishi shart' });
       }
@@ -2354,7 +2465,11 @@ async function startServer() {
   // Universal Login Endpoint: Login by Email, @username, https://t.me/username, or Phone + Password
   app.post('/api/auth/login', async (req, res) => {
     try {
-      const { loginInput, password } = req.body;
+      const { loginInput, password, turnstileToken } = req.body;
+      const captchaCheck = await verifyTurnstileToken(turnstileToken, req.ip);
+      if (!captchaCheck.ok) {
+        return res.status(400).json({ success: false, error: captchaCheck.error });
+      }
       if (!loginInput || !loginInput.toString().trim()) {
         return res.status(400).json({ success: false, error: 'Username, Email yoki Telefon kiritilishi shart' });
       }
@@ -3142,7 +3257,7 @@ Suhbatlashish qoidalaringiz:
     return { removedUsersCount };
   }
 
-  // One-time migration per DB_EPOCH: purge all non-admin/incomplete users on first boot of this epoch
+  // Non-destructive epoch tracking: updating DB_EPOCH never wipes existing users, chats, posts, or sessions
   try {
     let currentDiskEpoch = '';
     if (fs.existsSync(DB_EPOCH_FILE)) {
@@ -3150,10 +3265,6 @@ Suhbatlashish qoidalaringiz:
       currentDiskEpoch = String(parsedEpoch?.epoch || '');
     }
     const currentMongoEpoch = await contentRepository.getDbEpoch();
-    const alreadyMigrated = currentDiskEpoch === DB_EPOCH || currentMongoEpoch === DB_EPOCH;
-    if (!alreadyMigrated) {
-      purgeNonAdminDatabaseData();
-    }
     if (currentDiskEpoch !== DB_EPOCH) {
       fs.writeFileSync(DB_EPOCH_FILE, JSON.stringify({ epoch: DB_EPOCH, updatedAt: new Date().toISOString() }, null, 2), 'utf-8');
     }
@@ -4259,6 +4370,13 @@ Suhbatlashish qoidalaringiz:
       io.to(`user_${senderUid}`).emit('user_updated', sender);
       io.to(`user_${recipientUid}`).emit('user_updated', recipient);
 
+      void sendChatSpoilerTelegramNotification({
+        senderUser: sender,
+        recipientUser: recipient,
+        messageText: giftMsg.text,
+        mediaType: 'gift',
+      });
+
       res.json({ success: true, sender, recipient, giftMessage: giftMsg });
     } catch (err: any) {
       res.status(500).json({ error: err.message });
@@ -4859,6 +4977,368 @@ Suhbatlashish qoidalaringiz:
     }
   });
 
+  // --- Mandatory Telegram Channel Subscription & Admin Bot Broadcast ---
+  const MANDATORY_SUBSCRIPTION_FILE = resolveDataFile('mandatory_subscription.json');
+  let mandatorySubConfig: MandatorySubscriptionConfig = { ...DEFAULT_MANDATORY_SUBSCRIPTION_CONFIG };
+
+  function loadMandatorySubFromDisk() {
+    try {
+      if (fs.existsSync(MANDATORY_SUBSCRIPTION_FILE)) {
+        const parsed = JSON.parse(fs.readFileSync(MANDATORY_SUBSCRIPTION_FILE, 'utf-8'));
+        if (parsed && typeof parsed === 'object') {
+          mandatorySubConfig = { ...DEFAULT_MANDATORY_SUBSCRIPTION_CONFIG, ...parsed };
+        }
+      }
+    } catch (e) {
+      console.warn('Could not load mandatory_subscription.json:', e);
+    }
+  }
+
+  function saveMandatorySubToDisk() {
+    try {
+      fs.writeFileSync(MANDATORY_SUBSCRIPTION_FILE, JSON.stringify(mandatorySubConfig, null, 2), 'utf-8');
+    } catch (e) {
+      console.warn('Could not save mandatory_subscription.json:', e);
+    }
+  }
+  loadMandatorySubFromDisk();
+
+  async function verifyBotAdminInChannel(channelLink: string, channelChatId?: string): Promise<{
+    botIsAdmin: boolean;
+    channelChatId?: string;
+    channelTitle?: string;
+    error?: string;
+  }> {
+    if (!TELEGRAM_BOT_TOKEN) {
+      return { botIsAdmin: false, error: 'TELEGRAM_BOT_TOKEN sozlanmagan.' };
+    }
+    const ref = parseTelegramChannelReference(channelLink, channelChatId);
+    if (!ref.chatId) {
+      return { botIsAdmin: false, error: "Kanal havolasi (@kanal yoki https://t.me/kanal) noto'g'ri." };
+    }
+    try {
+      if (!botTelegramId) {
+        const meRes = await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/getMe`);
+        const meData: any = await meRes.json();
+        if (meData?.ok && meData?.result?.id) {
+          botTelegramId = Number(meData.result.id);
+        }
+      }
+      const chatRes = await fetch(
+        `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/getChat?chat_id=${encodeURIComponent(ref.chatId)}`
+      );
+      const chatData: any = await chatRes.json();
+      if (!chatData?.ok || !chatData?.result) {
+        return {
+          botIsAdmin: false,
+          error: chatData?.description || "Kanal topilmadi yoki bot kanalga qo'shilmagan.",
+        };
+      }
+      const resolvedChatId = String(chatData.result.id);
+      const channelTitle = String(chatData.result.title || chatData.result.username || ref.chatId);
+
+      if (!botTelegramId) {
+        return { botIsAdmin: false, channelChatId: resolvedChatId, channelTitle, error: 'Bot ID aniqlanmadi.' };
+      }
+
+      const memberRes = await fetch(
+        `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/getChatMember?chat_id=${encodeURIComponent(resolvedChatId)}&user_id=${botTelegramId}`
+      );
+      const memberData: any = await memberRes.json();
+      if (!memberData?.ok || !memberData?.result) {
+        return {
+          botIsAdmin: false,
+          channelChatId: resolvedChatId,
+          channelTitle,
+          error: memberData?.description || 'Bot kanalda admin emas.',
+        };
+      }
+      const status = String(memberData.result.status || '').toLowerCase();
+      const botIsAdmin = status === 'administrator' || status === 'creator';
+      return {
+        botIsAdmin,
+        channelChatId: resolvedChatId,
+        channelTitle,
+        error: botIsAdmin ? undefined : `Bot kanalda admin qilinmagan (holat: ${status}). Avval botni kanalga admin qiling.`,
+      };
+    } catch (err: any) {
+      return {
+        botIsAdmin: false,
+        error: err?.message || "Telegram API bilan bog'lanishda xatolik.",
+      };
+    }
+  }
+
+  app.get('/api/subscription/config', (_req, res) => {
+    res.json({ success: true, config: mandatorySubConfig });
+  });
+
+  app.post('/api/subscription/check', async (req, res) => {
+    try {
+      const { uid, telegramChatId, telegram } = req.body || {};
+      const user = uid ? findUserByUidOrId(String(uid)) : undefined;
+
+      if (isAdminTelegramUser(user || { telegram })) {
+        return res.json({
+          success: true,
+          gateRequired: false,
+          isSubscribed: true,
+          isAdmin: true,
+          config: mandatorySubConfig,
+        });
+      }
+
+      if (!mandatorySubConfig.enabled || !mandatorySubConfig.botIsAdmin) {
+        return res.json({
+          success: true,
+          gateRequired: false,
+          isSubscribed: true,
+          config: mandatorySubConfig,
+        });
+      }
+
+      const targetChannel =
+        mandatorySubConfig.channelChatId ||
+        parseTelegramChannelReference(mandatorySubConfig.channelLink).chatId;
+
+      if (!targetChannel) {
+        return res.json({
+          success: true,
+          gateRequired: false,
+          isSubscribed: true,
+          config: mandatorySubConfig,
+        });
+      }
+
+      const resolvedUserTgId =
+        (telegramChatId && !isNaN(Number(telegramChatId)) ? Number(telegramChatId) : null) ||
+        resolveUserTelegramChatId(user || { uid, telegram });
+
+      if (!resolvedUserTgId) {
+        return res.json({
+          success: true,
+          gateRequired: true,
+          isSubscribed: false,
+          error: "Telegram akkauntingiz ID raqami aniqlanmadi. Avval kanalga obuna bo'lib, qayta tekshiring.",
+          config: mandatorySubConfig,
+        });
+      }
+
+      const memberRes = await fetch(
+        `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/getChatMember?chat_id=${encodeURIComponent(targetChannel)}&user_id=${resolvedUserTgId}`
+      );
+      const memberData: any = await memberRes.json();
+      if (!memberData?.ok || !memberData?.result) {
+        return res.json({
+          success: true,
+          gateRequired: true,
+          isSubscribed: false,
+          error: memberData?.description || "Obuna holatini tekshirib bo'lmadi.",
+          config: mandatorySubConfig,
+        });
+      }
+
+      const status = String(memberData.result.status || '');
+      const isSubscribed = isTelegramMemberSubscribedStatus(memberData.result);
+      return res.json({
+        success: true,
+        gateRequired: true,
+        isSubscribed,
+        memberStatus: status,
+        config: mandatorySubConfig,
+      });
+    } catch (err: any) {
+      return res.status(500).json({
+        success: false,
+        gateRequired: false,
+        isSubscribed: false,
+        error: err?.message || 'Obunani tekshirishda xatolik.',
+      });
+    }
+  });
+
+  app.get('/api/admin/subscription/config', (req, res) => {
+    const adminUid = String(req.query.adminUid || '');
+    if (!getVerifiedAdmin(adminUid)) {
+      return res.status(403).json({ success: false, error: 'Admin huquqi talab qilinadi' });
+    }
+    res.json({ success: true, config: mandatorySubConfig });
+  });
+
+  app.post('/api/admin/subscription/verify-bot', async (req, res) => {
+    try {
+      const { adminUid, channelLink, channelChatId } = req.body || {};
+      if (!getVerifiedAdmin(String(adminUid || ''))) {
+        return res.status(403).json({ success: false, error: 'Admin huquqi talab qilinadi' });
+      }
+      const check = await verifyBotAdminInChannel(String(channelLink || ''), channelChatId ? String(channelChatId) : undefined);
+      mandatorySubConfig = {
+        ...mandatorySubConfig,
+        channelLink: String(channelLink || mandatorySubConfig.channelLink || '').trim(),
+        channelChatId: check.channelChatId || String(channelChatId || '').trim() || mandatorySubConfig.channelChatId,
+        channelTitle: check.channelTitle || mandatorySubConfig.channelTitle,
+        botIsAdmin: check.botIsAdmin,
+        botAdminError: check.error,
+        botAdminCheckedAt: new Date().toISOString(),
+        enabled: check.botIsAdmin ? mandatorySubConfig.enabled : false,
+      };
+      saveMandatorySubToDisk();
+      io.emit('subscription_config_updated', mandatorySubConfig);
+      res.json({ success: true, ...check, config: mandatorySubConfig });
+    } catch (err: any) {
+      res.status(500).json({ success: false, error: err?.message || 'Tekshirishda xatolik' });
+    }
+  });
+
+  app.post('/api/admin/subscription/config', async (req, res) => {
+    try {
+      const { adminUid, enabled, messageText, channelLink, channelChatId, buttonText } = req.body || {};
+      if (!getVerifiedAdmin(String(adminUid || ''))) {
+        return res.status(403).json({ success: false, error: 'Admin huquqi talab qilinadi' });
+      }
+
+      const nextLink = String(channelLink || '').trim();
+      const nextChatIdInput = String(channelChatId || '').trim();
+      const wantEnabled = Boolean(enabled);
+
+      let verification: {
+        botIsAdmin: boolean;
+        channelChatId?: string;
+        channelTitle?: string;
+        error?: string;
+      } = {
+        botIsAdmin: mandatorySubConfig.botIsAdmin,
+        channelChatId: nextChatIdInput || mandatorySubConfig.channelChatId,
+        channelTitle: mandatorySubConfig.channelTitle,
+        error: mandatorySubConfig.botAdminError,
+      };
+
+      if (nextLink || nextChatIdInput) {
+        verification = await verifyBotAdminInChannel(nextLink, nextChatIdInput || undefined);
+      } else if (wantEnabled) {
+        return res.status(400).json({
+          success: false,
+          error: "Majburiy obunani yoqish uchun Telegram kanal havolasi yoki ID sini kiriting.",
+        });
+      }
+
+      if (wantEnabled && !verification.botIsAdmin) {
+        mandatorySubConfig = {
+          ...mandatorySubConfig,
+          enabled: false,
+          messageText: String(messageText || mandatorySubConfig.messageText).trim(),
+          channelLink: nextLink,
+          channelChatId: verification.channelChatId || nextChatIdInput,
+          channelTitle: verification.channelTitle,
+          buttonText: String(buttonText || mandatorySubConfig.buttonText).trim() || "Kanalga obuna bo'lish",
+          botIsAdmin: false,
+          botAdminError: verification.error,
+          botAdminCheckedAt: new Date().toISOString(),
+        };
+        saveMandatorySubToDisk();
+        io.emit('subscription_config_updated', mandatorySubConfig);
+        return res.status(400).json({
+          success: false,
+          error: verification.error || "Bot aytilgan kanalga admin qilinmaganligi sababli majburiy obuna yoqilmadi.",
+          config: mandatorySubConfig,
+        });
+      }
+
+      mandatorySubConfig = {
+        enabled: wantEnabled && verification.botIsAdmin,
+        messageText: String(messageText || DEFAULT_MANDATORY_SUBSCRIPTION_CONFIG.messageText).trim(),
+        channelLink: nextLink,
+        channelChatId: verification.channelChatId || nextChatIdInput,
+        channelTitle: verification.channelTitle,
+        buttonText: String(buttonText || DEFAULT_MANDATORY_SUBSCRIPTION_CONFIG.buttonText).trim(),
+        botIsAdmin: verification.botIsAdmin,
+        botAdminError: verification.error,
+        botAdminCheckedAt: new Date().toISOString(),
+      };
+      saveMandatorySubToDisk();
+      io.emit('subscription_config_updated', mandatorySubConfig);
+      res.json({ success: true, config: mandatorySubConfig });
+    } catch (err: any) {
+      res.status(500).json({ success: false, error: err?.message || 'Sozlamalarni saqlashda xatolik' });
+    }
+  });
+
+  app.post('/api/admin/telegram/broadcast', async (req, res) => {
+    try {
+      const { adminUid, messageText, linkUrl, buttonText, targetMode = 'all', targetChatIdOrUid } = req.body || {};
+      if (!getVerifiedAdmin(String(adminUid || ''))) {
+        return res.status(403).json({ success: false, error: 'Admin huquqi talab qilinadi' });
+      }
+      const cleanText = String(messageText || '').trim();
+      if (!cleanText) {
+        return res.status(400).json({ success: false, error: 'Yuboriladigan xabar matnini kiriting!' });
+      }
+
+      const cleanLink = String(linkUrl || '').trim();
+      const cleanBtnText = String(buttonText || '').trim();
+      let replyMarkup: any = undefined;
+      if (cleanLink) {
+        if (!/^https?:\/\//i.test(cleanLink) && !/^tg:\/\//i.test(cleanLink)) {
+          return res.status(400).json({ success: false, error: "Havola https:// bilan boshlanishi kerak!" });
+        }
+        replyMarkup = {
+          inline_keyboard: [[{ text: cleanBtnText || "Ochish 🔗", url: cleanLink }]],
+        };
+      }
+
+      const targetChatIds = new Set<number>();
+      if (targetMode === 'single') {
+        const rawTarget = String(targetChatIdOrUid || '').trim();
+        if (!rawTarget) {
+          return res.status(400).json({ success: false, error: 'Qabul qiluvchi chat ID yoki foydalanuvchini kiriting' });
+        }
+        if (/^-?\d+$/.test(rawTarget)) {
+          targetChatIds.add(Number(rawTarget));
+        } else {
+          const matchedUser = findUserByUidOrId(rawTarget);
+          const resolvedId =
+            resolveUserTelegramChatId(matchedUser) ||
+            findStoredBotUser(undefined, rawTarget, normalizeTelegramHandle(rawTarget))?.chatId;
+          if (resolvedId) targetChatIds.add(Number(resolvedId));
+        }
+      } else {
+        for (const entry of telegramBotUsers.values()) {
+          if (entry?.chatId) targetChatIds.add(Number(entry.chatId));
+        }
+        for (const u of usersStore.values()) {
+          const cid = resolveUserTelegramChatId(u);
+          if (cid) targetChatIds.add(cid);
+        }
+      }
+
+      if (targetChatIds.size === 0) {
+        return res.status(400).json({
+          success: false,
+          error: "Bot chatiga ulanib /start bosgan foydalanuvchilar topilmadi.",
+        });
+      }
+
+      const htmlBody = `📢 <b>Alov.uz Xabarnomasi</b>\n\n${escapeTelegramHtml(cleanText)}`;
+      let sentCount = 0;
+      let failedCount = 0;
+
+      for (const cid of targetChatIds) {
+        const ok = await sendTelegramMessage(cid, htmlBody, replyMarkup);
+        if (ok) sentCount += 1;
+        else failedCount += 1;
+      }
+
+      res.json({
+        success: true,
+        totalTargets: targetChatIds.size,
+        sentCount,
+        failedCount,
+      });
+    } catch (err: any) {
+      res.status(500).json({ success: false, error: err?.message || 'Bot xabarini yuborishda xatolik' });
+    }
+  });
+
   // --- Live Streams Endpoints ---
   app.get('/api/live-streams', (_req, res) => {
     const activeStreams = Object.values(liveStreamsStore).filter((s: any) => s.status === 'active');
@@ -4940,13 +5420,112 @@ Suhbatlashish qoidalaringiz:
     res.json({ success: true, messages, friendship });
   });
 
-  // GET /api/chats/user/:uid
+  function getUserAliasSet(uid: string): Set<string> {
+    const aliases = new Set<string>();
+    const clean = String(uid || '').trim();
+    if (clean) aliases.add(clean);
+    const user = findUserByUidOrId(clean);
+    if (user?.uid) aliases.add(String(user.uid));
+    if (user?.id) aliases.add(String(user.id));
+    return aliases;
+  }
+
+  function hydrateChatForUser(chat: any, viewerAliases: Set<string>) {
+    const aliasArr = Array.from(viewerAliases);
+    const partnerUid = resolvePartnerUidForChat(chat, aliasArr[0] || '', aliasArr);
+    const partnerObj = partnerUid ? findUserByUidOrId(partnerUid) : undefined;
+    const partner = partnerObj
+      ? {
+          uid: partnerObj.uid,
+          id: partnerObj.id,
+          name: partnerObj.name,
+          username: partnerObj.username,
+          avatar: partnerObj.avatar,
+          gender: partnerObj.gender,
+          isOnline: partnerObj.isOnline,
+          status: partnerObj.status,
+          isVerified: partnerObj.isVerified,
+          faceId: partnerObj.faceId,
+        }
+      : chat.partner;
+    return {
+      ...chat,
+      partner: partner || chat.partner,
+    };
+  }
+
+  // POST /api/chats/open — persistently register an opened chat on server so list never drops items
+  app.post('/api/chats/open', (req, res) => {
+    try {
+      const { myUid, targetUid, partnerSnapshot } = req.body || {};
+      if (!myUid || !targetUid) {
+        return res.status(400).json({ success: false, error: 'myUid and targetUid are required' });
+      }
+      const me = findUserByUidOrId(String(myUid));
+      const partner = findUserByUidOrId(String(targetUid));
+      const canonicalMyUid = me?.uid || String(myUid);
+      const canonicalTargetUid = partner?.uid || String(targetUid);
+      const chatId = buildCanonicalChatId(canonicalMyUid, canonicalTargetUid);
+      const existing = userChatsStore[chatId];
+
+      const hydratedPartner = partner
+        ? {
+            uid: partner.uid,
+            id: partner.id,
+            name: partner.name,
+            username: partner.username,
+            avatar: partner.avatar,
+            gender: partner.gender,
+            isOnline: partner.isOnline,
+            status: partner.status,
+            isVerified: partner.isVerified,
+            faceId: partner.faceId,
+          }
+        : partnerSnapshot;
+
+      if (!existing) {
+        userChatsStore[chatId] = {
+          id: chatId,
+          participants: [canonicalMyUid, canonicalTargetUid],
+          lastMessage: 'Yangi suhbat boshlandi',
+          updatedAt: new Date().toISOString(),
+          partner: hydratedPartner,
+        };
+      } else {
+        userChatsStore[chatId] = {
+          ...existing,
+          id: chatId,
+          participants: Array.from(new Set([...(existing.participants || []), canonicalMyUid, canonicalTargetUid])),
+          partner: hydratedPartner || existing.partner,
+        };
+      }
+      saveChatsToDisk();
+      res.json({ success: true, chat: userChatsStore[chatId] });
+    } catch (err: any) {
+      res.status(500).json({ success: false, error: err?.message || 'Chatni ochishda xatolik' });
+    }
+  });
+
+  // GET /api/chats/user/:uid — return all chats (unlimited, hydrated, deduplicated, newest first)
   app.get('/api/chats/user/:uid', (req, res) => {
     const { uid } = req.params;
-    const userChats = Object.values(userChatsStore).filter(
-      (chat: any) => chat.participants && chat.participants.includes(uid)
-    );
-    res.json({ success: true, chats: userChats });
+    const aliases = getUserAliasSet(uid);
+    const matched = Object.values(userChatsStore)
+      .filter((chat: any) => {
+        const parts: string[] = Array.isArray(chat?.participants) ? chat.participants.map(String) : [];
+        if (parts.some((p) => aliases.has(p))) return true;
+        const idStr = String(chat?.id || '');
+        return Array.from(aliases).some((a) => a && (idStr.startsWith(`${a}_`) || idStr.endsWith(`_${a}`)));
+      })
+      .map((chat: any) => hydrateChatForUser(chat, aliases));
+
+    const userRecord = findUserByUidOrId(uid);
+    const canonicalMyUid = userRecord?.uid || uid;
+    const merged = mergeChatLists([matched], canonicalMyUid, {
+      myAliases: Array.from(aliases),
+      usersList: Array.from(usersStore.values()),
+    });
+    res.json({ success: true, chats: merged });
   });
 
   app.get('/robots.txt', (_req, res) => {
@@ -5240,6 +5819,15 @@ Suhbatlashish qoidalaringiz:
       // Check if chatting with Kamola Saidova OR Alov AI bot
       const isKamolaChat = chatId.includes('user_kamola_006') || recipientId === 'user_kamola_006' || chatId.includes('ALOV-006') || recipientId === 'ALOV-006';
       const isAlovAiBot = chatId.includes('alov_ai_bot') || recipientId === 'alov_ai_bot';
+
+      if (!isKamolaChat && !isAlovAiBot && recipientUser) {
+        void sendChatSpoilerTelegramNotification({
+          senderUser,
+          recipientUser,
+          messageText: deliveredMessage.text,
+          mediaType: deliveredMessage.type,
+        });
+      }
 
       if ((isKamolaChat || isAlovAiBot) && message.type === 'text') {
         const botUid = isKamolaChat ? 'user_kamola_006' : 'alov_ai_bot';

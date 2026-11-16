@@ -84,6 +84,16 @@ import {
 import { computeAuthorTotalLikes, isPostVisibleToViewer, type PostItem } from './utils/posts';
 import { validateUsername, isUsernameUnique, formatUsernameDisplay } from './utils/username';
 import { formatPhoneNumberPretty } from './utils/phone';
+import { PrivacyPolicyInline } from './components/PrivacyPolicyInline';
+import { TurnstileWidget } from './components/TurnstileWidget';
+import { MandatorySubscriptionGate } from './components/MandatorySubscriptionGate';
+import { buildCanonicalChatId, mergeChatLists } from './utils/chatList';
+import { shouldEnableCaptureProtection, isCaptureShortcutEvent } from './utils/captureProtection';
+import {
+  DEFAULT_MANDATORY_SUBSCRIPTION_CONFIG,
+  evaluateMandatorySubscriptionAccess,
+  type MandatorySubscriptionConfig,
+} from './utils/telegramBotUtils';
 
 function resolveAvatarUrl(rawUrl?: string | null): string {
   const clean = pickPreferredAvatar(rawUrl);
@@ -298,6 +308,16 @@ export default function App() {
   const [privacyReadToBottom, setPrivacyReadToBottom] = useState<boolean>(false);
   const [showTermsModal, setShowTermsModal] = useState<boolean>(false);
   const [termsReadToBottom, setTermsReadToBottom] = useState<boolean>(false);
+  const [inlinePolicyReturnMode, setInlinePolicyReturnMode] = useState<'register' | 'google_setup' | 'telegram_setup' | null>(null);
+  const [turnstileToken, setTurnstileToken] = useState<string | null>(null);
+  const [turnstileResetTick, setTurnstileResetTick] = useState<number>(0);
+  const [captureShieldVisible, setCaptureShieldVisible] = useState<boolean>(false);
+  const [subscriptionConfig, setSubscriptionConfig] = useState<MandatorySubscriptionConfig>(DEFAULT_MANDATORY_SUBSCRIPTION_CONFIG);
+  const [isChannelSubscribed, setIsChannelSubscribed] = useState<boolean>(true);
+  const [showSubscriptionGate, setShowSubscriptionGate] = useState<boolean>(false);
+  const [isCheckingSubscription, setIsCheckingSubscription] = useState<boolean>(false);
+  const [subscriptionError, setSubscriptionError] = useState<string>('');
+  const [subVersionTick, setSubVersionTick] = useState<number>(0);
 
   // Profile Form Fields (including Avatar URL and Location Visibility)
   const [regName, setRegName] = useState('');
@@ -465,6 +485,8 @@ export default function App() {
 
   const currentUserRef = useRef<any>(null);
   const selectedChatUserRef = useRef<any>(null);
+  const usersListRef = useRef<any[]>([]);
+  const originalGetDisplayMediaRef = useRef<any>(null);
 
   useEffect(() => {
     currentUserRef.current = currentUser || (firebaseUser ? { uid: firebaseUser.uid, name: firebaseUser.displayName } : null);
@@ -473,6 +495,10 @@ export default function App() {
   useEffect(() => {
     selectedChatUserRef.current = selectedChatUser;
   }, [selectedChatUser]);
+
+  useEffect(() => {
+    usersListRef.current = usersList;
+  }, [usersList]);
 
   useEffect(() => {
     const socket = socketRef.current;
@@ -673,43 +699,33 @@ export default function App() {
         return next;
       });
 
-      // Update chatsList so this chat never disappears and keeps partner profile
+      // Update chatsList via canonical deduplication so old chats NEVER vanish when new ones arrive
       if (chatId) {
         setChatsList(prev => {
-          const existingIdx = prev.findIndex(c => c.id === chatId);
-          let updated = [...prev];
-          const lastMsg = msg.text || (msg.type === 'image' ? 'Rasm 🖼️' : 'Xabar');
+          const lastMsg = msg.text || (msg.type === 'image' ? 'Rasm 🖼️' : (msg.type === 'video' ? 'Video 🎥' : 'Xabar'));
           const partnerInfo = payload.message?.sender || (partnerId ? {
             uid: partnerId,
             id: partnerId,
-            name: msg.senderName || selectedChatUser?.name || 'Foydalanuvchi',
-            avatar: msg.senderAvatar || selectedChatUser?.avatar || ''
+            name: msg.senderName || selectedChatUserRef.current?.name || 'Foydalanuvchi',
+            avatar: msg.senderAvatar || selectedChatUserRef.current?.avatar || ''
           } : undefined);
-
-          if (existingIdx > -1) {
-            const item = { 
-              ...updated[existingIdx], 
-              lastMessage: lastMsg, 
-              updatedAt: msg.createdAt || new Date().toISOString(),
-              partner: updated[existingIdx].partner || partnerInfo
-            };
-            updated.splice(existingIdx, 1);
-            updated.unshift(item);
-          } else {
-            updated.unshift({
-              id: chatId,
-              participants: [myUid, partnerId].filter(Boolean),
-              lastMessage: lastMsg,
-              updatedAt: msg.createdAt || new Date().toISOString(),
-              partner: partnerInfo
-            });
-          }
+          const incomingChat = {
+            id: chatId,
+            participants: [myUid, partnerId].filter(Boolean),
+            lastMessage: lastMsg,
+            updatedAt: msg.createdAt || new Date().toISOString(),
+            partner: partnerInfo
+          };
+          const merged = mergeChatLists([prev, [incomingChat]], myUid || '', {
+            myAliases: [myUid, currentUserRef.current?.id].filter(Boolean) as string[],
+            usersList: usersListRef.current,
+          });
           if (myUid) {
             try {
-              localStorage.setItem('alov_chats_' + myUid, JSON.stringify(updated));
+              localStorage.setItem('alov_chats_' + myUid, JSON.stringify(merged));
             } catch (e) {}
           }
-          return updated;
+          return merged;
         });
       }
 
@@ -859,6 +875,13 @@ export default function App() {
       }
     });
 
+    socket.on('subscription_config_updated', (nextCfg: MandatorySubscriptionConfig) => {
+      if (nextCfg && typeof nextCfg === 'object') {
+        setSubscriptionConfig({ ...DEFAULT_MANDATORY_SUBSCRIPTION_CONFIG, ...nextCfg });
+        setSubVersionTick((v) => v + 1);
+      }
+    });
+
     return () => {
       window.clearInterval(heartbeatTimer);
       socket.off('connect', registerSocketUser);
@@ -884,6 +907,7 @@ export default function App() {
       socket.off('insufficient_coins');
       socket.off('coin_request_updated');
       socket.off('withdrawal_updated');
+      socket.off('subscription_config_updated');
       socket.disconnect();
     };
   }, []);
@@ -1004,28 +1028,10 @@ export default function App() {
     };
   }, []);
 
-  // LocalStorage Session Restore on App Mount (enforce clean DB reset epoch first)
+  // Non-destructive LocalStorage Session Restore on App Mount (updating app version never clears user data)
   useEffect(() => {
-    const DB_RESET_EPOCH = '2026-11-16-reset-v3';
     try {
-      const currentEpoch = localStorage.getItem('alov_db_epoch');
-      if (currentEpoch !== DB_RESET_EPOCH) {
-        const keysToRemove: string[] = [];
-        for (let i = 0; i < localStorage.length; i++) {
-          const k = localStorage.key(i);
-          if (k && k.startsWith('alov_') && k !== 'alov_db_epoch') {
-            keysToRemove.push(k);
-          }
-        }
-        keysToRemove.forEach((k) => localStorage.removeItem(k));
-        localStorage.setItem('alov_db_epoch', DB_RESET_EPOCH);
-        signOut(auth).catch(() => {});
-        setCurrentUser(null);
-        setFirebaseUser(null);
-        setActiveTab('landing');
-        setIsAuthChecking(false);
-        return;
-      }
+      localStorage.setItem('alov_app_version', APP_VERSION);
 
       const cached = localStorage.getItem('alov_current_user');
       if (cached) {
@@ -1243,35 +1249,13 @@ export default function App() {
       });
   }, []);
 
-  // Synchronize Auth State & Real-time Presence
+  // Synchronize Auth State & Real-time Presence (non-destructive across version updates)
   useEffect(() => {
-    const DB_RESET_EPOCH = '2026-11-16-reset-v3';
     const unsubscribe = onAuthStateChanged(auth, async (user) => {
       try {
-        let epochOk = true;
         try {
-          if (localStorage.getItem('alov_db_epoch') !== DB_RESET_EPOCH) {
-            epochOk = false;
-            const keysToRemove: string[] = [];
-            for (let i = 0; i < localStorage.length; i++) {
-              const k = localStorage.key(i);
-              if (k && k.startsWith('alov_') && k !== 'alov_db_epoch') {
-                keysToRemove.push(k);
-              }
-            }
-            keysToRemove.forEach((k) => localStorage.removeItem(k));
-            localStorage.setItem('alov_db_epoch', DB_RESET_EPOCH);
-          }
+          localStorage.setItem('alov_app_version', APP_VERSION);
         } catch (e) {}
-
-        if (user && !epochOk) {
-          await signOut(auth).catch(() => {});
-          setFirebaseUser(null);
-          setCurrentUser(null);
-          setActiveTab('landing');
-          setIsAuthChecking(false);
-          return;
-        }
 
         setFirebaseUser(user);
         if (user) {
@@ -1369,12 +1353,18 @@ export default function App() {
   }, [activeTab, fetchPostsFromServer]);
 
 
-  // Load active 1-on-1 chats from Render API & localStorage (No Firestore)
+  // Load active 1-on-1 chats from Render API & localStorage with full deduplication & retention
   useEffect(() => {
     const myUid = currentUser?.uid || firebaseUser?.uid;
     if (!myUid) return;
 
     const fetchChats = async () => {
+      let localChats: any[] = [];
+      try {
+        const cached = localStorage.getItem('alov_chats_' + myUid);
+        if (cached) localChats = JSON.parse(cached);
+      } catch (e) {}
+
       let serverChats: any[] = [];
       try {
         const data = await safeFetchJson(getApiUrl(`/api/chats/user/${myUid}`));
@@ -1385,23 +1375,148 @@ export default function App() {
         console.warn("Could not fetch chats from server:", e);
       }
 
-      // Merge with cached local chats
-      let localChats: any[] = [];
-      try {
-        const cached = localStorage.getItem('alov_chats_' + myUid);
-        if (cached) localChats = JSON.parse(cached);
-      } catch (e) {}
-
-      const chatMap = new Map<string, any>();
-      [...localChats, ...serverChats].forEach(c => chatMap.set(c.id, c));
-      const combined = Array.from(chatMap.values());
-
-      setChatsList(combined);
+      setChatsList(prev => {
+        const merged = mergeChatLists([prev, localChats, serverChats], myUid, {
+          myAliases: [myUid, currentUser?.id].filter(Boolean) as string[],
+          usersList: usersListRef.current,
+        });
+        try {
+          localStorage.setItem('alov_chats_' + myUid, JSON.stringify(merged));
+        } catch (e) {}
+        return merged;
+      });
       setIsLoadingChats(false);
     };
 
     fetchChats();
   }, [firebaseUser?.uid, currentUser?.uid]);
+
+  // Non-admin screenshot & screen-recording protection (@Salikh_07 admin is completely exempt)
+  useEffect(() => {
+    const captureProtected = shouldEnableCaptureProtection(currentUser);
+    document.body.classList.toggle('alov-capture-protected', captureProtected);
+
+    if (!captureProtected) {
+      setCaptureShieldVisible(false);
+      if (originalGetDisplayMediaRef.current && navigator.mediaDevices) {
+        try {
+          navigator.mediaDevices.getDisplayMedia = originalGetDisplayMediaRef.current;
+        } catch {}
+      }
+      return;
+    }
+
+    let shieldTimer: number | null = null;
+    const triggerShield = () => {
+      setCaptureShieldVisible(true);
+      showToast("Xavfsizlik: Skrinshot va ekran yozib olish cheklangan");
+      if (shieldTimer) window.clearTimeout(shieldTimer);
+      shieldTimer = window.setTimeout(() => setCaptureShieldVisible(false), 1800);
+    };
+
+    const onKeyEvent = (e: KeyboardEvent) => {
+      if (isCaptureShortcutEvent(e)) {
+        e.preventDefault();
+        e.stopPropagation();
+        triggerShield();
+      }
+    };
+
+    const onBeforePrint = () => {
+      triggerShield();
+    };
+
+    const onContextMenuOrDrag = (e: Event) => {
+      const target = e.target as HTMLElement | null;
+      if (target && (target.tagName === 'IMG' || target.tagName === 'VIDEO' || target.closest('video'))) {
+        e.preventDefault();
+      }
+    };
+
+    if (navigator.mediaDevices && typeof navigator.mediaDevices.getDisplayMedia === 'function') {
+      if (!originalGetDisplayMediaRef.current) {
+        originalGetDisplayMediaRef.current = navigator.mediaDevices.getDisplayMedia.bind(navigator.mediaDevices);
+      }
+      try {
+        navigator.mediaDevices.getDisplayMedia = async () => {
+          triggerShield();
+          throw new DOMException("Ekran yozib olish platforma xavfsizligi bilan cheklangan.", "NotAllowedError");
+        };
+      } catch {}
+    }
+
+    window.addEventListener('keydown', onKeyEvent, true);
+    window.addEventListener('keyup', onKeyEvent, true);
+    window.addEventListener('beforeprint', onBeforePrint);
+    document.addEventListener('contextmenu', onContextMenuOrDrag);
+    document.addEventListener('dragstart', onContextMenuOrDrag);
+
+    return () => {
+      if (shieldTimer) window.clearTimeout(shieldTimer);
+      document.body.classList.remove('alov-capture-protected');
+      window.removeEventListener('keydown', onKeyEvent, true);
+      window.removeEventListener('keyup', onKeyEvent, true);
+      window.removeEventListener('beforeprint', onBeforePrint);
+      document.removeEventListener('contextmenu', onContextMenuOrDrag);
+      document.removeEventListener('dragstart', onContextMenuOrDrag);
+    };
+  }, [currentUser?.uid, currentUser?.role, currentUser?.isAdmin, currentUser?.telegram, showToast]);
+
+  // Mandatory Telegram Channel Subscription check (enforced only inside Telegram context for non-admins)
+  const verifyMandatorySubscription = React.useCallback(async () => {
+    const tgUser = (window as any).Telegram?.WebApp?.initDataUnsafe?.user;
+    const isTgCtx = Boolean(tgUser?.id || currentUser?.telegramChatId || currentUser?.uid?.startsWith('tg_'));
+    if (!isTgCtx) {
+      setIsChannelSubscribed(true);
+      setShowSubscriptionGate(false);
+      setSubscriptionError('');
+      return;
+    }
+    setIsCheckingSubscription(true);
+    setSubscriptionError('');
+    try {
+      const data = await safeFetchJson(getApiUrl('/api/subscription/check'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          uid: currentUser?.uid,
+          telegramChatId: tgUser?.id || currentUser?.telegramChatId,
+          telegram: currentUser?.telegram,
+        }),
+      });
+      const nextConfig: MandatorySubscriptionConfig = data?.config
+        ? { ...DEFAULT_MANDATORY_SUBSCRIPTION_CONFIG, ...data.config }
+        : subscriptionConfig;
+      if (data?.config) {
+        setSubscriptionConfig(nextConfig);
+      }
+      const nextSubscribed = typeof data?.isSubscribed === 'boolean' ? data.isSubscribed : true;
+      setIsChannelSubscribed(nextSubscribed);
+
+      const gateEval = evaluateMandatorySubscriptionAccess({
+        config: nextConfig,
+        user: currentUser,
+        isTelegramContext: true,
+        isSubscribed: nextSubscribed,
+      });
+      if (gateEval.gateRequired) {
+        setShowSubscriptionGate(true);
+      } else if (!nextConfig.enabled || !nextConfig.botIsAdmin || isAdminTelegramUser(currentUser)) {
+        setShowSubscriptionGate(false);
+      }
+      if (data?.error) {
+        setSubscriptionError(data.error);
+      }
+    } catch {
+      // keep state resilient
+    } finally {
+      setIsCheckingSubscription(false);
+    }
+  }, [currentUser?.uid, currentUser?.telegramChatId, currentUser?.telegram, currentUser?.role, currentUser?.isAdmin]);
+
+  useEffect(() => {
+    void verifyMandatorySubscription();
+  }, [verifyMandatorySubscription, subVersionTick]);
 
   // Load chat messages for the selected conversation from localStorage & Render API
   useEffect(() => {
@@ -2344,6 +2459,9 @@ export default function App() {
     setPrivacyAgreed(false);
     setPrivacyReadToBottom(false);
     setTermsReadToBottom(false);
+    setInlinePolicyReturnMode(null);
+    setTurnstileToken(null);
+    setTurnstileResetTick((t) => t + 1);
     setErrorMsg('');
     setRegName(clean.regName);
     setRegUsername(clean.regUsername);
@@ -2370,6 +2488,10 @@ export default function App() {
 
   const handleEmailLogin = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (!turnstileToken) {
+      setErrorMsg("Iltimos, avval Cloudflare xavfsizlik tekshiruvini (CAPTCHA) tasdiqlang!");
+      return;
+    }
     if (!authEmail || !authPassword) {
       setErrorMsg("Iltimos, Username/Email va parolni kiriting!");
       return;
@@ -2382,7 +2504,7 @@ export default function App() {
       const serverLoginRes = await safeFetchJson(getApiUrl('/api/auth/login'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ loginInput: authEmail.trim(), password: authPassword.trim() })
+        body: JSON.stringify({ loginInput: authEmail.trim(), password: authPassword.trim(), turnstileToken })
       });
 
       if (serverLoginRes && serverLoginRes.success && serverLoginRes.user) {
@@ -2401,6 +2523,13 @@ export default function App() {
         return;
       }
 
+      if (serverLoginRes?.error && /captcha|cloudflare/i.test(String(serverLoginRes.error))) {
+        setTurnstileToken(null);
+        setTurnstileResetTick((t) => t + 1);
+        setErrorMsg(serverLoginRes.error);
+        return;
+      }
+
       // Fallback: Firebase Sign In if input was formatted as an email
       if (authEmail.includes('@') && !authEmail.startsWith('@')) {
         const userCredential = await signInWithEmailAndPassword(auth, authEmail.trim(), authPassword.trim());
@@ -2415,8 +2544,12 @@ export default function App() {
         }
       }
 
+      setTurnstileToken(null);
+      setTurnstileResetTick((t) => t + 1);
       setErrorMsg(serverLoginRes?.error || "Username, Email yoki parol xato.");
     } catch (err: any) {
+      setTurnstileToken(null);
+      setTurnstileResetTick((t) => t + 1);
       setErrorMsg(formatAuthErrorMessage(err, 'login'));
     } finally {
       setIsLoggingIn(false);
@@ -2425,17 +2558,35 @@ export default function App() {
 
   const handleEmailRegister = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (!turnstileToken) {
+      setErrorMsg("Iltimos, avval Cloudflare xavfsizlik tekshiruvini (CAPTCHA) tasdiqlang!");
+      return;
+    }
     if (!authEmail.trim() || !authPassword.trim() || !regName.trim()) {
       setErrorMsg("Iltimos, email, parol va ism-familiyani to'ldiring!");
       return;
     }
     if (!privacyAgreed) {
-      setErrorMsg("Iltimos, Maxfiylik siyosati bilan tanishib chiqing va rozilik bildiring.");
+      setErrorMsg("Avval Maxfiylik siyosati bilan tanishib chiqing va 'Roziman' tugmasini bosing.");
+      setInlinePolicyReturnMode('register');
       return;
     }
     try {
       setIsLoggingIn(true);
       setErrorMsg('');
+
+      const captchaVerify = await safeFetchJson(getApiUrl('/api/auth/verify-turnstile'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ turnstileToken }),
+      });
+      if (!captchaVerify?.success) {
+        setTurnstileToken(null);
+        setTurnstileResetTick((t) => t + 1);
+        setErrorMsg(captchaVerify?.error || "Cloudflare CAPTCHA tekshiruvi muvaffaqiyatsiz tugadi.");
+        return;
+      }
+
       let registeredUser: User | null = null;
       try {
         const userCredential = await createUserWithEmailAndPassword(auth, authEmail.trim(), authPassword.trim());
@@ -2479,9 +2630,27 @@ export default function App() {
   };
 
   const handleGoogleLogin = async () => {
+    if (!turnstileToken) {
+      setErrorMsg("Iltimos, avval Cloudflare xavfsizlik tekshiruvini (CAPTCHA) tasdiqlang!");
+      return;
+    }
     try {
       setIsLoggingIn(true);
       setErrorMsg('');
+
+      const captchaVerify = await safeFetchJson(getApiUrl('/api/auth/verify-turnstile'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ turnstileToken }),
+      });
+      if (!captchaVerify?.success) {
+        setTurnstileToken(null);
+        setTurnstileResetTick((t) => t + 1);
+        setErrorMsg(captchaVerify?.error || "Cloudflare CAPTCHA tekshiruvi muvaffaqiyatsiz tugadi.");
+        setIsLoggingIn(false);
+        return;
+      }
+
       setAuthOrigin('google');
       const provider = new GoogleAuthProvider();
       provider.setCustomParameters({ prompt: 'select_account' });
@@ -2545,7 +2714,8 @@ export default function App() {
       return;
     }
     if (!privacyAgreed) {
-      setErrorMsg("Iltimos, Maxfiylik siyosati bilan tanishib chiqing va rozilik bildiring.");
+      setErrorMsg("Avval Maxfiylik siyosati bilan tanishib chiqing va 'Roziman' tugmasini bosing.");
+      setInlinePolicyReturnMode('google_setup');
       return;
     }
     if (!pendingFaceId?.verified) {
@@ -2710,6 +2880,10 @@ export default function App() {
 
   const handleStartTelegramAuth = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (!turnstileToken) {
+      setErrorMsg("Iltimos, avval Cloudflare xavfsizlik tekshiruvini (CAPTCHA) tasdiqlang!");
+      return;
+    }
     if (!telegramInput.trim()) {
       setErrorMsg("Iltimos, Telegram telefon raqami yoki username'ni kiriting!");
       return;
@@ -2733,7 +2907,8 @@ export default function App() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ 
           phoneNumber: telegramInput.trim(),
-          chatId: cachedChatId
+          chatId: cachedChatId,
+          turnstileToken,
         })
       });
       if (data && data.success && data.hasStartedBot) {
@@ -2747,12 +2922,18 @@ export default function App() {
           localStorage.setItem('alov_tg_started_' + cleanKey, 'true');
         } catch (e) {}
       } else if (data && data.hasStartedBot === false) {
+        setTurnstileToken(null);
+        setTurnstileResetTick((t) => t + 1);
         setHasStartedBotError(true);
         setErrorMsg(data.error || "Botimiz ro'yxatida topilmadingiz! Iltimos, avval @alovuz_bot ga kirib /start tugmasini bir marta bosing.");
       } else {
+        setTurnstileToken(null);
+        setTurnstileResetTick((t) => t + 1);
         setErrorMsg(data?.error || "Kod yuborishda xatolik.");
       }
     } catch (err: any) {
+      setTurnstileToken(null);
+      setTurnstileResetTick((t) => t + 1);
       setErrorMsg(err.message || "Tarmoq xatoligi.");
     } finally {
       setIsLoggingIn(false);
@@ -2921,7 +3102,8 @@ export default function App() {
       return;
     }
     if (!privacyAgreed) {
-      setErrorMsg("Iltimos, Maxfiylik siyosati bilan tanishib chiqing va rozilik bildiring.");
+      setErrorMsg("Avval Maxfiylik siyosati bilan tanishib chiqing va 'Roziman' tugmasini bosing.");
+      setInlinePolicyReturnMode('telegram_setup');
       return;
     }
     if (!pendingFaceId?.verified) {
@@ -3178,31 +3360,27 @@ export default function App() {
       };
     });
 
-    // Update chatsList item and persist
+    // Update chatsList via canonical deduplication and persist
     setChatsList(prev => {
-      const existingIdx = prev.findIndex(c => c.id === chatId);
-      let updated = [...prev];
-      if (existingIdx > -1) {
-        const item = { ...updated[existingIdx], lastMessage: msgObj.text, updatedAt: msgObj.createdAt };
-        updated.splice(existingIdx, 1);
-        updated.unshift(item);
-      } else {
-        updated.unshift({
-          id: chatId,
-          participants: [myUid, otherUid],
-          lastMessage: msgObj.text,
-          updatedAt: msgObj.createdAt,
-          partner: selectedChatUser
-        });
-      }
+      const chatEntry = {
+        id: chatId,
+        participants: [myUid, otherUid],
+        lastMessage: msgObj.text,
+        updatedAt: msgObj.createdAt,
+        partner: selectedChatUser
+      };
+      const merged = mergeChatLists([prev, [chatEntry]], myUid, {
+        myAliases: [myUid, currentUser?.id].filter(Boolean) as string[],
+        usersList: usersListRef.current,
+      });
       try {
-        localStorage.setItem('alov_chats_' + myUid, JSON.stringify(updated));
+        localStorage.setItem('alov_chats_' + myUid, JSON.stringify(merged));
       } catch (e) {}
-      return updated;
+      return merged;
     });
   };
 
-  // Helper to open chat and immediately add to chatsList and localStorage
+  // Helper to open chat and immediately add to chatsList, localStorage, and backend
   const openChatWithUser = (targetUser: any) => {
     setSelectedChatUser(targetUser);
     setChatView('conversation');
@@ -3211,24 +3389,30 @@ export default function App() {
     const myUid = currentUser?.uid || firebaseUser?.uid;
     const otherUid = targetUser?.uid || targetUser?.id;
     if (myUid && otherUid) {
-      const chatId = [myUid, otherUid].sort().join('_');
+      const chatId = buildCanonicalChatId(myUid, otherUid);
       setChatsList(prev => {
-        const existingIdx = prev.findIndex(c => c.id === chatId);
-        let updated = [...prev];
-        if (existingIdx === -1) {
-          updated.unshift({
-            id: chatId,
-            participants: [myUid, otherUid],
-            lastMessage: "Yangi suhbat boshlandi",
-            updatedAt: new Date().toISOString(),
-            partner: targetUser
-          });
-        }
+        const existing = prev.find(c => c.id === chatId);
+        const chatEntry = {
+          id: chatId,
+          participants: [myUid, otherUid],
+          lastMessage: existing?.lastMessage || "Yangi suhbat boshlandi",
+          updatedAt: existing?.updatedAt || new Date().toISOString(),
+          partner: targetUser
+        };
+        const merged = mergeChatLists([prev, [chatEntry]], myUid, {
+          myAliases: [myUid, currentUser?.id].filter(Boolean) as string[],
+          usersList: usersListRef.current,
+        });
         try {
-          localStorage.setItem('alov_chats_' + myUid, JSON.stringify(updated));
+          localStorage.setItem('alov_chats_' + myUid, JSON.stringify(merged));
         } catch (e) {}
-        return updated;
+        return merged;
       });
+      fetch(getApiUrl('/api/chats/open'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ myUid, targetUid: otherUid, partnerSnapshot: targetUser }),
+      }).catch(() => {});
     }
   };
 
@@ -3368,27 +3552,23 @@ export default function App() {
       });
     }, 300);
 
-    // Update chatsList item and persist
+    // Update chatsList via canonical deduplication and persist
     setChatsList(prev => {
-      const existingIdx = prev.findIndex(c => c.id === chatId);
-      let updated = [...prev];
-      if (existingIdx > -1) {
-        const item = { ...updated[existingIdx], lastMessage: text, updatedAt: msgObj.createdAt };
-        updated.splice(existingIdx, 1);
-        updated.unshift(item);
-      } else {
-        updated.unshift({
-          id: chatId,
-          participants: [myUid, otherUid],
-          lastMessage: text,
-          updatedAt: msgObj.createdAt,
-          partner: selectedChatUser
-        });
-      }
+      const chatEntry = {
+        id: chatId,
+        participants: [myUid, otherUid],
+        lastMessage: text,
+        updatedAt: msgObj.createdAt,
+        partner: selectedChatUser
+      };
+      const merged = mergeChatLists([prev, [chatEntry]], myUid, {
+        myAliases: [myUid, currentUser?.id].filter(Boolean) as string[],
+        usersList: usersListRef.current,
+      });
       try {
-        localStorage.setItem('alov_chats_' + myUid, JSON.stringify(updated));
+        localStorage.setItem('alov_chats_' + myUid, JSON.stringify(merged));
       } catch (e) {}
-      return updated;
+      return merged;
     });
 
     if (isAIBot) {
@@ -4015,14 +4195,14 @@ export default function App() {
               {activeTab === 'chats' && (
                 <div className="h-full flex flex-col">
                   {chatView === 'list' ? (
-                    <div className="bg-[#11131C] rounded-[24px] border border-white/[0.08] overflow-hidden flex flex-col h-full">
-                      <div className="p-4 border-b border-white/[0.08] flex items-center justify-between">
+                    <div className="bg-[#11131C] rounded-[24px] border border-white/[0.08] overflow-hidden flex flex-col h-full min-h-0">
+                      <div className="p-4 border-b border-white/[0.08] flex items-center justify-between shrink-0">
                         <h2 className="font-editorial text-2xl font-bold text-white">Xabarlar</h2>
-                        <span className="text-xs font-semibold text-zinc-400 tabular-nums">
+                        <span className="text-xs font-semibold text-zinc-400 tabular-nums" data-testid="chats-count-badge">
                           {chatsList.length} faol suhbat
                         </span>
                       </div>
-                      <div className="divide-y divide-white/[0.06] overflow-y-auto pb-20">
+                      <div className="flex-1 min-h-0 divide-y divide-white/[0.06] overflow-y-auto pb-24" data-testid="chats-list-scroll-area">
                         {isLoadingChats ? (
                           <>
                             <ChatSkeleton />
@@ -5440,7 +5620,11 @@ export default function App() {
             data-testid="auth-modal"
             className={cn(
               "bg-[#11131C] text-zinc-100 rounded-[28px] w-full p-6 sm:p-7 text-left space-y-4 relative shadow-[0_32px_90px_rgba(0,0,0,0.85)] border border-white/10 max-h-[92vh] overflow-y-auto",
-              (authMode === 'google_face_id' || authMode === 'register_face_id' || (authMode === 'telegram' && telegramStep === 'face_id')) ? "max-w-md" : "max-w-sm"
+              inlinePolicyReturnMode !== null
+                ? "max-w-xl"
+                : (authMode === 'google_face_id' || authMode === 'register_face_id' || (authMode === 'telegram' && telegramStep === 'face_id'))
+                  ? "max-w-md"
+                  : "max-w-sm"
             )}
           >
             <div className="pointer-events-none absolute -top-20 inset-x-10 h-32 bg-rose-600/15 blur-3xl rounded-full" />
@@ -5460,7 +5644,17 @@ export default function App() {
               </button>
             )}
 
-            {(authMode === 'google_face_id' || authMode === 'register_face_id' || (authMode === 'telegram' && telegramStep === 'face_id')) ? (
+            {inlinePolicyReturnMode !== null ? (
+              <PrivacyPolicyInline
+                onAccept={() => {
+                  setPrivacyAgreed(true);
+                  setPrivacyReadToBottom(true);
+                  setErrorMsg('');
+                  setInlinePolicyReturnMode(null);
+                }}
+                onBack={() => setInlinePolicyReturnMode(null)}
+              />
+            ) : (authMode === 'google_face_id' || authMode === 'register_face_id' || (authMode === 'telegram' && telegramStep === 'face_id')) ? (
               <FaceIdVerificationModal
                 apiBaseUrl={getBaseUrl()}
                 userUid={
@@ -5740,12 +5934,22 @@ export default function App() {
                     <input
                       type="checkbox"
                       id="google_privacy_checkbox"
+                      data-testid="setup-privacy-checkbox"
                       checked={privacyAgreed}
                       onChange={(e) => setPrivacyAgreed(e.target.checked)}
                       className="mt-0.5 w-4 h-4 rounded bg-[#171A26] border-white/20 text-rose-500 focus:ring-rose-500/40 cursor-pointer"
                     />
                     <label htmlFor="google_privacy_checkbox" className="text-[11px] text-zinc-300 select-none cursor-pointer leading-relaxed text-left">
-                      Men <button type="button" onClick={() => setShowTermsModal(true)} className="text-rose-400 font-bold underline hover:text-rose-300">Foydalanish shartlari</button> va <button type="button" onClick={() => setShowPrivacyModal(true)} className="text-rose-400 font-bold underline hover:text-rose-300">Maxfiylik siyosati</button> bilan tanishib chiqdim va roziman
+                      Men{' '}
+                      <button
+                        type="button"
+                        data-testid="setup-privacy-link"
+                        onClick={() => setInlinePolicyReturnMode('google_setup')}
+                        className="text-rose-400 font-bold underline hover:text-rose-300 cursor-pointer"
+                      >
+                        Maxfiylik siyosati
+                      </button>{' '}
+                      bilan tanishib chiqdim
                     </label>
                   </div>
 
@@ -5758,7 +5962,7 @@ export default function App() {
                   </button>
 
                   <p className="text-[10px] text-zinc-500 text-center leading-relaxed">
-                    Davom etish orqali siz <button type="button" onClick={() => setShowTermsModal(true)} className="text-zinc-400 underline hover:text-white">Foydalanish shartlari</button> va <button type="button" onClick={() => setShowPrivacyModal(true)} className="text-zinc-400 underline hover:text-white">Maxfiylik siyosati</button>ga rozilik bildirasiz.
+                    Davom etish orqali siz <button type="button" onClick={() => setShowTermsModal(true)} className="text-zinc-400 underline hover:text-white">Foydalanish shartlari</button> va <button type="button" onClick={() => setInlinePolicyReturnMode('google_setup')} className="text-zinc-400 underline hover:text-white">Maxfiylik siyosati</button>ga rozilik bildirasiz.
                   </p>
                 </form>
               </div>
@@ -5831,10 +6035,22 @@ export default function App() {
                     />
                   </div>
 
+                  {!turnstileToken ? (
+                    <TurnstileWidget
+                      onTokenChange={setTurnstileToken}
+                      resetSignal={turnstileResetTick}
+                    />
+                  ) : (
+                    <div className="px-3 py-2 rounded-xl bg-emerald-500/10 border border-emerald-500/25 text-emerald-300 text-[11px] font-semibold flex items-center justify-center gap-1.5">
+                      <CheckCircle2 className="w-3.5 h-3.5" />
+                      <span>Cloudflare xavfsizlik tekshiruvi tasdiqlandi</span>
+                    </div>
+                  )}
+
                   <button 
                     type="submit"
-                    disabled={isLoggingIn}
-                    className="w-full py-3.5 px-4 rounded-2xl bg-[#229ED9] text-white font-bold text-sm shadow-lg shadow-sky-950/40 hover:bg-[#1f8fc6] transition disabled:opacity-60 flex items-center justify-center gap-2 cursor-pointer"
+                    disabled={isLoggingIn || !turnstileToken}
+                    className="w-full py-3.5 px-4 rounded-2xl bg-[#229ED9] text-white font-bold text-sm shadow-lg shadow-sky-950/40 hover:bg-[#1f8fc6] transition disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2 cursor-pointer"
                   >
                     {hasStartedBotError ? <RefreshCw className="w-4 h-4" /> : <Send className="w-4 h-4" />}
                     <span>{isLoggingIn ? "Tekshirilmoqda..." : hasStartedBotError ? "Botni yoqdim (Kodni yuborish)" : "Tasdiqlash kodi olish"}</span>
@@ -6168,12 +6384,22 @@ export default function App() {
                     <input
                       type="checkbox"
                       id="tg_privacy_checkbox"
+                      data-testid="tg-setup-privacy-checkbox"
                       checked={privacyAgreed}
                       onChange={(e) => setPrivacyAgreed(e.target.checked)}
                       className="mt-0.5 w-4 h-4 rounded bg-[#171A26] border-white/20 text-rose-500 focus:ring-rose-500/40 cursor-pointer"
                     />
                     <label htmlFor="tg_privacy_checkbox" className="text-[11px] text-zinc-300 select-none cursor-pointer leading-relaxed text-left">
-                      Men <button type="button" onClick={() => setShowTermsModal(true)} className="text-rose-400 font-bold underline hover:text-rose-300">Foydalanish shartlari</button> va <button type="button" onClick={() => setShowPrivacyModal(true)} className="text-rose-400 font-bold underline hover:text-rose-300">Maxfiylik siyosati</button> bilan tanishib chiqdim va roziman
+                      Men{' '}
+                      <button
+                        type="button"
+                        data-testid="tg-setup-privacy-link"
+                        onClick={() => setInlinePolicyReturnMode('telegram_setup')}
+                        className="text-rose-400 font-bold underline hover:text-rose-300 cursor-pointer"
+                      >
+                        Maxfiylik siyosati
+                      </button>{' '}
+                      bilan tanishib chiqdim
                     </label>
                   </div>
 
@@ -6193,7 +6419,7 @@ export default function App() {
                   </button>
 
                   <p className="text-[10px] text-zinc-500 text-center leading-relaxed">
-                    Davom etish orqali siz <button type="button" onClick={() => setShowTermsModal(true)} className="text-zinc-400 underline hover:text-white">Foydalanish shartlari</button> va <button type="button" onClick={() => setShowPrivacyModal(true)} className="text-zinc-400 underline hover:text-white">Maxfiylik siyosati</button>ga rozilik bildirasiz.
+                    Davom etish orqali siz <button type="button" onClick={() => setShowTermsModal(true)} className="text-zinc-400 underline hover:text-white">Foydalanish shartlari</button> va <button type="button" onClick={() => setInlinePolicyReturnMode('telegram_setup')} className="text-zinc-400 underline hover:text-white">Maxfiylik siyosati</button>ga rozilik bildirasiz.
                   </p>
                 </form>
               </div>
@@ -6289,17 +6515,22 @@ export default function App() {
                           </button>
                         </div>
                       </div>
+                      <TurnstileWidget
+                        onTokenChange={setTurnstileToken}
+                        resetSignal={turnstileResetTick}
+                      />
+
                       <button 
                         type="submit"
-                        disabled={isLoggingIn}
+                        disabled={isLoggingIn || !turnstileToken}
                         data-testid="auth-login-submit"
-                        className="w-full py-3.5 px-4 rounded-2xl bg-gradient-to-r from-[#E11D48] to-rose-600 text-white font-bold text-sm shadow-[0_12px_28px_rgba(225,29,72,0.35)] hover:brightness-110 active:scale-[0.99] transition disabled:opacity-60 cursor-pointer"
+                        className="w-full py-3.5 px-4 rounded-2xl bg-gradient-to-r from-[#E11D48] to-rose-600 text-white font-bold text-sm shadow-[0_12px_28px_rgba(225,29,72,0.35)] hover:brightness-110 active:scale-[0.99] transition disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer"
                       >
                         {isLoggingIn ? "Kirilmoqda..." : "Kirish"}
                       </button>
 
                       <p className="text-[10px] text-zinc-500 text-center leading-relaxed">
-                        Kirish orqali siz <button type="button" onClick={() => setShowTermsModal(true)} className="text-zinc-400 underline hover:text-white">Foydalanish shartlari</button> va <button type="button" onClick={() => setShowPrivacyModal(true)} className="text-zinc-400 underline hover:text-white">Maxfiylik siyosati</button>ga rozilik bildirasiz.
+                        Kirish orqali siz <button type="button" onClick={() => setShowTermsModal(true)} className="text-zinc-400 underline hover:text-white">Foydalanish shartlari</button> va <button type="button" onClick={() => setInlinePolicyReturnMode('register')} className="text-zinc-400 underline hover:text-white">Maxfiylik siyosati</button>ga rozilik bildirasiz.
                       </p>
                     </motion.form>
                   ) : (
@@ -6360,25 +6591,41 @@ export default function App() {
                         <input
                           type="checkbox"
                           id="email_privacy_checkbox"
+                          data-testid="register-privacy-checkbox"
                           checked={privacyAgreed}
                           onChange={(e) => setPrivacyAgreed(e.target.checked)}
                           className="mt-0.5 w-4 h-4 rounded bg-[#171A26] border-white/20 text-rose-500 focus:ring-rose-500/40 cursor-pointer"
                         />
                         <label htmlFor="email_privacy_checkbox" className="text-[11px] text-zinc-300 select-none cursor-pointer leading-relaxed text-left">
-                          Men <button type="button" onClick={() => setShowTermsModal(true)} className="text-rose-400 font-bold underline hover:text-rose-300">Foydalanish shartlari</button> va <button type="button" onClick={() => setShowPrivacyModal(true)} className="text-rose-400 font-bold underline hover:text-rose-300">Maxfiylik siyosati</button> bilan tanishib chiqdim va roziman
+                          Men{' '}
+                          <button
+                            type="button"
+                            data-testid="register-privacy-link"
+                            onClick={() => setInlinePolicyReturnMode('register')}
+                            className="text-rose-400 font-bold underline hover:text-rose-300 cursor-pointer"
+                          >
+                            Maxfiylik siyosati
+                          </button>{' '}
+                          bilan tanishib chiqdim
                         </label>
                       </div>
 
+                      <TurnstileWidget
+                        onTokenChange={setTurnstileToken}
+                        resetSignal={turnstileResetTick}
+                      />
+
                       <button 
                         type="submit"
-                        disabled={isLoggingIn}
-                        className="w-full py-3.5 px-4 rounded-2xl bg-gradient-to-r from-[#E11D48] to-rose-600 text-white font-bold text-sm shadow-[0_12px_28px_rgba(225,29,72,0.35)] hover:brightness-110 active:scale-[0.99] transition disabled:opacity-60 cursor-pointer"
+                        disabled={isLoggingIn || !turnstileToken}
+                        data-testid="auth-register-submit"
+                        className="w-full py-3.5 px-4 rounded-2xl bg-gradient-to-r from-[#E11D48] to-rose-600 text-white font-bold text-sm shadow-[0_12px_28px_rgba(225,29,72,0.35)] hover:brightness-110 active:scale-[0.99] transition disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer"
                       >
                         {isLoggingIn ? "Ro'yxatdan o'tmoqda..." : "Ro'yxatdan o'tish"}
                       </button>
 
                       <p className="text-[10px] text-zinc-500 text-center leading-relaxed">
-                        Davom etish orqali siz <button type="button" onClick={() => setShowTermsModal(true)} className="text-zinc-400 underline hover:text-white">Foydalanish shartlari</button> va <button type="button" onClick={() => setShowPrivacyModal(true)} className="text-zinc-400 underline hover:text-white">Maxfiylik siyosati</button>ga rozilik bildirasiz.
+                        Davom etish orqali siz <button type="button" onClick={() => setShowTermsModal(true)} className="text-zinc-400 underline hover:text-white">Foydalanish shartlari</button> va <button type="button" onClick={() => setInlinePolicyReturnMode('register')} className="text-zinc-400 underline hover:text-white">Maxfiylik siyosati</button>ga rozilik bildirasiz.
                       </p>
                     </motion.form>
                   )}
@@ -6393,8 +6640,9 @@ export default function App() {
                 <div className="space-y-2.5">
                   <button 
                     onClick={handleGoogleLogin}
-                    disabled={isLoggingIn}
-                    className="w-full flex items-center justify-center space-x-3 py-3.5 px-4 rounded-2xl border border-white/12 hover:border-white/25 hover:bg-[#1B1F2E] font-bold text-sm bg-[#171A26] text-white active:scale-[0.99] transition duration-200 disabled:opacity-60 disabled:cursor-not-allowed cursor-pointer"
+                    disabled={isLoggingIn || !turnstileToken}
+                    data-testid="auth-google-btn"
+                    className="w-full flex items-center justify-center space-x-3 py-3.5 px-4 rounded-2xl border border-white/12 hover:border-white/25 hover:bg-[#1B1F2E] font-bold text-sm bg-[#171A26] text-white active:scale-[0.99] transition duration-200 disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer"
                   >
                     <svg className="w-4 h-4 shrink-0" viewBox="0 0 24 24">
                       <path fill="#4285F4" d="M23.745 12.27c0-.7-.06-1.4-.19-2.07H12v4.51h6.6c-.29 1.52-1.14 2.82-2.4 3.68v3.05h3.88c2.27-2.09 3.665-5.17 3.665-9.17z"/>
@@ -6407,8 +6655,9 @@ export default function App() {
 
                   <button 
                     onClick={handleOpenTelegramFlow}
-                    disabled={isLoggingIn}
-                    className="w-full flex items-center justify-center space-x-3 py-3.5 px-4 rounded-2xl bg-[#229ED9] hover:bg-[#1f8fc6] font-bold text-sm shadow-sm text-white active:scale-[0.99] transition duration-200 disabled:opacity-60 cursor-pointer"
+                    disabled={isLoggingIn || !turnstileToken}
+                    data-testid="auth-telegram-btn"
+                    className="w-full flex items-center justify-center space-x-3 py-3.5 px-4 rounded-2xl bg-[#229ED9] hover:bg-[#1f8fc6] font-bold text-sm shadow-sm text-white active:scale-[0.99] transition duration-200 disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer"
                   >
                     <svg className="w-4 h-4 shrink-0 fill-current" viewBox="0 0 24 24">
                       <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm4.64 6.8c-.15 1.58-.8 5.42-1.13 7.19-.14.75-.42 1-.68 1.03-.58.05-1.02-.38-1.58-.75-.88-.58-1.38-.94-2.23-1.5-.99-.65-.35-1.01.22-1.59.15-.15 2.71-2.48 2.76-2.69.01-.03.01-.14-.07-.2-.08-.06-.19-.04-.27 0-.12.05-1.98 1.26-5.6 3.7-.53.36-1.01.54-1.44.53-.47-.01-1.38-.26-2.06-.48-.83-.27-1.49-.42-1.43-.88.03-.24.37-.49 1.02-.75 3.99-1.74 6.65-2.89 7.98-3.45 3.8-1.6 4.59-1.88 5.1-1.89.11 0 .37.03.54.17.14.12.18.28.2.4-.02.07-.02.13-.04.2z"/>
@@ -7762,6 +8011,43 @@ export default function App() {
             }
           }}
         />
+      )}
+
+      {/* --- MANDATORY TELEGRAM CHANNEL SUBSCRIPTION GATE --- */}
+      {(() => {
+        const tgWebAppUser = (window as any).Telegram?.WebApp?.initDataUnsafe?.user;
+        const isTelegramContext = Boolean(tgWebAppUser?.id || currentUser?.telegramChatId || currentUser?.uid?.startsWith('tg_'));
+        const gateEval = evaluateMandatorySubscriptionAccess({
+          config: subscriptionConfig,
+          user: currentUser,
+          isTelegramContext,
+          isSubscribed: false,
+        });
+        if (!gateEval.gateRequired || !showSubscriptionGate) return null;
+        return (
+          <MandatorySubscriptionGate
+            config={subscriptionConfig}
+            isSubscribed={isChannelSubscribed}
+            isChecking={isCheckingSubscription}
+            errorMsg={subscriptionError}
+            onVerifySubscription={() => void verifyMandatorySubscription()}
+            onContinue={() => setShowSubscriptionGate(false)}
+          />
+        );
+      })()}
+
+      {/* --- NON-ADMIN CAPTURE / SCREENSHOT PRIVACY SHIELD --- */}
+      {captureShieldVisible && shouldEnableCaptureProtection(currentUser) && (
+        <div
+          data-testid="capture-privacy-shield"
+          className="fixed inset-0 z-[260] bg-black flex flex-col items-center justify-center p-6 text-center select-none"
+        >
+          <ShieldCheck className="w-12 h-12 text-rose-500 mb-3" />
+          <p className="text-lg font-editorial font-bold text-white">Xavfsizlik himoyasi faol</p>
+          <p className="text-xs text-zinc-400 max-w-sm mt-1">
+            Alov.uz foydalanuvchilarining shaxsiy ma&apos;lumotlari va kontentini skrinshot yoki ekran yozuviga olish taqiqlangan.
+          </p>
+        </div>
       )}
 
       {/* --- NON-INTRUSIVE TOAST NOTIFICATION --- */}

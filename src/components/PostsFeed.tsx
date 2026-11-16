@@ -319,24 +319,10 @@ export const PostsFeed: React.FC<PostsFeedProps> = ({
           body: JSON.stringify({ url: parsed.normalizedUrl || raw }),
         });
         const data = await res.json();
-        if (!res.ok || !data?.success) {
+        if (!res.ok || !data?.success || data.mode === 'embed' || !data.url) {
           setDraftError(
             data?.error ||
-              "Havoladan videoni yuklab bo'lmadi. Boshqa havola kiriting yoki qurilmadan video yuklang."
-          );
-          return;
-        }
-        if (data.mode === 'embed' && data.embedUrl) {
-          setMediaUrl(data.url || parsed.normalizedUrl || raw);
-          setEmbedUrl(data.embedUrl);
-          setMediaProvider(data.provider || parsed.provider || 'direct');
-          setIsVerticalVideo(Boolean(data.isVertical));
-          setLinkInputText('');
-          return;
-        }
-        if (!data.url) {
-          setDraftError(
-            "Havoladan videoni yuklab bo'lmadi. Boshqa havola kiriting yoki qurilmadan video yuklang."
+              "Ushbu havoladan haqiqiy MP4 video faylni yuklab bo'lmadi. Boshqa havola kiriting yoki qurilmadan video yuklang."
           );
           return;
         }
@@ -345,7 +331,7 @@ export const PostsFeed: React.FC<PostsFeedProps> = ({
         setMediaProvider('direct');
         setIsVerticalVideo(Boolean(data.isVertical));
         setLinkInputText('');
-        if (onNotify) onNotify('Video MP4 formatida yuklandi');
+        if (onNotify) onNotify('Video haqiqiy MP4 formatida yuklandi');
         return;
       } catch {
         setDraftError("Video havolasini yuklab olishda server bilan aloqa uzildi.");
@@ -914,31 +900,21 @@ export const PostsFeed: React.FC<PostsFeedProps> = ({
                         </button>
                       </div>
                     ) : (
-                      <div className="relative overflow-hidden rounded-2xl bg-black border border-white/10">
-                        <button
-                          type="button"
-                          onClick={() => {
-                            setMediaUrl('');
-                            setEmbedUrl('');
-                            setLinkInputText('');
-                          }}
-                          aria-label="Videoni o'chirish"
-                          className="absolute top-2.5 right-2.5 z-20 w-8 h-8 rounded-full bg-black/80 hover:bg-black text-white flex items-center justify-center transition cursor-pointer"
-                        >
-                          <X className="w-4 h-4" />
-                        </button>
+                      <div className="space-y-2">
+                        <div className="relative overflow-hidden rounded-2xl bg-black border border-white/10">
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setMediaUrl('');
+                              setEmbedUrl('');
+                              setLinkInputText('');
+                            }}
+                            aria-label="Videoni o'chirish"
+                            className="absolute top-2.5 right-2.5 z-20 w-8 h-8 rounded-full bg-black/80 hover:bg-black text-white flex items-center justify-center transition cursor-pointer"
+                          >
+                            <X className="w-4 h-4" />
+                          </button>
 
-                        {embedUrl && !isDirectPlayableVideoUrl(mediaUrl) ? (
-                          <div className={`relative w-full ${isVerticalVideo ? 'aspect-[9/16] max-w-[280px] mx-auto' : 'aspect-video'}`}>
-                            <iframe
-                              src={embedUrl}
-                              title="Video Preview"
-                              className="w-full h-full border-0"
-                              allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
-                              allowFullScreen
-                            />
-                          </div>
-                        ) : (
                           <div className={isVerticalVideo ? 'aspect-[9/16] max-w-[260px] mx-auto bg-black overflow-hidden' : 'w-full bg-black'}>
                             <video
                               src={resolveApiMediaUrl(mediaUrl)}
@@ -953,6 +929,23 @@ export const PostsFeed: React.FC<PostsFeedProps> = ({
                               }}
                               className={isVerticalVideo ? 'w-full h-full object-contain bg-black block' : 'w-full max-h-72 object-contain bg-black block'}
                             />
+                          </div>
+                        </div>
+                        {mediaUrl && !mediaUrl.startsWith('blob:') && (
+                          <div className="flex items-center justify-between px-3 py-2 rounded-xl bg-[#161923] border border-white/10">
+                            <span className="text-[11px] font-semibold text-emerald-300">Haqiqiy MP4 pleyer tayyor</span>
+                            <a
+                              href={
+                                resolveApiMediaUrl(mediaUrl).includes('/api/media/')
+                                  ? `${resolveApiMediaUrl(mediaUrl)}${resolveApiMediaUrl(mediaUrl).includes('?') ? '&' : '?'}download=1&filename=alov-video.mp4`
+                                  : resolveApiMediaUrl(mediaUrl)
+                              }
+                              download="alov-video.mp4"
+                              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-white/10 hover:bg-white/20 text-white text-[11px] font-bold transition"
+                            >
+                              <Download className="w-3.5 h-3.5" />
+                              <span>MP4 yuklab olish</span>
+                            </a>
                           </div>
                         )}
                       </div>
@@ -1306,32 +1299,52 @@ export const PostsFeed: React.FC<PostsFeedProps> = ({
 
                 {post.type === 'video' && (
                   <div className="w-full bg-black" data-vertical-video={isVertical ? 'true' : 'false'}>
-                    {post.mediaUrl && isDirectPlayableVideoUrl(post.mediaUrl) ? (
-                      <div
-                        className={
-                          isVertical
-                            ? 'aspect-[9/16] max-w-[360px] mx-auto bg-black overflow-hidden'
-                            : 'w-full bg-black'
-                        }
-                      >
-                        <video
-                          src={resolveApiMediaUrl(post.mediaUrl)}
-                          controls
-                          playsInline
-                          preload="metadata"
-                          onLoadedMetadata={(e) => {
-                            const v = e.currentTarget;
-                            if (v.videoHeight > v.videoWidth && !detectedVerticalByPostId[post.id]) {
-                              setDetectedVerticalByPostId((prev) => ({ ...prev, [post.id]: true }));
-                            }
-                          }}
+                    {post.mediaUrl ? (
+                      <>
+                        <div
                           className={
                             isVertical
-                              ? 'w-full h-full object-contain bg-black block'
-                              : 'w-full max-h-[520px] bg-black object-contain mx-auto block'
+                              ? 'aspect-[9/16] max-w-[360px] mx-auto bg-black overflow-hidden'
+                              : 'w-full bg-black'
                           }
-                        />
-                      </div>
+                        >
+                          <video
+                            src={resolveApiMediaUrl(post.mediaUrl)}
+                            controls
+                            playsInline
+                            preload="metadata"
+                            onLoadedMetadata={(e) => {
+                              const v = e.currentTarget;
+                              if (v.videoHeight > v.videoWidth && !detectedVerticalByPostId[post.id]) {
+                                setDetectedVerticalByPostId((prev) => ({ ...prev, [post.id]: true }));
+                              }
+                            }}
+                            className={
+                              isVertical
+                                ? 'w-full h-full object-contain bg-black block'
+                                : 'w-full max-h-[520px] bg-black object-contain mx-auto block'
+                            }
+                          />
+                        </div>
+                        {isDirectPlayableVideoUrl(post.mediaUrl) && (
+                          <div className="px-4 sm:px-5 py-2 bg-[#0E1018] border-t border-white/[0.06] flex items-center justify-between gap-2">
+                            <span className="text-[11px] font-semibold text-zinc-400">MP4 Video</span>
+                            <a
+                              href={
+                                resolveApiMediaUrl(post.mediaUrl).includes('/api/media/')
+                                  ? `${resolveApiMediaUrl(post.mediaUrl)}${resolveApiMediaUrl(post.mediaUrl).includes('?') ? '&' : '?'}download=1&filename=${encodeURIComponent(`alov-video-${post.id.slice(-6)}.mp4`)}`
+                                  : resolveApiMediaUrl(post.mediaUrl)
+                              }
+                              download={`alov-video-${post.id.slice(-6)}.mp4`}
+                              data-testid={`post-video-mp4-download-btn-${post.id}`}
+                              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-white/10 hover:bg-rose-600 text-white text-[11px] font-bold transition"
+                            >
+                              <Download className="w-3.5 h-3.5" />
+                              <span>MP4 yuklab olish</span>
+                            </a>
+                          </div>
+                        )}
+                      </>
                     ) : resolvedEmbedUrl ? (
                       <div
                         className={`relative w-full overflow-hidden bg-black ${
@@ -1344,32 +1357,6 @@ export const PostsFeed: React.FC<PostsFeedProps> = ({
                           className="w-full h-full border-0 outline-none"
                           allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
                           allowFullScreen
-                        />
-                      </div>
-                    ) : post.mediaUrl ? (
-                      <div
-                        className={
-                          isVertical
-                            ? 'aspect-[9/16] max-w-[360px] mx-auto bg-black overflow-hidden'
-                            : 'w-full bg-black'
-                        }
-                      >
-                        <video
-                          src={resolveApiMediaUrl(post.mediaUrl)}
-                          controls
-                          playsInline
-                          preload="metadata"
-                          onLoadedMetadata={(e) => {
-                            const v = e.currentTarget;
-                            if (v.videoHeight > v.videoWidth && !detectedVerticalByPostId[post.id]) {
-                              setDetectedVerticalByPostId((prev) => ({ ...prev, [post.id]: true }));
-                            }
-                          }}
-                          className={
-                            isVertical
-                              ? 'w-full h-full object-contain bg-black block'
-                              : 'w-full max-h-[520px] bg-black object-contain mx-auto block'
-                          }
                         />
                       </div>
                     ) : null}

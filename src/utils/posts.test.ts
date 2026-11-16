@@ -7,6 +7,7 @@ import {
   computeAuthorTotalLikes,
   formatPostTimeUz,
   isPostVisibleToViewer,
+  isPostCommentsOpen,
   type PostItem,
 } from './posts.ts';
 
@@ -96,5 +97,13 @@ describe('Posts pure helpers', () => {
     assert.equal(isPostVisibleToViewer(femalePost, femaleViewer), false);
     assert.equal(isPostVisibleToViewer(otherMalePost, femaleViewer), true);
     assert.equal(isPostVisibleToViewer({ authorUid: 'f1', authorGender: 'female' }, femaleViewer), true);
+  });
+
+  it('keeps post comments hidden by default until explicitly expanded', () => {
+    assert.equal(isPostCommentsOpen(undefined, 'post_1'), false);
+    assert.equal(isPostCommentsOpen({}, 'post_1'), false);
+    assert.equal(isPostCommentsOpen({ post_1: false }, 'post_1'), false);
+    assert.equal(isPostCommentsOpen({ post_1: true }, 'post_1'), true);
+    assert.equal(isPostCommentsOpen({ post_1: true }, 'post_2'), false);
   });
 });

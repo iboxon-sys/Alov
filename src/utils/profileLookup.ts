@@ -1,4 +1,5 @@
 import { normalizeTelegramHandle } from './telegramProfile';
+import { isAdminTelegramUser } from './tokenomics';
 
 export interface ExactUserResolution {
   isSelf: boolean;
@@ -76,7 +77,7 @@ export interface CleanAuthDraftState {
   regUsername: string;
   regBirthDate: string;
   regAge: string;
-  regGender: 'female' | 'male';
+  regGender: 'female' | 'male' | '';
   regRegion: string;
   regDistrict: string;
   regNeighborhood: string;
@@ -104,7 +105,7 @@ export function getInitialAuthDraftState(): CleanAuthDraftState {
     regUsername: '',
     regBirthDate: '2002-05-15',
     regAge: '22',
-    regGender: 'female',
+    regGender: '',
     regRegion: 'Toshkent shahri',
     regDistrict: 'Yunusobod tumani',
     regNeighborhood: '',
@@ -137,3 +138,75 @@ export function telegramInputMatchesBotRecord(
 
   return false;
 }
+
+export function canPersistUserProfile(user: any): boolean {
+  if (!user || typeof user !== 'object') return false;
+  if (!user.uid && !user.id) return false;
+  if (isAdminTelegramUser(user)) return true;
+  if (user.isProfileCompleted !== true) return false;
+  if (user.faceId?.verified !== true) return false;
+  if (user.gender !== 'male' && user.gender !== 'female') return false;
+  if (!String(user.name || '').trim()) return false;
+  return true;
+}
+
+export function canAuthenticateUserProfile(user: any): boolean {
+  return canPersistUserProfile(user);
+}
+
+export function pruneIncompleteProfiles<T extends Record<string, any>>(users: T[]): T[] {
+  if (!Array.isArray(users)) return [];
+  return users.filter((u) => canPersistUserProfile(u));
+}
+
+export function formatAuthErrorMessage(
+  err: any,
+  context: 'login' | 'register' | 'google' = 'login'
+): string {
+  const code = String(err?.code || '').trim();
+  const msg = String(err?.message || '').trim();
+
+  if (
+    code === 'auth/invalid-credential' ||
+    code === 'auth/user-not-found' ||
+    code === 'auth/wrong-password' ||
+    msg.includes('auth/invalid-credential') ||
+    msg.includes('auth/user-not-found') ||
+    msg.includes('auth/wrong-password')
+  ) {
+    return "Bunday foydalanuvchi topilmadi, ro'yxatdan o'tish yakunlanmagan yoki parol noto'g'ri!";
+  }
+
+  if (code === 'auth/invalid-email' || msg.includes('auth/invalid-email')) {
+    return "Email manzil formati noto'g'ri!";
+  }
+
+  if (code === 'auth/weak-password' || msg.includes('auth/weak-password')) {
+    return "Parol kamida 6 ta belgidan iborat bo'lishi kerak!";
+  }
+
+  if (code === 'auth/email-already-in-use' || msg.includes('auth/email-already-in-use')) {
+    return "Bu email allaqachon ro'yxatdan o'tgan. Iltimos, 'Kirish' bo'limidan kiring!";
+  }
+
+  if (code === 'auth/too-many-requests' || msg.includes('auth/too-many-requests')) {
+    return "Juda ko'p urinish qilindi. Iltimos, birozdan so'ng qayta urinib ko'ring.";
+  }
+
+  if (code === 'auth/network-request-failed' || msg.includes('auth/network-request-failed')) {
+    return "Internet aloqasi bilan muammo yuz berdi. Qayta urinib ko'ring.";
+  }
+
+  if (code === 'auth/popup-blocked' || msg.includes('auth/popup-blocked')) {
+    return "Brauzer qalqib chiquvchi oynani (popup) blokladi. Ruxsat bering va qayta urinib ko'ring.";
+  }
+
+  if (msg && !msg.startsWith('Firebase:')) {
+    return msg;
+  }
+
+  if (context === 'register') return "Ro'yxatdan o'tishda xatolik yuz berdi.";
+  if (context === 'google') return "Google orqali kirishda xatolik yuz berdi.";
+  return "Kirishda xatolik yuz berdi.";
+}
+

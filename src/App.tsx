@@ -55,6 +55,7 @@ import {
 import {
   requiresFaceIdForUser,
   resolveEffectiveProfileAvatar,
+  resolvePostFaceIdGender,
   formatFaceIdDateUz,
   genderToUzLabel,
   type FaceIdProfileData,
@@ -64,7 +65,12 @@ import {
   type CoinPurchaseRequest,
 } from './utils/coinRequests';
 import { isUserOnlineStrict, formatLastSeenUz } from './utils/presence';
-import { resolveExactUserByUid, getInitialAuthDraftState } from './utils/profileLookup';
+import {
+  resolveExactUserByUid,
+  getInitialAuthDraftState,
+  canPersistUserProfile,
+  formatAuthErrorMessage,
+} from './utils/profileLookup';
 import { computeAuthorTotalLikes, isPostVisibleToViewer, type PostItem } from './utils/posts';
 import { validateUsername, isUsernameUnique, formatUsernameDisplay } from './utils/username';
 import { formatPhoneNumberPretty } from './utils/phone';
@@ -303,7 +309,7 @@ export default function App() {
   const [regUsername, setRegUsername] = useState('');
   const [regBirthDate, setRegBirthDate] = useState('2002-05-15');
   const [regAge, setRegAge] = useState('22');
-  const [regGender, setRegGender] = useState<'male' | 'female'>('female');
+  const [regGender, setRegGender] = useState<'male' | 'female' | ''>('');
   const [regRegion, setRegRegion] = useState('Toshkent shahri');
   const [regDistrict, setRegDistrict] = useState('Yunusobod tumani');
   const [regNeighborhood, setRegNeighborhood] = useState('Bodomzor');
@@ -989,7 +995,7 @@ export default function App() {
 
   // LocalStorage Session Restore on App Mount (enforce clean DB reset epoch first)
   useEffect(() => {
-    const DB_RESET_EPOCH = '2026-11-13-reset-v1';
+    const DB_RESET_EPOCH = '2026-11-16-reset-v3';
     try {
       const currentEpoch = localStorage.getItem('alov_db_epoch');
       if (currentEpoch !== DB_RESET_EPOCH) {
@@ -1013,39 +1019,42 @@ export default function App() {
       const cached = localStorage.getItem('alov_current_user');
       if (cached) {
         const parsed = JSON.parse(cached);
-        if (parsed && parsed.uid && parsed.isProfileCompleted && !requiresFaceIdForUser(parsed)) {
+        if (parsed && canPersistUserProfile(parsed) && !requiresFaceIdForUser(parsed)) {
           const isTg = Boolean(parsed.uid?.startsWith('tg_') || parsed.telegramChatId || parsed.telegram);
-          if (isTg) {
-            const sanitized = {
-              ...parsed,
-              name: getSafeUserDisplayName(parsed, ''),
-              avatar: parsed.faceId?.capturedPhotoUrl || pickPreferredAvatar(parsed.avatar),
-            };
-            setCurrentUser(sanitized);
-            setActiveTab('discover');
-            setIsAuthChecking(false);
+          const sanitized = isTg
+            ? {
+                ...parsed,
+                name: getSafeUserDisplayName(parsed, ''),
+                avatar: parsed.faceId?.capturedPhotoUrl || pickPreferredAvatar(parsed.avatar),
+              }
+            : parsed;
+          setCurrentUser(sanitized);
+          setActiveTab('discover');
+          setIsAuthChecking(false);
 
-            fetch(getApiUrl('/api/users/sync'), {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ user: sanitized })
+          fetch(getApiUrl('/api/users/sync'), {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ user: sanitized, lookupOnly: true })
+          })
+            .then(r => r.json())
+            .then(res => {
+              if (res && res.success && res.exists && res.user) {
+                setCurrentUser(res.user);
+                try {
+                  localStorage.setItem('alov_current_user', JSON.stringify(res.user));
+                  localStorage.setItem('alov_user_' + res.user.uid, JSON.stringify(res.user));
+                } catch (e) {}
+              } else if (res && res.success && res.exists === false) {
+                try {
+                  localStorage.removeItem('alov_current_user');
+                  localStorage.removeItem('alov_user_' + parsed.uid);
+                } catch (e) {}
+                setCurrentUser(null);
+                setActiveTab('landing');
+              }
             })
-              .then(r => r.json())
-              .then(res => {
-                if (res && res.success && res.user) {
-                  setCurrentUser(res.user);
-                  try {
-                    localStorage.setItem('alov_current_user', JSON.stringify(res.user));
-                    localStorage.setItem('alov_user_' + res.user.uid, JSON.stringify(res.user));
-                  } catch (e) {}
-                }
-              })
-              .catch(() => {});
-          } else {
-            setCurrentUser(parsed);
-            setActiveTab('discover');
-            setIsAuthChecking(false);
-          }
+            .catch(() => {});
         }
       }
     } catch (e) {}
@@ -1072,20 +1081,21 @@ export default function App() {
             isOnline: true,
             region: 'Toshkent shahri',
             district: 'Yunusobod tumani',
-            gender: 'female'
+            gender: 'female',
+            isProfileCompleted: false
           };
           fetch(getBaseUrl() + '/api/users/sync', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ user: telegramUserObj })
+            body: JSON.stringify({ user: telegramUserObj, lookupOnly: true })
           })
           .then(res => res.json())
           .then(data => {
-            if (data && data.success && data.user) {
+            if (data && data.success && data.exists && data.user) {
               const u = data.user;
               setRegName(getSafeUserDisplayName(u, realName));
               setRegAvatar(u.faceId?.capturedPhotoUrl || pickPreferredAvatar(u.avatar, tgUser.photo_url));
-              if (!isAdminTelegramUser(u) && (!u.isProfileCompleted || requiresFaceIdForUser(u))) {
+              if (!canPersistUserProfile(u)) {
                 setPendingTgUser(u);
                 setAuthMode('telegram');
                 setTelegramStep('face_id');
@@ -1098,6 +1108,13 @@ export default function App() {
                 } catch (e) {}
                 setActiveTab('discover');
               }
+            } else {
+              setRegName(realName);
+              setRegAvatar('');
+              setPendingTgUser(telegramUserObj);
+              setAuthMode('telegram');
+              setTelegramStep('face_id');
+              setShowAuthModal(true);
             }
           })
           .catch(() => {});
@@ -1123,56 +1140,43 @@ export default function App() {
     return () => clearTimeout(timeout);
   }, []);
 
-  // Foydalanuvchi hisobini Render server va Lokal kesh bilan sinxronizatsiya qilish (Zero Firestore)
+  // Foydalanuvchi hisobini server bilan lookupOnly rejimida tekshirish (tugallanmagan profil yaratilmaydi)
   const syncUserWithBackend = async (user: User, options?: { autoOpenFaceId?: boolean }) => {
     const autoOpenFaceId = options?.autoOpenFaceId === true;
     try {
       let userData: any = null;
 
-      // 1. Ushbu qurilmaning Lokal keshidan qidirish (eski profilni tiklash)
-      try {
-        const cached = localStorage.getItem('alov_user_' + user.uid);
-        if (cached) {
-          userData = JSON.parse(cached);
-          userData.status = 'online';
-          userData.uid = user.uid;
-        }
-      } catch (e) {}
-
-      // 2. Agar profil mavjud bo'lmasa, yangi profil obyektini shakllantirish
-      if (!userData) {
-        userData = {
-          uid: user.uid,
-          id: `ALOV-${user.uid.slice(0, 5).toUpperCase()}`,
-          name: user.displayName || 'Alov Foydalanuvchisi',
-          email: user.email || '',
-          avatar: user.photoURL || '',
-          role: 'user',
-          age: 22,
-          gender: 'female',
-          region: 'Toshkent shahri',
-          district: 'Yunusobod tumani',
-          bio: 'Alov.uz da yangi tanishuvlar va suhbatlar uchun.',
-          status: 'online',
-          isProfileCompleted: false,
-          isLocationEnabled: true,
-          locationVisibility: 'everyone',
-          location: { lat: 41.3111, lng: 69.2797 }
-        };
-      }
-
-      // 3. Render serveriga sinxronizatsiya qilish
       try {
         const data = await safeFetchJson(getApiUrl('/api/users/sync'), {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ user: userData })
+          body: JSON.stringify({
+            user: {
+              uid: user.uid,
+              email: user.email || '',
+              name: user.displayName || '',
+              avatar: user.photoURL || '',
+            },
+            lookupOnly: true,
+          })
         });
-        if (data && data.success && data.user) {
+        if (data && data.success && data.exists && data.user) {
           userData = data.user;
         }
       } catch (e) {
-        console.warn("Backend user sync offline fallback:", e);
+        console.warn("Backend user lookup offline fallback:", e);
+      }
+
+      if (!userData) {
+        if (autoOpenFaceId) {
+          setRegName(user.displayName || '');
+          setPendingFaceId(null);
+          setPendingGoogleUser(user);
+          setAuthOrigin('google');
+          setAuthMode('google_face_id');
+          setShowAuthModal(true);
+        }
+        return null;
       }
 
       // Anketani to'ldirish maydonlarini yangilash
@@ -1180,7 +1184,11 @@ export default function App() {
       setRegBirthDate(userBdate);
       setRegName(userData.name || user.displayName || '');
       setRegAge(String(calculateAge(userBdate, userData.age || 22)));
-      setRegGender(userData.gender || 'female');
+      setRegGender(
+        userData.isProfileCompleted && (userData.gender === 'male' || userData.gender === 'female')
+          ? userData.gender
+          : ''
+      );
       setRegRegion(userData.region || 'Toshkent shahri');
       setRegDistrict(userData.district || 'Yunusobod tumani');
       setRegBio(userData.bio || '');
@@ -1188,8 +1196,8 @@ export default function App() {
       setRegLocationVisibility(userData.locationVisibility || 'everyone');
       setIsLocationEnabled(userData.isLocationEnabled !== false);
 
-      // Admin bypasses Face ID completely; non-admins only trigger Face ID during explicit Google/Telegram sign-in (never silently on site entry)
-      const needsFaceId = !isAdminTelegramUser(userData) && (!userData.isProfileCompleted || requiresFaceIdForUser(userData));
+      // Admin bypasses Face ID completely; non-admins must have completed profile + Face ID verification
+      const needsFaceId = !canPersistUserProfile(userData);
       if (needsFaceId) {
         if (autoOpenFaceId) {
           setPendingGoogleUser(user);
@@ -1234,7 +1242,7 @@ export default function App() {
 
   // Synchronize Auth State & Real-time Presence
   useEffect(() => {
-    const DB_RESET_EPOCH = '2026-11-13-reset-v1';
+    const DB_RESET_EPOCH = '2026-11-16-reset-v3';
     const unsubscribe = onAuthStateChanged(auth, async (user) => {
       try {
         let epochOk = true;
@@ -2181,7 +2189,11 @@ export default function App() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ user: newUserData })
       });
-      const savedUser = (data && data.success && data.user) ? data.user : newUserData;
+      if (!data || !data.success || !data.user) {
+        setErrorMsg(data?.error || "Profil ma'lumotlarini serverda saqlab bo'lmadi.");
+        return;
+      }
+      const savedUser = data.user;
 
       try {
         localStorage.setItem('alov_current_user', JSON.stringify(savedUser));
@@ -2285,6 +2297,10 @@ export default function App() {
 
       if (serverLoginRes && serverLoginRes.success && serverLoginRes.user) {
         const userData = serverLoginRes.user;
+        if (!canPersistUserProfile(userData)) {
+          setErrorMsg("Ro'yxatdan o'tish oxirigacha yakunlanmagan. Iltimos, Face ID va profil anketasini yakunlang!");
+          return;
+        }
         setCurrentUser(userData);
         try {
           localStorage.setItem('alov_current_user', JSON.stringify(userData));
@@ -2299,14 +2315,19 @@ export default function App() {
       if (authEmail.includes('@') && !authEmail.startsWith('@')) {
         const userCredential = await signInWithEmailAndPassword(auth, authEmail.trim(), authPassword.trim());
         if (userCredential.user) {
-          await syncUserWithBackend(userCredential.user, { autoOpenFaceId: false });
+          const synced = await syncUserWithBackend(userCredential.user, { autoOpenFaceId: false });
+          if (synced && canPersistUserProfile(synced)) {
+            return;
+          }
+          await signOut(auth).catch(() => {});
+          setErrorMsg("Profil bazada topilmadi yoki ro'yxatdan o'tish oxirigacha yakunlanmagan. Avval Face ID va profil anketasini yakunlang!");
           return;
         }
       }
 
       setErrorMsg(serverLoginRes?.error || "Username, Email yoki parol xato.");
     } catch (err: any) {
-      setErrorMsg(err.message || "Kirishda xatolik yuz berdi.");
+      setErrorMsg(formatAuthErrorMessage(err, 'login'));
     } finally {
       setIsLoggingIn(false);
     }
@@ -2314,7 +2335,7 @@ export default function App() {
 
   const handleEmailRegister = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!authEmail || !authPassword || !regName) {
+    if (!authEmail.trim() || !authPassword.trim() || !regName.trim()) {
       setErrorMsg("Iltimos, email, parol va ism-familiyani to'ldiring!");
       return;
     }
@@ -2325,15 +2346,43 @@ export default function App() {
     try {
       setIsLoggingIn(true);
       setErrorMsg('');
-      const userCredential = await createUserWithEmailAndPassword(auth, authEmail, authPassword);
-      if (userCredential.user) {
+      let registeredUser: User | null = null;
+      try {
+        const userCredential = await createUserWithEmailAndPassword(auth, authEmail.trim(), authPassword.trim());
+        registeredUser = userCredential.user;
+      } catch (createErr: any) {
+        // If user abandoned registration halfway earlier, Firebase Auth has the email while our DB does NOT.
+        // Verify password and resume Face ID + profile setup only if backend confirms user is not yet in DB.
+        if (createErr?.code === 'auth/email-already-in-use') {
+          const existingCred = await signInWithEmailAndPassword(auth, authEmail.trim(), authPassword.trim());
+          const lookupRes = await safeFetchJson(getApiUrl('/api/users/sync'), {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              user: { uid: existingCred.user.uid, email: existingCred.user.email || authEmail.trim() },
+              lookupOnly: true,
+            }),
+          });
+          if (lookupRes?.success && lookupRes?.exists && lookupRes?.user) {
+            setErrorMsg("Bu email allaqachon ro'yxatdan o'tgan. Iltimos, 'Kirish' bo'limidan kiring!");
+            setIsLoggingIn(false);
+            return;
+          }
+          registeredUser = existingCred.user;
+        } else {
+          throw createErr;
+        }
+      }
+
+      if (registeredUser) {
         setAuthOrigin('email');
-        setPendingGoogleUser(userCredential.user);
+        setPendingGoogleUser(registeredUser);
         setPendingFaceId(null);
-        setAuthMode('google_setup');
+        // Require Face ID BEFORE profile setup & DB creation
+        setAuthMode('register_face_id');
       }
     } catch (err: any) {
-      setErrorMsg(err.message || "Ro'yxatdan o'tishda xatolik.");
+      setErrorMsg(formatAuthErrorMessage(err, 'register'));
     } finally {
       setIsLoggingIn(false);
     }
@@ -2358,13 +2407,13 @@ export default function App() {
         const response = await fetch(getApiUrl('/api/users/sync'), {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ user: partialUser })
+          body: JSON.stringify({ user: partialUser, lookupOnly: true })
         });
         const data = await response.json();
 
-        if (data && data.success && data.user) {
+        if (data && data.success && data.exists && data.user) {
           const canonicalUser = data.user;
-          if (isAdminTelegramUser(canonicalUser) || (canonicalUser.isProfileCompleted && !requiresFaceIdForUser(canonicalUser))) {
+          if (canPersistUserProfile(canonicalUser)) {
             setCurrentUser(canonicalUser);
             try {
               localStorage.setItem('alov_current_user', JSON.stringify(canonicalUser));
@@ -2389,7 +2438,7 @@ export default function App() {
         setIsLoggingIn(false);
         return;
       }
-      setErrorMsg(popupErr.message || "Google orqali kirishda xatolik.");
+      setErrorMsg(formatAuthErrorMessage(popupErr, 'google'));
       setIsLoggingIn(false);
     }
   };
@@ -2405,9 +2454,13 @@ export default function App() {
       setErrorMsg("Iltimos, Maxfiylik siyosati bilan tanishib chiqing va rozilik bildiring.");
       return;
     }
-    if (authOrigin !== 'email' && !pendingFaceId?.verified) {
+    if (!pendingFaceId?.verified) {
       setErrorMsg("Avval Face ID tasdiqlashdan o'ting!");
-      setAuthMode('google_face_id');
+      setAuthMode(authOrigin === 'email' ? 'register_face_id' : 'google_face_id');
+      return;
+    }
+    if (regGender !== 'male' && regGender !== 'female') {
+      setErrorMsg("Iltimos, jinsingizni tanlang (Ayol / Qiz yoki Erkak / Yigit)!");
       return;
     }
     try {
@@ -2432,7 +2485,7 @@ export default function App() {
 
       const cleanTg = (regTelegram || '').replace(/^(https?:\/\/t\.me\/|@)/i, '').toLowerCase();
       const formattedTg = cleanTg ? `https://t.me/${cleanTg}` : undefined;
-      const confirmedGender: 'male' | 'female' = regGender === 'male' ? 'male' : 'female';
+      const confirmedGender: 'male' | 'female' = regGender;
       const verifiedAvatar = pendingFaceId?.capturedPhotoUrl || regAvatar;
       const syncedFaceId = pendingFaceId
         ? {
@@ -2474,7 +2527,12 @@ export default function App() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ user: newUserData })
       });
-      const finalUser = (syncData && syncData.success && syncData.user) ? syncData.user : newUserData;
+      if (!syncData || !syncData.success || !syncData.user) {
+        setErrorMsg(syncData?.error || "Profil yaratishda xatolik yuz berdi.");
+        setIsLoggingIn(false);
+        return;
+      }
+      const finalUser = syncData.user;
       setCurrentUser(finalUser);
       setUsersList(prev => {
         const userMap = new Map<string, any>();
@@ -2573,9 +2631,7 @@ export default function App() {
           localStorage.setItem('alov_tg_started_' + cleanKey, 'true');
         } catch (e) {}
 
-        const needsOnboardingOrFaceId =
-          !isAdminTelegramUser(data.user) &&
-          (data.isNewUser || !data.user.isProfileCompleted || requiresFaceIdForUser(data.user));
+        const needsOnboardingOrFaceId = data.isNewUser || !canPersistUserProfile(data.user);
 
         if (needsOnboardingOrFaceId) {
           setPendingTgUser(data.user);
@@ -2603,7 +2659,11 @@ export default function App() {
           setRegTelegram(data.user.telegram || (cleanUserTg && !/^\d+$/.test(cleanUserTg) ? `https://t.me/${cleanUserTg}` : ''));
           setRegBirthDate(data.user.birthDate || '2002-05-15');
           setRegAge(String(calculateAge(data.user.birthDate || '2002-05-15', Number(data.user.age || 22))));
-          setRegGender(data.user.gender || 'female');
+          setRegGender(
+            data.user.isProfileCompleted && (data.user.gender === 'male' || data.user.gender === 'female')
+              ? data.user.gender
+              : ''
+          );
           setRegRegion(data.user.region || 'Toshkent shahri');
           setRegDistrict(data.user.district || 'Yunusobod tumani');
           setRegNeighborhood(data.user.neighborhood || '');
@@ -2638,18 +2698,26 @@ export default function App() {
     setErrorMsg('');
     const facePhoto = result.photoUrl || result.photoDataUrl;
     setPendingFaceId(result.faceId);
-    setRegGender(result.detectedGender);
     setRegAvatar(facePhoto);
 
     if (origin === 'telegram') {
-      // If returning Telegram user already completed profile fields previously, keep locked primary gender/birthDate and enter directly
-      if (pendingTgUser?.isProfileCompleted) {
+      // Only allow direct entry if returning Telegram user already passed full onboarding previously
+      if (canPersistUserProfile(pendingTgUser)) {
+        const preservedGender =
+          pendingTgUser.gender === 'male' || pendingTgUser.gender === 'female'
+            ? pendingTgUser.gender
+            : (result.userSelectedGender || 'male');
+        setRegGender(preservedGender);
         const updatedUser = {
           ...pendingTgUser,
           avatar: facePhoto,
-          gender: pendingTgUser.gender === 'male' || pendingTgUser.gender === 'female' ? pendingTgUser.gender : result.detectedGender,
+          gender: preservedGender,
           birthDate: pendingTgUser.birthDate,
-          faceId: result.faceId,
+          faceId: {
+            ...result.faceId,
+            detectedGender: preservedGender,
+            genderLabelUz: genderToUzLabel(preservedGender),
+          },
           isVerified: true,
         };
         const syncData = await safeFetchJson(getApiUrl('/api/users/sync'), {
@@ -2657,7 +2725,11 @@ export default function App() {
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ user: updatedUser }),
         });
-        const finalUser = syncData?.user || updatedUser;
+        if (!syncData || !syncData.success || !syncData.user) {
+          setErrorMsg(syncData?.error || "Profilni serverga yuklashda xatolik.");
+          return;
+        }
+        const finalUser = syncData.user;
         setCurrentUser(finalUser);
         setUsersList(prev => {
           const userMap = new Map<string, any>();
@@ -2677,8 +2749,10 @@ export default function App() {
         setActiveTab('discover');
         return;
       }
+      setRegGender(resolvePostFaceIdGender({ explicitSelection: result.userSelectedGender }));
       setTelegramStep('profile_setup');
     } else {
+      setRegGender(resolvePostFaceIdGender({ explicitSelection: result.userSelectedGender }));
       setAuthMode('google_setup');
     }
   };
@@ -2697,6 +2771,10 @@ export default function App() {
     if (!pendingFaceId?.verified) {
       setErrorMsg("Avval Face ID tasdiqlashdan o'ting!");
       setTelegramStep('face_id');
+      return;
+    }
+    if (regGender !== 'male' && regGender !== 'female') {
+      setErrorMsg("Iltimos, jinsingizni tanlang (Ayol / Qiz yoki Erkak / Yigit)!");
       return;
     }
     try {
@@ -2721,7 +2799,7 @@ export default function App() {
 
       const cleanTg = (regTelegram || pendingTgUser.telegram || telegramInput || '').replace(/^(https?:\/\/t\.me\/|@)/i, '').toLowerCase();
       const formattedTg = cleanTg && !/^\d+$/.test(cleanTg) ? `https://t.me/${cleanTg}` : undefined;
-      const confirmedGender: 'male' | 'female' = regGender === 'male' ? 'male' : 'female';
+      const confirmedGender: 'male' | 'female' = regGender;
       const verifiedAvatar = pendingFaceId.capturedPhotoUrl || regAvatar;
       const syncedFaceId = {
         ...pendingFaceId,
@@ -2761,7 +2839,12 @@ export default function App() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ user: newUserData })
       });
-      const finalUser = (syncData && syncData.success && syncData.user) ? syncData.user : newUserData;
+      if (!syncData || !syncData.success || !syncData.user) {
+        setErrorMsg(syncData?.error || "Profil yaratishda xatolik yuz berdi.");
+        setIsLoggingIn(false);
+        return;
+      }
+      const finalUser = syncData.user;
       setCurrentUser(finalUser);
       setUsersList(prev => {
         const userMap = new Map<string, any>();
@@ -3573,7 +3656,7 @@ export default function App() {
                       const candidateAvatar = resolveAvatarUrl(resolveEffectiveProfileAvatar(user));
                       const candidateName = getSafeUserDisplayName(user, user.name || 'Foydalanuvchi');
                       const faceVerified = Boolean(user.faceId?.verified);
-                      const detectedGender = user.faceId?.detectedGender || user.gender;
+                      const detectedGender = user.gender || user.faceId?.detectedGender;
                       const genderLabel = genderToUzLabel(detectedGender);
                       const isOnline = isUserOnlineStrict(user, onlineUserIds);
                       const ageVal = calculateAge(user.birthDate, user.age);
@@ -4161,7 +4244,11 @@ export default function App() {
                   setRegUsername(currentUser?.username || '');
                   setRegBirthDate(currentUser?.birthDate || '2002-05-15');
                   setRegAge(String(currentUser?.age || calculateAge(currentUser?.birthDate, 22)));
-                  setRegGender(currentUser?.gender || 'female');
+                  setRegGender(
+                    currentUser?.gender === 'male' || currentUser?.gender === 'female'
+                      ? currentUser.gender
+                      : ''
+                  );
                   setRegRegion(currentUser?.region || 'Toshkent shahri');
                   setRegDistrict(currentUser?.district || 'Yunusobod tumani');
                   setRegNeighborhood(currentUser?.neighborhood || '');
@@ -4292,7 +4379,7 @@ export default function App() {
                                 <span>{locationText}</span>
                               </span>
                               <span className="text-zinc-600">·</span>
-                              <span>{genderToUzLabel(currentUser?.faceId?.detectedGender || currentUser?.gender || 'female')}</span>
+                              <span>{genderToUzLabel(currentUser?.gender || currentUser?.faceId?.detectedGender)}</span>
                               <span className="text-zinc-600">·</span>
                               <span className="font-mono text-[11px] tabular-nums text-zinc-500">ID: {currentUser?.id}</span>
                             </div>
@@ -4436,7 +4523,7 @@ export default function App() {
                                     <div className="min-w-0">
                                       <p className="text-xs font-bold text-white">Face ID Tasdiqlangan</p>
                                       <p className="text-[11px] text-zinc-400 truncate">
-                                        {genderToUzLabel(currentUser.faceId.detectedGender || currentUser.gender)} · {currentUser.faceId.confidence ?? 95}%
+                                        {genderToUzLabel(currentUser.gender || currentUser.faceId.detectedGender)} · {currentUser.faceId.confidence ?? 95}%
                                         {currentUser.faceId.verifiedAt ? ` · ${formatFaceIdDateUz(currentUser.faceId.verifiedAt)}` : ''}
                                       </p>
                                     </div>
@@ -5061,8 +5148,8 @@ export default function App() {
     <MotionConfig reducedMotion="user">
     <div className="min-h-screen bg-[#09090D] text-[#F4F4F6] font-sans selection:bg-rose-600 selection:text-white">
 
-      {/* Landing Page */}
-      {(!firebaseUser && !currentUser) || activeTab === 'landing' ? (
+      {/* Landing Page — only enter app after full DB registration sets currentUser */}
+      {!currentUser || activeTab === 'landing' ? (
         <LandingPage onLogin={() => openAuthModalClean('login')} />
       ) : (
         <div className="min-h-screen bg-[#09090D] flex flex-col items-center justify-center p-0 md:p-4 overflow-hidden relative">
@@ -5182,7 +5269,10 @@ export default function App() {
                         <span>Face ID Tasdiqlandi</span>
                       </p>
                       <p className="text-xs font-bold text-white mt-0.5">
-                        Jins: {genderToUzLabel(regGender)} ({pendingFaceId?.confidence ?? 95}%)
+                        Jins:{' '}
+                        <span className={regGender ? 'text-emerald-300' : 'text-amber-300'}>
+                          {regGender ? genderToUzLabel(regGender) : 'Quyida tanlang *'}
+                        </span>
                       </p>
                       <p className="text-[10px] text-emerald-300/80 font-medium">Real kamera suratingiz profilga o'rnatiladi</p>
                     </div>
@@ -5234,20 +5324,31 @@ export default function App() {
                     </div>
                   </div>
 
-                  <div>
-                    <div className="flex items-center justify-between mb-1">
-                      <label className="block text-[11px] font-bold text-zinc-300">Jinsingiz (Birlamchi)</label>
-                      <span className="text-[10px] text-zinc-500">Xato bo'lsa to'g'rilang</span>
+                  <div className="p-3 rounded-2xl bg-[#171A26]/90 border border-white/15 space-y-2">
+                    <div className="flex items-center justify-between">
+                      <label className="block text-xs font-bold text-white">
+                        Jinsingizni tanlang <span className="text-rose-400">*</span>
+                      </label>
+                      <span
+                        className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${
+                          regGender
+                            ? 'bg-emerald-500/15 text-emerald-300'
+                            : 'bg-rose-500/15 text-rose-300'
+                        }`}
+                      >
+                        {regGender ? 'Tanlandi ✓' : 'Majburiy'}
+                      </span>
                     </div>
-                    <div className="grid grid-cols-2 gap-2">
+                    <div className="grid grid-cols-2 gap-2.5">
                       <button
                         type="button"
                         data-testid="setup-gender-female"
+                        aria-pressed={regGender === 'female'}
                         onClick={() => setRegGender('female')}
-                        className={`py-2.5 px-3 rounded-xl text-xs font-bold border transition cursor-pointer ${
+                        className={`py-3 px-3 rounded-xl text-xs font-bold border transition cursor-pointer ${
                           regGender === 'female'
-                            ? 'bg-gradient-to-r from-[#E11D48] to-rose-600 text-white border-rose-500 shadow-xs'
-                            : 'bg-[#171A26] text-zinc-300 border-white/10 hover:border-rose-500/50'
+                            ? 'bg-gradient-to-r from-[#E11D48] to-rose-600 text-white border-rose-400 shadow-[0_6px_18px_rgba(225,29,72,0.35)]'
+                            : 'bg-[#10121B] text-zinc-200 border-white/15 hover:border-rose-500/60 hover:text-white'
                         }`}
                       >
                         Ayol / Qiz
@@ -5255,11 +5356,12 @@ export default function App() {
                       <button
                         type="button"
                         data-testid="setup-gender-male"
+                        aria-pressed={regGender === 'male'}
                         onClick={() => setRegGender('male')}
-                        className={`py-2.5 px-3 rounded-xl text-xs font-bold border transition cursor-pointer ${
+                        className={`py-3 px-3 rounded-xl text-xs font-bold border transition cursor-pointer ${
                           regGender === 'male'
-                            ? 'bg-white text-zinc-950 border-white shadow-xs'
-                            : 'bg-[#171A26] text-zinc-300 border-white/10 hover:border-white/30'
+                            ? 'bg-gradient-to-r from-sky-500 to-blue-600 text-white border-sky-400 shadow-[0_6px_18px_rgba(14,165,233,0.35)]'
+                            : 'bg-[#10121B] text-zinc-200 border-white/15 hover:border-sky-400/60 hover:text-white'
                         }`}
                       >
                         Erkak / Yigit
@@ -5610,7 +5712,10 @@ export default function App() {
                           </p>
                           <p className="text-sm font-bold text-white truncate">{setupDisplayName}</p>
                           <p className="text-[10.5px] font-semibold text-emerald-300/85">
-                            Jins: {genderToUzLabel(regGender)} ({pendingFaceId?.confidence ?? 95}%)
+                            Jins:{' '}
+                            <span className={regGender ? 'text-emerald-300' : 'text-amber-300'}>
+                              {regGender ? genderToUzLabel(regGender) : 'Quyida tanlang *'}
+                            </span>
                           </p>
                         </div>
                       </>
@@ -5654,20 +5759,31 @@ export default function App() {
                     </div>
                   </div>
 
-                  <div>
-                    <div className="flex items-center justify-between mb-1">
-                      <label className="block text-[11px] font-bold text-zinc-300">Jinsingiz (Birlamchi)</label>
-                      <span className="text-[10px] text-zinc-500">Face ID xato tanlagan bo'lsa o'zgartiring</span>
+                  <div className="p-3 rounded-2xl bg-[#171A26]/90 border border-white/15 space-y-2">
+                    <div className="flex items-center justify-between">
+                      <label className="block text-xs font-bold text-white">
+                        Jinsingizni tanlang <span className="text-rose-400">*</span>
+                      </label>
+                      <span
+                        className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${
+                          regGender
+                            ? 'bg-emerald-500/15 text-emerald-300'
+                            : 'bg-rose-500/15 text-rose-300'
+                        }`}
+                      >
+                        {regGender ? 'Tanlandi ✓' : 'Majburiy'}
+                      </span>
                     </div>
-                    <div className="grid grid-cols-2 gap-2">
+                    <div className="grid grid-cols-2 gap-2.5">
                       <button
                         type="button"
                         data-testid="tg-setup-gender-female"
+                        aria-pressed={regGender === 'female'}
                         onClick={() => setRegGender('female')}
-                        className={`py-2.5 px-3 rounded-xl text-xs font-bold border transition cursor-pointer ${
+                        className={`py-3 px-3 rounded-xl text-xs font-bold border transition cursor-pointer ${
                           regGender === 'female'
-                            ? 'bg-gradient-to-r from-[#E11D48] to-rose-600 text-white border-rose-500 shadow-xs'
-                            : 'bg-[#171A26] text-zinc-300 border-white/10 hover:border-rose-500/50'
+                            ? 'bg-gradient-to-r from-[#E11D48] to-rose-600 text-white border-rose-400 shadow-[0_6px_18px_rgba(225,29,72,0.35)]'
+                            : 'bg-[#10121B] text-zinc-200 border-white/15 hover:border-rose-500/60 hover:text-white'
                         }`}
                       >
                         Ayol / Qiz
@@ -5675,11 +5791,12 @@ export default function App() {
                       <button
                         type="button"
                         data-testid="tg-setup-gender-male"
+                        aria-pressed={regGender === 'male'}
                         onClick={() => setRegGender('male')}
-                        className={`py-2.5 px-3 rounded-xl text-xs font-bold border transition cursor-pointer ${
+                        className={`py-3 px-3 rounded-xl text-xs font-bold border transition cursor-pointer ${
                           regGender === 'male'
-                            ? 'bg-white text-zinc-950 border-white shadow-xs'
-                            : 'bg-[#171A26] text-zinc-300 border-white/10 hover:border-white/30'
+                            ? 'bg-gradient-to-r from-sky-500 to-blue-600 text-white border-sky-400 shadow-[0_6px_18px_rgba(14,165,233,0.35)]'
+                            : 'bg-[#10121B] text-zinc-200 border-white/15 hover:border-sky-400/60 hover:text-white'
                         }`}
                       >
                         Erkak / Yigit
@@ -5822,7 +5939,7 @@ export default function App() {
                         <span>Saqlanmoqda...</span>
                       </>
                     ) : (
-                      <span>Platformaga kirish</span>
+                      <span>Profilni yaratish va boshlash</span>
                     )}
                   </button>
 
@@ -5843,36 +5960,30 @@ export default function App() {
                   </div>
                 </div>
 
-                {/* Animated Tab Switcher */}
-                <div className="grid grid-cols-2 p-1 bg-[#171A26] border border-white/[0.08] rounded-2xl relative">
+                {/* Tab Switcher */}
+                <div className="grid grid-cols-2 gap-1 p-1 bg-[#171A26] border border-white/[0.08] rounded-2xl">
                   <button 
                     type="button"
                     data-testid="auth-tab-login"
                     onClick={() => { resetAuthFormState(); setAuthMode('login'); }}
-                    className={`relative py-2.5 rounded-xl text-xs font-bold transition-colors z-10 cursor-pointer ${authMode === 'login' ? 'text-white' : 'text-zinc-400 hover:text-white'}`}
+                    className={`py-2.5 rounded-xl text-xs font-bold transition-all cursor-pointer ${
+                      authMode === 'login'
+                        ? 'bg-gradient-to-r from-[#E11D48] to-rose-600 text-white shadow-sm'
+                        : 'text-zinc-400 hover:text-white'
+                    }`}
                   >
-                    {authMode === 'login' && (
-                      <motion.span
-                        layoutId="authModePill"
-                        transition={{ type: 'spring', stiffness: 420, damping: 32 }}
-                        className="absolute inset-0 rounded-xl bg-gradient-to-r from-[#E11D48] to-rose-600 shadow-sm -z-10"
-                      />
-                    )}
                     Kirish
                   </button>
                   <button 
                     type="button"
                     data-testid="auth-tab-register"
                     onClick={() => { resetAuthFormState(); setAuthMode('register'); }}
-                    className={`relative py-2.5 rounded-xl text-xs font-bold transition-colors z-10 cursor-pointer ${authMode === 'register' ? 'text-white' : 'text-zinc-400 hover:text-white'}`}
+                    className={`py-2.5 rounded-xl text-xs font-bold transition-all cursor-pointer ${
+                      authMode === 'register'
+                        ? 'bg-gradient-to-r from-[#E11D48] to-rose-600 text-white shadow-sm'
+                        : 'text-zinc-400 hover:text-white'
+                    }`}
                   >
-                    {authMode === 'register' && (
-                      <motion.span
-                        layoutId="authModePill"
-                        transition={{ type: 'spring', stiffness: 420, damping: 32 }}
-                        className="absolute inset-0 rounded-xl bg-gradient-to-r from-[#E11D48] to-rose-600 shadow-sm -z-10"
-                      />
-                    )}
                     Ro'yxatdan o'tish
                   </button>
                 </div>
@@ -6903,11 +7014,19 @@ export default function App() {
               userName={getSafeUserDisplayName(currentUser, currentUser.name || 'Foydalanuvchi')}
               onVerified={async (result) => {
                 const facePhoto = result.photoUrl || result.photoDataUrl;
+                const preservedGender =
+                  currentUser.gender === 'male' || currentUser.gender === 'female'
+                    ? currentUser.gender
+                    : (result.userSelectedGender || currentUser.gender);
                 const updatedUser = {
                   ...currentUser,
                   avatar: facePhoto,
-                  gender: result.detectedGender,
-                  faceId: result.faceId,
+                  gender: preservedGender,
+                  faceId: {
+                    ...result.faceId,
+                    detectedGender: preservedGender || result.faceId?.detectedGender || null,
+                    genderLabelUz: preservedGender ? genderToUzLabel(preservedGender) : result.faceId?.genderLabelUz,
+                  },
                   isVerified: true,
                 };
                 const syncData = await safeFetchJson(getApiUrl('/api/users/sync'), {

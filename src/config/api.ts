@@ -11,6 +11,18 @@ export const getBaseUrl = (): string => {
     if (customBackend && customBackend.trim().startsWith('http')) {
       return customBackend.trim().replace(/\/$/, '');
     }
+    const host = window.location.hostname;
+    const isSameOriginFullStack =
+      host === 'localhost' ||
+      host === '127.0.0.1' ||
+      host.endsWith('.onrender.com') ||
+      host.endsWith('.run.app') ||
+      host.endsWith('.usercontent.goog') ||
+      host === 'alov.uz' ||
+      host === 'www.alov.uz';
+    if (isSameOriginFullStack) {
+      return window.location.origin;
+    }
     const envBackend = (import.meta as any).env?.VITE_API_URL || (import.meta as any).env?.VITE_BACKEND_URL;
     if (envBackend && typeof envBackend === 'string' && envBackend.trim().startsWith('http')) {
       return envBackend.trim().replace(/\/$/, '');

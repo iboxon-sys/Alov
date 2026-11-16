@@ -137,3 +137,12 @@ export function isPostVisibleToViewer(
   return viewerGender !== authorGender;
 }
 
+export function isPostCommentsOpen(
+  expandedComments: Record<string, boolean> | null | undefined,
+  postId: string
+): boolean {
+  if (!expandedComments || !postId) return false;
+  return Boolean(expandedComments[postId]);
+}
+
+

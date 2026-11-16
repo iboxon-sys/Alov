@@ -144,6 +144,13 @@ export function extractYouTubeVideoId(url: string): { id: string; isShorts: bool
   return null;
 }
 
+export function buildAutoplayYouTubeEmbedUrl(rawUrl: string): string | null {
+  const normalized = normalizeMediaUrlInput(rawUrl);
+  const yt = extractYouTubeVideoId(normalized);
+  if (!yt) return null;
+  return `https://www.youtube.com/embed/${yt.id}?autoplay=1&mute=1&loop=1&playlist=${yt.id}&playsinline=1&rel=0&modestbranding=1`;
+}
+
 export function parseMediaLink(
   rawUrl: string,
   preferredType?: 'photo' | 'video' | 'music' | 'text'

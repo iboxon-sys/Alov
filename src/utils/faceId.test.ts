@@ -6,7 +6,9 @@ import {
   createBlinkTrackerState,
   updateBlinkTracker,
   computeSmileMetrics,
+  genderToUzLabel,
   resolveDetectedGender,
+  resolvePostFaceIdGender,
   requiresFaceIdForUser,
   resolveEffectiveProfileAvatar,
   type FacePoint,
@@ -142,5 +144,17 @@ describe('faceId pure biometric helpers', () => {
       }),
       '/api/telegram/avatar/123'
     );
+  });
+
+  it('requires explicit post-Face-ID gender selection and never defaults to female', () => {
+    assert.equal(resolvePostFaceIdGender({}), '');
+    assert.equal(resolvePostFaceIdGender({ explicitSelection: null, existingCompletedGender: '' }), '');
+    assert.equal(resolvePostFaceIdGender({ explicitSelection: 'male' }), 'male');
+    assert.equal(resolvePostFaceIdGender({ explicitSelection: 'female' }), 'female');
+    assert.equal(resolvePostFaceIdGender({ explicitSelection: '', existingCompletedGender: 'male' }), 'male');
+    assert.equal(genderToUzLabel(''), 'Tanlanmagan');
+    assert.equal(genderToUzLabel(null), 'Tanlanmagan');
+    assert.equal(genderToUzLabel('male'), 'Yigit (Erkak)');
+    assert.equal(genderToUzLabel('female'), 'Qiz (Ayol)');
   });
 });

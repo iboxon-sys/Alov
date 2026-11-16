@@ -4,6 +4,7 @@ import {
   parseMediaLink,
   parseAudioFilenameMetadata,
   normalizeMediaUrlInput,
+  buildAutoplayYouTubeEmbedUrl,
   CURATED_MUSIC_CATALOG,
 } from './mediaLinks';
 
@@ -23,6 +24,18 @@ describe('Universal media links & music catalog helpers', () => {
     const watch = parseMediaLink('https://www.youtube.com/watch?v=dQw4w9WgXcQ');
     assert.equal(watch.provider, 'youtube');
     assert.equal(watch.isVertical, false);
+
+    const promo = parseMediaLink('https://youtu.be/KE1-tslT2DM?si=b_eI_Ppp__ojU9uo', 'video');
+    assert.equal(promo.provider, 'youtube');
+    assert.equal(promo.kind, 'embed_iframe');
+    assert.equal(promo.isVertical, false);
+    assert.equal(promo.embedUrl, 'https://www.youtube.com/embed/KE1-tslT2DM?playsinline=1&rel=0&modestbranding=1');
+
+    const autoplayPromo = buildAutoplayYouTubeEmbedUrl('https://youtu.be/KE1-tslT2DM?si=b_eI_Ppp__ojU9uo');
+    assert.equal(
+      autoplayPromo,
+      'https://www.youtube.com/embed/KE1-tslT2DM?autoplay=1&mute=1&loop=1&playlist=KE1-tslT2DM&playsinline=1&rel=0&modestbranding=1'
+    );
   });
 
   it('parses TikTok, Instagram Reels, Facebook, Vimeo, Telegram, SoundCloud, Spotify', () => {

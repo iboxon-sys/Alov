@@ -26,7 +26,8 @@ import {
 export interface FaceIdVerificationResult {
   photoUrl: string;
   photoDataUrl: string;
-  detectedGender: 'male' | 'female';
+  detectedGender: 'male' | 'female' | null;
+  userSelectedGender?: 'male' | 'female' | null;
   confidence: number;
   faceId: FaceIdProfileData;
 }
@@ -130,7 +131,8 @@ export const FaceIdVerificationModal: React.FC<FaceIdVerificationModalProps> = (
 
   const [phase, setPhase] = useState<'scanning' | 'verified_ready' | 'captured_preview'>('scanning');
   const [capturedPhotoDataUrl, setCapturedPhotoDataUrl] = useState<string>('');
-  const [detectedGender, setDetectedGender] = useState<'male' | 'female'>('female');
+  const [detectedGender, setDetectedGender] = useState<'male' | 'female' | null>(null);
+  const [userSelectedGender, setUserSelectedGender] = useState<'male' | 'female' | null>(null);
   const [genderConfidence, setGenderConfidence] = useState<number>(88);
   const [isSaving, setIsSaving] = useState(false);
   const [isAnalyzingServer, setIsAnalyzingServer] = useState(false);
@@ -503,14 +505,15 @@ export const FaceIdVerificationModal: React.FC<FaceIdVerificationModalProps> = (
     // Optional server Gemini vision confirmation
     setIsAnalyzingServer(true);
     try {
-      const localResolved = resolveDetectedGender(genderVotesRef.current);
+      const hasLocalVotes = genderVotesRef.current.length > 0;
+      const localResolved = hasLocalVotes ? resolveDetectedGender(genderVotesRef.current) : null;
       const res = await fetch(`${apiBaseUrl}/api/face-id/analyze`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           imageBase64: dataUrl,
-          localGender: localResolved.gender,
-          localConfidence: localResolved.confidence,
+          localGender: localResolved?.gender || null,
+          localConfidence: localResolved?.confidence || 88,
         }),
       });
       const data = await res.json();
@@ -523,7 +526,7 @@ export const FaceIdVerificationModal: React.FC<FaceIdVerificationModalProps> = (
         setGenderConfidence(merged.confidence);
       }
     } catch {
-      // Keep on-device resolved gender seamlessly
+      // Do not force any fallback gender if detection is unavailable
     } finally {
       if (mountedRef.current) setIsAnalyzingServer(false);
     }
@@ -542,6 +545,7 @@ export const FaceIdVerificationModal: React.FC<FaceIdVerificationModalProps> = (
 
   const handleConfirmAndSave = async () => {
     if (!capturedPhotoDataUrl) return;
+    const confirmedOrSelected = userSelectedGender;
     setIsSaving(true);
     try {
       const res = await fetch(`${apiBaseUrl}/api/face-id/save`, {
@@ -550,7 +554,7 @@ export const FaceIdVerificationModal: React.FC<FaceIdVerificationModalProps> = (
         body: JSON.stringify({
           uid: userUid,
           photoDataUrl: capturedPhotoDataUrl,
-          detectedGender,
+          detectedGender: confirmedOrSelected,
           confidence: genderConfidence,
           blinkVerified: true,
           smileVerified: true,
@@ -561,8 +565,8 @@ export const FaceIdVerificationModal: React.FC<FaceIdVerificationModalProps> = (
       const photoUrl = data?.photoUrl || capturedPhotoDataUrl;
       const faceId: FaceIdProfileData = data?.faceId || {
         verified: true,
-        detectedGender,
-        genderLabelUz: genderToUzLabel(detectedGender),
+        detectedGender: confirmedOrSelected,
+        genderLabelUz: confirmedOrSelected ? genderToUzLabel(confirmedOrSelected) : '',
         confidence: genderConfidence,
         liveness: {
           blinkVerified: true,
@@ -577,15 +581,16 @@ export const FaceIdVerificationModal: React.FC<FaceIdVerificationModalProps> = (
       onVerified({
         photoUrl,
         photoDataUrl: capturedPhotoDataUrl,
-        detectedGender,
+        detectedGender: confirmedOrSelected,
+        userSelectedGender: confirmedOrSelected,
         confidence: genderConfidence,
         faceId,
       });
     } catch {
       const fallbackFaceId: FaceIdProfileData = {
         verified: true,
-        detectedGender,
-        genderLabelUz: genderToUzLabel(detectedGender),
+        detectedGender: confirmedOrSelected,
+        genderLabelUz: confirmedOrSelected ? genderToUzLabel(confirmedOrSelected) : '',
         confidence: genderConfidence,
         liveness: {
           blinkVerified: true,
@@ -600,7 +605,8 @@ export const FaceIdVerificationModal: React.FC<FaceIdVerificationModalProps> = (
       onVerified({
         photoUrl: capturedPhotoDataUrl,
         photoDataUrl: capturedPhotoDataUrl,
-        detectedGender,
+        detectedGender: confirmedOrSelected,
+        userSelectedGender: confirmedOrSelected,
         confidence: genderConfidence,
         faceId: fallbackFaceId,
       });
@@ -717,7 +723,7 @@ export const FaceIdVerificationModal: React.FC<FaceIdVerificationModalProps> = (
                 data-testid="faceid-detected-gender"
                 className="px-2.5 py-1.5 rounded-full bg-white/92 backdrop-blur-md text-[#221719] text-[10.5px] font-extrabold shadow-sm"
               >
-                {detectedGender === 'female' ? 'Qiz' : 'Yigit'} · {genderConfidence}%
+                {isGreenVerified ? 'Jonli tasdiqlandi ✓' : 'Yuz aniqlandi'}
               </div>
             )}
           </div>
@@ -791,11 +797,9 @@ export const FaceIdVerificationModal: React.FC<FaceIdVerificationModalProps> = (
           <div className="bg-emerald-50 border border-emerald-200 rounded-2xl px-3.5 py-2.5 flex items-center justify-between text-xs">
             <div className="flex items-center gap-2 text-emerald-900 font-bold">
               <Sparkles className="w-4 h-4 text-emerald-600 shrink-0" />
-              <span>Avtomatik aniqlangan jins:</span>
+              <span>Jonlilik tekshiruvi muvaffaqiyatli o'tdi!</span>
             </div>
-            <span className="font-black text-emerald-700">
-              {genderToUzLabel(detectedGender)} ({genderConfidence}%)
-            </span>
+            <span className="font-black text-emerald-700">100% Real</span>
           </div>
 
           <button
@@ -810,19 +814,21 @@ export const FaceIdVerificationModal: React.FC<FaceIdVerificationModalProps> = (
         </div>
       )}
 
-      {/* Captured Photo Preview -> Retake, Correct Gender if needed, or Confirm */}
+      {/* Captured Photo Preview -> Retake, Optional Gender Select, or Confirm */}
       {phase === 'captured_preview' && (
         <div className="space-y-3">
           <div className="bg-[#FAF4F2] border border-rose-200/70 rounded-2xl p-3 space-y-2.5 text-xs">
             <div className="flex items-center justify-between gap-2">
               <div>
                 <p className="font-bold text-[#221719]">
-                  Aniqlangan jins: <span className="text-[#C93545]">{genderToUzLabel(detectedGender)}</span>
+                  {userSelectedGender
+                    ? <>Tanlangan jins: <span className="text-[#C93545]">{genderToUzLabel(userSelectedGender)}</span></>
+                    : "Jinsingizni tanlang"}
                 </p>
                 <p className="text-[11px] text-[#6B5B5E]">
                   {isAnalyzingServer
-                    ? "Biometrik aniqlik tekshirilmoqda..."
-                    : `Ishonchlilik: ${genderConfidence}% · Noto'g'ri bo'lsa quyida to'g'rilang`}
+                    ? "Biometrik rasm tayyorlanmoqda..."
+                    : "O'zingizga mos tugmani tanlang (keyingi oynada ham tanlash mumkin)"}
                 </p>
               </div>
               <ShieldCheck className="w-5 h-5 text-emerald-600 shrink-0" />
@@ -832,9 +838,9 @@ export const FaceIdVerificationModal: React.FC<FaceIdVerificationModalProps> = (
               <button
                 type="button"
                 data-testid="faceid-gender-female"
-                onClick={() => setDetectedGender('female')}
+                onClick={() => setUserSelectedGender('female')}
                 className={`py-2 px-3 rounded-xl text-xs font-bold border transition cursor-pointer ${
-                  detectedGender === 'female'
+                  userSelectedGender === 'female'
                     ? 'bg-[#C93545] text-white border-[#C93545] shadow-xs'
                     : 'bg-white text-[#36272A] border-[#E5D9D6] hover:border-[#C93545]/50'
                 }`}
@@ -844,9 +850,9 @@ export const FaceIdVerificationModal: React.FC<FaceIdVerificationModalProps> = (
               <button
                 type="button"
                 data-testid="faceid-gender-male"
-                onClick={() => setDetectedGender('male')}
+                onClick={() => setUserSelectedGender('male')}
                 className={`py-2 px-3 rounded-xl text-xs font-bold border transition cursor-pointer ${
-                  detectedGender === 'male'
+                  userSelectedGender === 'male'
                     ? 'bg-[#221719] text-white border-[#221719] shadow-xs'
                     : 'bg-white text-[#36272A] border-[#E5D9D6] hover:border-[#221719]/50'
                 }`}

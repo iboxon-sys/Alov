@@ -7,8 +7,8 @@ export interface FacePoint {
 
 export interface FaceIdProfileData {
   verified: boolean;
-  detectedGender: 'male' | 'female';
-  genderLabelUz: string;
+  detectedGender?: 'male' | 'female' | null;
+  genderLabelUz?: string;
   confidence: number;
   liveness: {
     blinkVerified: boolean;
@@ -159,8 +159,23 @@ export function computeSmileMetrics(
   };
 }
 
-export function genderToUzLabel(gender: 'male' | 'female'): string {
-  return gender === 'female' ? 'Qiz (Ayol)' : 'Yigit (Erkak)';
+export function genderToUzLabel(gender?: 'male' | 'female' | null | ''): string {
+  if (gender === 'female') return 'Qiz (Ayol)';
+  if (gender === 'male') return 'Yigit (Erkak)';
+  return 'Tanlanmagan';
+}
+
+export function resolvePostFaceIdGender(params: {
+  explicitSelection?: 'male' | 'female' | null | '';
+  existingCompletedGender?: 'male' | 'female' | null | '';
+}): 'male' | 'female' | '' {
+  if (params.existingCompletedGender === 'male' || params.existingCompletedGender === 'female') {
+    return params.existingCompletedGender;
+  }
+  if (params.explicitSelection === 'male' || params.explicitSelection === 'female') {
+    return params.explicitSelection;
+  }
+  return '';
 }
 
 export function resolveDetectedGender(

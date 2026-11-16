@@ -16,6 +16,9 @@ import {
 } from 'lucide-react';
 import { GenderStatsBar } from './components/GenderStatsBar';
 import { SpringPetalsBackground } from './components/SpringPetalsBackground';
+import { buildAutoplayYouTubeEmbedUrl } from './utils/mediaLinks';
+
+const LANDING_PROMO_VIDEO_URL = 'https://youtu.be/KE1-tslT2DM?si=b_eI_Ppp__ojU9uo';
 
 interface LandingPageProps {
   onLogin: () => void;
@@ -24,6 +27,7 @@ interface LandingPageProps {
 export const LandingPage: React.FC<LandingPageProps> = ({ onLogin }) => {
   const [heroImgError, setHeroImgError] = useState(false);
   const [communityImgError, setCommunityImgError] = useState(false);
+  const promoAutoplayUrl = buildAutoplayYouTubeEmbedUrl(LANDING_PROMO_VIDEO_URL);
 
   return (
     <div className="relative min-h-screen bg-[#09090D] text-[#F4F4F6] font-sans selection:bg-rose-500/30 selection:text-rose-200 overflow-x-clip">
@@ -51,6 +55,9 @@ export const LandingPage: React.FC<LandingPageProps> = ({ onLogin }) => {
           </a>
 
           <nav className="hidden md:flex items-center gap-8 text-sm font-medium text-zinc-300">
+            <a href="#video" className="hover:text-white transition-colors whitespace-nowrap shrink-0">
+              Video
+            </a>
             <a href="#afzalliklar" className="hover:text-white transition-colors whitespace-nowrap shrink-0">
               Afzalliklar
             </a>
@@ -79,14 +86,14 @@ export const LandingPage: React.FC<LandingPageProps> = ({ onLogin }) => {
 
       <main className="max-w-6xl mx-auto px-4 sm:px-8 pt-24 sm:pt-32 pb-20 space-y-20 sm:space-y-28 relative z-20">
         {/* Hero Section */}
-        <section className="grid grid-cols-1 lg:grid-cols-12 gap-10 lg:gap-12 items-stretch">
-          <div className="lg:col-span-7 flex flex-col justify-center space-y-6 text-left">
+        <section className="grid grid-cols-1 lg:grid-cols-12 gap-10 lg:gap-12 items-center">
+          <div className="lg:col-span-6 flex flex-col justify-center space-y-6 text-left">
             <p className="text-xs font-semibold uppercase tracking-[0.18em] text-rose-400">
               O'zbekiston · Web va Telegram Mini App
             </p>
 
             <h1
-              className="text-4xl sm:text-5xl lg:text-[62px] font-editorial font-bold text-white leading-[1.06] tracking-tight"
+              className="text-4xl sm:text-5xl lg:text-[58px] font-editorial font-bold text-white leading-[1.06] tracking-tight"
               style={{ textWrap: 'balance' }}
             >
               Samimiy insonlar bilan <span className="italic text-rose-500">haqiqiy</span> uchrashuvlar
@@ -129,37 +136,34 @@ export const LandingPage: React.FC<LandingPageProps> = ({ onLogin }) => {
             </div>
           </div>
 
-          {/* Hero Visual Card */}
-          <div className="lg:col-span-5 flex">
-            <div className="relative w-full rounded-[28px] overflow-hidden border border-white/15 shadow-[0_28px_70px_rgba(0,0,0,0.75)] bg-[#14161F] min-h-[380px] flex flex-col">
-              {!heroImgError ? (
-                <picture className="block w-full h-full flex-1 min-h-[380px]">
-                  <source srcSet="/assets/images/hero_spring_dating_1794157256006.webp" type="image/webp" />
-                  <img
-                    src="/assets/images/hero_spring_dating_1794157256006.webp"
-                    alt="Alov.uz samimiy tanishuv"
-                    referrerPolicy="no-referrer"
-                    fetchPriority="high"
-                    decoding="async"
-                    width={640}
-                    height={520}
-                    className="w-full h-full min-h-[380px] object-cover"
-                    onError={() => setHeroImgError(true)}
+          {/* Hero Auto-Playing Promo Video Card */}
+          <div id="video" data-testid="landing-hero-video" className="lg:col-span-6 scroll-mt-24 flex">
+            <div className="relative w-full rounded-[28px] overflow-hidden border border-white/15 shadow-[0_28px_70px_rgba(0,0,0,0.75)] bg-[#12131B] flex flex-col">
+              {promoAutoplayUrl ? (
+                <div className="relative aspect-video w-full bg-black">
+                  <iframe
+                    src={promoAutoplayUrl}
+                    title="Alov.uz taqdimot videosi"
+                    data-testid="landing-promo-iframe"
+                    className="w-full h-full border-0"
+                    allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
+                    referrerPolicy="strict-origin-when-cross-origin"
+                    allowFullScreen
                   />
-                </picture>
+                </div>
               ) : (
-                <div className="w-full h-full min-h-[380px] bg-gradient-to-br from-[#28121B] via-[#181A22] to-[#111218] flex flex-col items-center justify-center p-8 text-center">
-                  <Heart className="w-12 h-12 text-rose-500 mb-3" />
+                <div className="aspect-video w-full bg-gradient-to-br from-[#28121B] via-[#181A22] to-[#111218] flex flex-col items-center justify-center p-8 text-center">
+                  <Video className="w-12 h-12 text-rose-500 mb-3" />
                   <p className="font-editorial text-2xl font-bold text-white">Alov.uz</p>
                 </div>
               )}
 
-              <div className="absolute inset-x-0 bottom-0 bg-gradient-to-t from-[#09090D] via-[#09090D]/75 to-transparent p-6 sm:p-7 text-white text-left space-y-1.5">
+              <div className="p-5 sm:p-6 bg-[#12131B] border-t border-white/10 text-left space-y-1">
                 <p className="text-[11px] font-semibold uppercase tracking-[0.14em] text-rose-400">
-                  Jonli efirlar va suhbatlar
+                  Platforma taqdimoti
                 </p>
-                <p className="font-editorial text-2xl sm:text-[26px] font-semibold text-white leading-snug">
-                  Toshkent, Samarqand, Andijon va barcha hududlar
+                <p className="font-editorial text-xl sm:text-2xl font-semibold text-white leading-snug">
+                  Alov.uz qanday ishlashini tomosha qiling
                 </p>
               </div>
             </div>
@@ -183,6 +187,59 @@ export const LandingPage: React.FC<LandingPageProps> = ({ onLogin }) => {
             <div className="flex flex-col justify-center border-l border-white/10 pl-4">
               <span className="font-mono text-2xl sm:text-3xl font-bold text-emerald-400 tabular-nums">24/7</span>
               <span className="text-xs text-zinc-400 mt-1">Faol moderatsiya</span>
+            </div>
+          </div>
+        </section>
+
+        {/* Platform Visual Showcase Section (swapped with Hero image) */}
+        <section id="taqdimot" data-testid="landing-showcase-section" className="space-y-6 text-left">
+          <div className="flex flex-col sm:flex-row sm:items-end justify-between gap-4">
+            <div className="space-y-2 max-w-2xl">
+              <p className="text-xs font-semibold uppercase tracking-[0.16em] text-rose-400">
+                Samimiy hamjamiyat
+              </p>
+              <h2
+                className="text-3xl sm:text-4xl font-editorial font-bold text-white tracking-tight"
+                style={{ textWrap: 'balance' }}
+              >
+                Jonli efirlar va samimiy uchrashuvlar
+              </h2>
+            </div>
+            <p className="text-xs sm:text-sm text-zinc-400 max-w-sm leading-relaxed">
+              Ro'yxatdan o'tish, Face ID tekshiruvi va jonli muloqot imkoniyatlari bilan ishonchli tanishuv muhiti.
+            </p>
+          </div>
+
+          <div className="relative rounded-[28px] overflow-hidden border border-white/15 bg-[#12131B] shadow-[0_28px_70px_rgba(0,0,0,0.75)]">
+            {!heroImgError ? (
+              <picture className="block w-full h-[320px] sm:h-[440px] lg:h-[520px]">
+                <source srcSet="/assets/images/hero_spring_dating_1794157256006.webp" type="image/webp" />
+                <img
+                  src="/assets/images/hero_spring_dating_1794157256006.webp"
+                  alt="Alov.uz samimiy tanishuv"
+                  referrerPolicy="no-referrer"
+                  loading="lazy"
+                  decoding="async"
+                  width={1200}
+                  height={675}
+                  className="w-full h-full object-cover object-center"
+                  onError={() => setHeroImgError(true)}
+                />
+              </picture>
+            ) : (
+              <div className="w-full h-[320px] sm:h-[440px] bg-gradient-to-br from-[#28121B] via-[#181A22] to-[#111218] flex flex-col items-center justify-center p-8 text-center">
+                <Heart className="w-12 h-12 text-rose-500 mb-3" />
+                <p className="font-editorial text-2xl font-bold text-white">Alov.uz</p>
+              </div>
+            )}
+
+            <div className="absolute inset-x-0 bottom-0 bg-gradient-to-t from-[#09090D] via-[#09090D]/75 to-transparent p-6 sm:p-8 text-white text-left space-y-1.5">
+              <p className="text-[11px] font-semibold uppercase tracking-[0.14em] text-rose-400">
+                Jonli efirlar va suhbatlar
+              </p>
+              <p className="font-editorial text-2xl sm:text-3xl font-semibold text-white leading-snug">
+                Toshkent, Samarqand, Andijon va barcha hududlar
+              </p>
             </div>
           </div>
         </section>

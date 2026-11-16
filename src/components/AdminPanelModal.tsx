@@ -63,6 +63,7 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
   const [coinRequests, setCoinRequests] = useState<CoinPurchaseRequest[]>([]);
   const [transactions, setTransactions] = useState<any[]>([]);
   const [busyId, setBusyId] = useState<string | null>(null);
+  const [confirmPurgeNonAdmins, setConfirmPurgeNonAdmins] = useState(false);
   const [editingBalanceUid, setEditingBalanceUid] = useState<string | null>(null);
   const [balanceForm, setBalanceForm] = useState<{ coins: string; diamonds: string }>({ coins: '0', diamonds: '0' });
 
@@ -183,6 +184,30 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
             ? `Ariza tasdiqlandi va +${data.request?.coinAmount || ''} moneta hisobga qo'shildi`
             : 'Moneta xaridi arizasi rad etildi'
         );
+        await fetchOverview();
+      }
+    } catch (e: any) {
+      setError(e?.message || 'Tarmoq xatoligi');
+    } finally {
+      setBusyId(null);
+    }
+  };
+
+  const handlePurgeNonAdmins = async () => {
+    setBusyId('purge_non_admins');
+    setError('');
+    try {
+      const res = await fetch(`${apiBaseUrl}/api/admin/purge-non-admins`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ adminUid }),
+      });
+      const data = await res.json();
+      if (!data.success) {
+        setError(data.error || "Bazani tozalashda xatolik");
+      } else {
+        setNotice(`Admindan boshqa barcha (${data.removedUsersCount || 0} ta) profil bazadan chiqarildi.`);
+        setConfirmPurgeNonAdmins(false);
         await fetchOverview();
       }
     } catch (e: any) {
@@ -749,15 +774,49 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
                 transition={{ duration: 0.18 }}
                 className="space-y-3"
               >
-                <div className="relative">
-                  <Search className="w-4 h-4 text-zinc-400 absolute left-3.5 top-1/2 -translate-y-1/2" />
-                  <input
-                    type="text"
-                    value={searchQuery}
-                    onChange={(e) => setSearchQuery(e.target.value)}
-                    placeholder="Ism, @username, ID yoki telefon bo'yicha qidirish..."
-                    className="w-full pl-10 pr-4 py-3 rounded-2xl bg-[#12141E] border border-white/10 text-xs font-medium text-white placeholder:text-zinc-500 outline-none focus:border-rose-500"
-                  />
+                <div className="flex flex-col sm:flex-row gap-2">
+                  <div className="relative flex-1">
+                    <Search className="w-4 h-4 text-zinc-400 absolute left-3.5 top-1/2 -translate-y-1/2" />
+                    <input
+                      type="text"
+                      value={searchQuery}
+                      onChange={(e) => setSearchQuery(e.target.value)}
+                      placeholder="Ism, @username, ID yoki telefon bo'yicha qidirish..."
+                      className="w-full pl-10 pr-4 py-3 rounded-2xl bg-[#12141E] border border-white/10 text-xs font-medium text-white placeholder:text-zinc-500 outline-none focus:border-rose-500"
+                    />
+                  </div>
+                  {users.some((u) => u.uid !== adminUid && u.role !== 'admin') && (
+                    confirmPurgeNonAdmins ? (
+                      <div className="flex items-center gap-1.5 shrink-0">
+                        <button
+                          type="button"
+                          disabled={busyId === 'purge_non_admins'}
+                          onClick={handlePurgeNonAdmins}
+                          data-testid="admin-confirm-purge-btn"
+                          className="px-3.5 py-2.5 rounded-2xl bg-rose-600 hover:bg-rose-500 text-white text-xs font-bold transition cursor-pointer disabled:opacity-50"
+                        >
+                          {busyId === 'purge_non_admins' ? 'Tozalanmoqda...' : 'Ha, bazadan chiqarish'}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setConfirmPurgeNonAdmins(false)}
+                          className="px-3 py-2.5 rounded-2xl bg-white/10 hover:bg-white/15 text-zinc-300 text-xs font-semibold transition cursor-pointer"
+                        >
+                          Bekor
+                        </button>
+                      </div>
+                    ) : (
+                      <button
+                        type="button"
+                        onClick={() => setConfirmPurgeNonAdmins(true)}
+                        data-testid="admin-purge-non-admins-btn"
+                        className="px-4 py-2.5 rounded-2xl bg-rose-500/15 hover:bg-rose-500/25 border border-rose-500/30 text-rose-300 text-xs font-bold transition flex items-center justify-center gap-1.5 shrink-0 cursor-pointer"
+                      >
+                        <Trash2 className="w-3.5 h-3.5" />
+                        <span>Admindan boshqalarni chiqarish</span>
+                      </button>
+                    )
+                  )}
                 </div>
 
                 {filteredUsers.length === 0 ? (

@@ -22,7 +22,7 @@ import {
   Loader2,
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { PostItem, PostMediaType, formatPostTimeUz, isPostVisibleToViewer, validateNewPostDraft } from '../utils/posts';
+import { PostItem, PostMediaType, formatPostTimeUz, isPostVisibleToViewer, isPostCommentsOpen, validateNewPostDraft } from '../utils/posts';
 import { isUserOnlineStrict } from '../utils/presence';
 import {
   parseMediaLink,
@@ -1076,8 +1076,7 @@ export const PostsFeed: React.FC<PostsFeedProps> = ({
             const likes = Array.isArray(post.likes) ? post.likes : [];
             const isLiked = Boolean(currentUser?.uid && likes.includes(currentUser.uid));
             const comments = Array.isArray(post.comments) ? post.comments : [];
-            const showAllComments = Boolean(expandedComments[post.id]);
-            const displayedComments = showAllComments ? comments : comments.slice(-3);
+            const isCommentsOpen = isPostCommentsOpen(expandedComments, post.id);
 
             const canDelete = Boolean(
               currentUser &&
@@ -1311,41 +1310,40 @@ export const PostsFeed: React.FC<PostsFeedProps> = ({
                     onClick={() =>
                       setExpandedComments((prev) => ({ ...prev, [post.id]: !prev[post.id] }))
                     }
+                    aria-expanded={isCommentsOpen}
                     data-testid={`toggle-comments-btn-${post.id}`}
-                    className="flex items-center gap-1.5 text-xs font-bold py-1 px-2.5 rounded-xl text-zinc-400 hover:text-white hover:bg-white/[0.05] transition-colors cursor-pointer"
+                    className={`flex items-center gap-1.5 text-xs font-bold py-1 px-2.5 rounded-xl transition-colors cursor-pointer ${
+                      isCommentsOpen
+                        ? 'text-rose-400 bg-rose-500/15'
+                        : 'text-zinc-400 hover:text-white hover:bg-white/[0.05]'
+                    }`}
                   >
                     <MessageCircle className="w-4 h-4" />
                     <span className="tabular-nums">{comments.length} izoh</span>
                   </button>
                 </div>
 
-                {/* Comments Area */}
-                <div className="px-4 sm:px-5 py-3.5 bg-[#0D0F16] border-t border-white/[0.06] space-y-3">
-                  {comments.length > 3 && !showAllComments && (
-                    <button
-                      type="button"
-                      onClick={() => setExpandedComments((prev) => ({ ...prev, [post.id]: true }))}
-                      className="text-[11px] font-bold text-rose-400 hover:underline cursor-pointer"
-                    >
-                      Barcha {comments.length} ta izohni ko'rish
-                    </button>
-                  )}
-
-                  {displayedComments.length > 0 && (
-                    <div className="space-y-2">
-                      {displayedComments.map((c) => {
-                        const commentLiveUser =
-                          usersList.find((u) => u.uid === c.authorUid || (c.authorId && u.id === c.authorId)) ||
-                          (currentUser && (currentUser.uid === c.authorUid || currentUser.id === c.authorId)
-                            ? currentUser
-                            : null);
-                        const commentAvatar = resolveApiMediaUrl(
-                          commentLiveUser?.avatar ||
-                            c.authorAvatar ||
-                            `https://ui-avatars.com/api/?name=${encodeURIComponent(commentLiveUser?.name || c.authorName || 'U')}&background=1C1F2B&color=F4F4F6`
-                        );
-                        const commentName = commentLiveUser?.name || c.authorName || 'Foydalanuvchi';
-                        const commentUsername = commentLiveUser?.username || c.authorUsername || '';
+                {/* Collapsible Comments Area (hidden until user clicks the comment toggle button) */}
+                {isCommentsOpen && (
+                  <div
+                    data-testid={`comments-panel-${post.id}`}
+                    className="px-4 sm:px-5 py-3.5 bg-[#0D0F16] border-t border-white/[0.06] space-y-3"
+                  >
+                    {comments.length > 0 ? (
+                      <div className="space-y-2 max-h-[320px] overflow-y-auto pr-1">
+                        {comments.map((c) => {
+                          const commentLiveUser =
+                            usersList.find((u) => u.uid === c.authorUid || (c.authorId && u.id === c.authorId)) ||
+                            (currentUser && (currentUser.uid === c.authorUid || currentUser.id === c.authorId)
+                              ? currentUser
+                              : null);
+                          const commentAvatar = resolveApiMediaUrl(
+                            commentLiveUser?.avatar ||
+                              c.authorAvatar ||
+                              `https://ui-avatars.com/api/?name=${encodeURIComponent(commentLiveUser?.name || c.authorName || 'U')}&background=1C1F2B&color=F4F4F6`
+                          );
+                          const commentName = commentLiveUser?.name || c.authorName || 'Foydalanuvchi';
+                          const commentUsername = commentLiveUser?.username || c.authorUsername || '';
 
                         return (
                           <div
@@ -1426,32 +1424,37 @@ export const PostsFeed: React.FC<PostsFeedProps> = ({
                           </div>
                         );
                       })}
-                    </div>
-                  )}
+                      </div>
+                    ) : (
+                      <p className="text-[11px] text-zinc-500">
+                        Hali izohlar yo'q. Birinchi bo'lib fikringizni qoldiring.
+                      </p>
+                    )}
 
-                  {/* Comment Input Box */}
-                  <form onSubmit={(e) => handleAddComment(post.id, e)} className="flex items-center gap-2 pt-1">
-                    <input
-                      type="text"
-                      value={commentInputs[post.id] || ''}
-                      onChange={(e) =>
-                        setCommentInputs((prev) => ({ ...prev, [post.id]: e.target.value }))
-                      }
-                      placeholder={currentUser ? 'Fikringizni yozing...' : 'Izoh qoldirish uchun tizimga kiring...'}
-                      data-testid={`comment-input-${post.id}`}
-                      className="flex-1 px-3.5 py-2.5 bg-[#151822] border border-white/10 rounded-xl text-xs text-zinc-100 placeholder-zinc-500 focus:outline-none focus:border-rose-500"
-                    />
-                    <button
-                      type="submit"
-                      disabled={submittingCommentId === post.id || !(commentInputs[post.id] || '').trim()}
-                      data-testid={`comment-submit-${post.id}`}
-                      aria-label="Izoh yuborish"
-                      className="px-3.5 py-2.5 rounded-xl bg-[#E11D48] hover:bg-[#BE123C] text-white transition-colors disabled:opacity-40 flex items-center justify-center shrink-0 cursor-pointer"
-                    >
-                      <Send className="w-3.5 h-3.5" />
-                    </button>
-                  </form>
-                </div>
+                    {/* Comment Input Box */}
+                    <form onSubmit={(e) => handleAddComment(post.id, e)} className="flex items-center gap-2 pt-1">
+                      <input
+                        type="text"
+                        value={commentInputs[post.id] || ''}
+                        onChange={(e) =>
+                          setCommentInputs((prev) => ({ ...prev, [post.id]: e.target.value }))
+                        }
+                        placeholder={currentUser ? 'Fikringizni yozing...' : 'Izoh qoldirish uchun tizimga kiring...'}
+                        data-testid={`comment-input-${post.id}`}
+                        className="flex-1 px-3.5 py-2.5 bg-[#151822] border border-white/10 rounded-xl text-xs text-zinc-100 placeholder-zinc-500 focus:outline-none focus:border-rose-500"
+                      />
+                      <button
+                        type="submit"
+                        disabled={submittingCommentId === post.id || !(commentInputs[post.id] || '').trim()}
+                        data-testid={`comment-submit-${post.id}`}
+                        aria-label="Izoh yuborish"
+                        className="px-3.5 py-2.5 rounded-xl bg-[#E11D48] hover:bg-[#BE123C] text-white transition-colors disabled:opacity-40 flex items-center justify-center shrink-0 cursor-pointer"
+                      >
+                        <Send className="w-3.5 h-3.5" />
+                      </button>
+                    </form>
+                  </div>
+                )}
               </motion.article>
             );
           })}

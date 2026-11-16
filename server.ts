@@ -46,7 +46,7 @@ import {
 } from './src/utils/tokenomics';
 import { walletRepository } from './server/walletRepository';
 import { PresenceRegistry } from './src/utils/presence';
-import { telegramInputMatchesBotRecord } from './src/utils/profileLookup';
+import { canPersistUserProfile, telegramInputMatchesBotRecord } from './src/utils/profileLookup';
 import {
   togglePostLike,
   appendPostComment,
@@ -1876,19 +1876,24 @@ async function startServer() {
       const tgHandle = matchedBotUser?.username || (!/^\d+$/.test(cleanUsername) ? cleanUsername : '');
       const formattedTgUrl = tgHandle ? `https://t.me/${tgHandle}` : undefined;
 
-      // 2. Lookup existing user by any identifier
+      // 2. Lookup existing COMPLETED user (or admin) by any identifier
       let existingUser: any = null;
-      
+      const staleIncompleteUids: string[] = [];
+
       // Match by ChatID first
       if (userChatId) {
         for (const u of usersStore.values()) {
           if (u.telegramChatId && Number(u.telegramChatId) === Number(userChatId)) {
-            existingUser = u;
-            break;
+            if (canPersistUserProfile(u)) {
+              existingUser = u;
+              break;
+            } else {
+              staleIncompleteUids.push(u.uid);
+            }
           }
         }
       }
-      
+
       // Match by Phone/Username
       if (!existingUser) {
         for (const u of usersStore.values()) {
@@ -1897,13 +1902,22 @@ async function startServer() {
           const matchUsername = tgHandle && uTgClean === tgHandle;
           const matchPhone = cleanPhone && cleanPhone.length >= 9 && uPhoneClean.endsWith(cleanPhone.slice(-9));
           if (matchUsername || matchPhone) {
-            existingUser = u;
-            break;
+            if (canPersistUserProfile(u)) {
+              existingUser = u;
+              break;
+            } else {
+              staleIncompleteUids.push(u.uid);
+            }
           }
         }
       }
 
-      const isNewUser = !existingUser || !existingUser.isProfileCompleted;
+      if (staleIncompleteUids.length > 0) {
+        staleIncompleteUids.forEach((staleUid) => usersStore.delete(staleUid));
+        saveUsersToDisk();
+      }
+
+      const isNewUser = !existingUser || !canPersistUserProfile(existingUser);
       const uid = existingUser ? existingUser.uid : `tg_${tgHandle || cleanPhone || userChatId || rawInput}`;
 
       let user = existingUser;
@@ -1920,6 +1934,7 @@ async function startServer() {
       const formattedTgPhone = rawPhoneForTg ? formatPhoneNumberPretty(rawPhoneForTg) : undefined;
 
       if (!user) {
+        // Transient draft only: do NOT persist to usersStore or users_db.json until registration finishes
         user = {
           uid,
           id: `ALOV-TG-${uid.slice(0, 5).toUpperCase()}`,
@@ -1933,7 +1948,7 @@ async function startServer() {
           isAdmin: isAdminTelegramUser({ telegram: formattedTgUrl }),
           isVerified: isAdminTelegramUser({ telegram: formattedTgUrl }),
           age: 22,
-          gender: 'female',
+          gender: isAdminTelegramUser({ telegram: formattedTgUrl }) ? 'male' : '',
           region: 'Toshkent shahri',
           district: 'Yunusobod tumani',
           bio: '',
@@ -1951,9 +1966,11 @@ async function startServer() {
           isProfileCompleted: false
         };
         normalizeAndReleaseUser(user);
-        usersStore.set(uid, user);
-        saveUsersToDisk();
-        io.emit('user_updated', user);
+        if (canPersistUserProfile(user)) {
+          usersStore.set(uid, user);
+          saveUsersToDisk();
+          io.emit('user_updated', user);
+        }
       } else {
         if (botFullName && isPlaceholderOrUsername(user.name, tgHandle || cleanUsername, cleanPhone)) {
           user.name = botFullName;
@@ -2008,34 +2025,46 @@ async function startServer() {
       const cleanPhone = rawInput.replace(/\D/g, '');
 
       let matchedUser: any = null;
+      const staleIncompleteUids: string[] = [];
 
       for (const u of usersStore.values()) {
         const uEmail = (u.email || '').toLowerCase();
+        const uUsername = (u.username || '').replace(/^@/, '').toLowerCase();
         const uTg = (u.telegram || '').replace(/^(https?:\/\/t\.me\/|@)/i, '').toLowerCase();
         const uPhone = (u.phone || '').replace(/\D/g, '');
         const uName = (u.name || '').replace(/^@/, '').toLowerCase();
 
         if (
           (uEmail && uEmail === rawInput.toLowerCase()) ||
+          (cleanInput && uUsername && uUsername === cleanInput) ||
           (cleanInput && uTg === cleanInput) ||
           (cleanInput && uName === cleanInput) ||
           (cleanPhone && cleanPhone.length > 5 && uPhone === cleanPhone)
         ) {
-          matchedUser = u;
-          break;
+          if (canPersistUserProfile(u)) {
+            matchedUser = u;
+            break;
+          } else {
+            staleIncompleteUids.push(u.uid);
+          }
         }
+      }
+
+      if (staleIncompleteUids.length > 0) {
+        staleIncompleteUids.forEach((staleUid) => usersStore.delete(staleUid));
+        saveUsersToDisk();
       }
 
       if (!matchedUser) {
         return res.status(400).json({ 
           success: false, 
-          error: 'Bunday username, email yoki telefon raqami topilmadi. Iltimos, ro\'yxatdan o\'ting!' 
+          error: 'Bunday foydalanuvchi topilmadi yoki ro\'yxatdan o\'tish oxirigacha yakunlanmagan!' 
         });
       }
 
-      // Verify password if set on account
-      if (matchedUser.password && password) {
-        if (matchedUser.password !== password.toString().trim()) {
+      // Verify password strictly if set on account
+      if (matchedUser.password) {
+        if (!password || matchedUser.password !== password.toString().trim()) {
           return res.status(400).json({ success: false, error: 'Kiritilgan parol noto\'g\'ri!' });
         }
       }
@@ -2199,8 +2228,9 @@ Suhbatlashish qoidalaringiz:
 
   // Face ID Image Gender Confirmation & Liveness Analysis Endpoint
   app.post('/api/face-id/analyze', async (req, res) => {
-    const { imageBase64, localGender = 'female', localConfidence = 88 } = req.body || {};
-    const fallbackGender: 'male' | 'female' = localGender === 'male' ? 'male' : 'female';
+    const { imageBase64, localGender = null, localConfidence = 88 } = req.body || {};
+    const fallbackGender: 'male' | 'female' | null =
+      localGender === 'male' ? 'male' : localGender === 'female' ? 'female' : null;
     const fallbackConfidence = Math.max(70, Math.min(99, Number(localConfidence) || 88));
 
     if (!imageBase64 || typeof imageBase64 !== 'string' || !geminiApiKey) {
@@ -2247,7 +2277,7 @@ Suhbatlashish qoidalaringiz:
       });
 
       const parsed = JSON.parse((response.text || '{}').trim());
-      const aiGender: 'male' | 'female' =
+      const aiGender: 'male' | 'female' | null =
         String(parsed.gender || '').toLowerCase() === 'male' ? 'male' :
         String(parsed.gender || '').toLowerCase() === 'female' ? 'female' : fallbackGender;
       const aiConfidence = Math.max(75, Math.min(99, Number(parsed.confidence) || fallbackConfidence));
@@ -2288,11 +2318,17 @@ Suhbatlashish qoidalaringiz:
       fs.writeFileSync(filePath, Buffer.from(match[2], 'base64'));
 
       const photoUrl = `/api/face-id/photo/${fileName}`;
-      const normalizedGender: 'male' | 'female' = detectedGender === 'male' ? 'male' : 'female';
+      const normalizedGender: 'male' | 'female' | null =
+        detectedGender === 'male' ? 'male' : detectedGender === 'female' ? 'female' : null;
       const faceIdPayload = {
         verified: true,
         detectedGender: normalizedGender,
-        genderLabelUz: normalizedGender === 'female' ? 'Qiz (Ayol)' : 'Yigit (Erkak)',
+        genderLabelUz:
+          normalizedGender === 'female'
+            ? 'Qiz (Ayol)'
+            : normalizedGender === 'male'
+              ? 'Yigit (Erkak)'
+              : '',
         confidence: Math.max(72, Math.min(99, Number(confidence) || 92)),
         liveness: {
           blinkVerified: Boolean(blinkVerified),
@@ -2306,15 +2342,22 @@ Suhbatlashish qoidalaringiz:
 
       if (uid && usersStore.has(uid)) {
         const user = usersStore.get(uid);
-        user.avatar = photoUrl;
-        user.gender = normalizedGender;
-        user.faceId = faceIdPayload;
-        user.isVerified = true;
-        user.updatedAt = new Date().toISOString();
-        normalizeAndReleaseUser(user);
-        usersStore.set(uid, user);
-        saveUsersToDisk();
-        io.emit('user_updated', user);
+        if (canPersistUserProfile(user)) {
+          user.avatar = photoUrl;
+          if (!user.isProfileCompleted && normalizedGender) {
+            user.gender = normalizedGender;
+          }
+          user.faceId = {
+            ...faceIdPayload,
+            detectedGender: user.gender === 'male' || user.gender === 'female' ? user.gender : normalizedGender,
+          };
+          user.isVerified = true;
+          user.updatedAt = new Date().toISOString();
+          normalizeAndReleaseUser(user);
+          usersStore.set(uid, user);
+          saveUsersToDisk();
+          io.emit('user_updated', user);
+        }
       }
 
       return res.json({
@@ -2333,7 +2376,8 @@ Suhbatlashish qoidalaringiz:
   const liveStreamChatStore: Record<string, any[]> = {};
   const liveStreamsStore: Record<string, any> = {};
 
-  const DB_EPOCH = '2026-11-13-reset-v1';
+  const DB_EPOCH = '2026-11-16-reset-v3';
+  const DB_EPOCH_FILE = resolveDataFile('db_epoch.json');
 
   // Database starts clean (only @Salikh_07 platform admin remains; everyone else registers fresh)
   const initialUsers: any[] = [];
@@ -2416,6 +2460,10 @@ Suhbatlashish qoidalaringiz:
         if (Array.isArray(list)) {
           for (const u of list) {
             if (u && u.uid) {
+              normalizeAndReleaseUser(u);
+              if (!canPersistUserProfile(u)) {
+                continue;
+              }
               const tgHandle = normalizeTelegramHandle(u.telegram);
               const isTg = Boolean(u.telegramChatId || u.uid?.startsWith('tg_') || tgHandle);
               if (isTg) {
@@ -2433,7 +2481,6 @@ Suhbatlashish qoidalaringiz:
                   u.avatar = pickPreferredAvatar(botMatch?.avatar);
                 }
               }
-              normalizeAndReleaseUser(u);
               usersStore.set(u.uid, u);
               if (u.telegramChatId) {
                 registerBotUser(
@@ -2642,6 +2689,91 @@ Suhbatlashish qoidalaringiz:
   loadCoinRequestsFromDisk();
   loadPostsFromDisk();
 
+  function purgeNonAdminDatabaseData(): { removedUsersCount: number } {
+    let removedUsersCount = 0;
+    const adminUids = new Set<string>();
+    for (const [uid, u] of Array.from(usersStore.entries())) {
+      if (isAdminTelegramUser(u)) {
+        adminUids.add(uid);
+      } else {
+        usersStore.delete(uid);
+        removedUsersCount += 1;
+      }
+    }
+
+    // Ensure platform admin stays intact
+    if (adminUids.size === 0) {
+      loadUsersFromDisk();
+      for (const [uid, u] of usersStore.entries()) {
+        if (isAdminTelegramUser(u)) adminUids.add(uid);
+      }
+    }
+
+    // Remove non-admin posts, chats, messages, friendships, transactions, withdrawals, coin requests
+    for (let i = postsStore.length - 1; i >= 0; i--) {
+      if (!adminUids.has(postsStore[i].authorUid)) {
+        postsStore.splice(i, 1);
+      }
+    }
+    for (const chatId of Object.keys(userChatsStore)) {
+      const chat = userChatsStore[chatId];
+      const parts: string[] = Array.isArray(chat?.participants) ? chat.participants : [];
+      if (!parts.some((p) => adminUids.has(p)) || parts.some((p) => !adminUids.has(p))) {
+        delete userChatsStore[chatId];
+        delete chatMessagesStore[chatId];
+        delete chatFriendshipsStore[chatId];
+      }
+    }
+    for (const chatId of Object.keys(chatMessagesStore)) {
+      if (!userChatsStore[chatId]) delete chatMessagesStore[chatId];
+    }
+    for (const chatId of Object.keys(chatFriendshipsStore)) {
+      if (!userChatsStore[chatId]) delete chatFriendshipsStore[chatId];
+    }
+    for (let i = transactionsStore.length - 1; i >= 0; i--) {
+      const tx = transactionsStore[i];
+      if (!adminUids.has(tx.sender) && !adminUids.has(tx.receiver)) {
+        transactionsStore.splice(i, 1);
+      }
+    }
+    for (let i = withdrawalsStore.length - 1; i >= 0; i--) {
+      if (!adminUids.has(withdrawalsStore[i].userUid)) {
+        withdrawalsStore.splice(i, 1);
+      }
+    }
+    for (let i = coinRequestsStore.length - 1; i >= 0; i--) {
+      if (!adminUids.has(coinRequestsStore[i].userUid)) {
+        coinRequestsStore.splice(i, 1);
+      }
+    }
+
+    saveUsersToDisk();
+    savePostsToDisk();
+    saveChatsToDisk();
+    saveMessagesToDisk();
+    saveFriendshipsToDisk();
+    saveTransactionsToDisk();
+    saveWithdrawalsToDisk();
+    saveCoinRequestsToDisk();
+
+    return { removedUsersCount };
+  }
+
+  // One-time migration per DB_EPOCH: purge all non-admin/incomplete users on first boot of this epoch
+  try {
+    let currentDiskEpoch = '';
+    if (fs.existsSync(DB_EPOCH_FILE)) {
+      const parsedEpoch = JSON.parse(fs.readFileSync(DB_EPOCH_FILE, 'utf-8'));
+      currentDiskEpoch = String(parsedEpoch?.epoch || '');
+    }
+    if (currentDiskEpoch !== DB_EPOCH) {
+      purgeNonAdminDatabaseData();
+      fs.writeFileSync(DB_EPOCH_FILE, JSON.stringify({ epoch: DB_EPOCH, updatedAt: new Date().toISOString() }, null, 2), 'utf-8');
+    }
+  } catch (e) {
+    console.warn('Could not verify DB_EPOCH file:', e);
+  }
+
   // At server boot, 0 sockets are connected -> enforce true initial offline state for all users
   for (const [uid, u] of usersStore.entries()) {
     u.isOnline = false;
@@ -2723,15 +2855,22 @@ Suhbatlashish qoidalaringiz:
   // --- Users Endpoints ---
   app.get('/api/users', (_req, res) => {
     let releasedAny = false;
-    const users = Array.from(usersStore.values()).map((u) => {
+    let prunedAny = false;
+    const users: any[] = [];
+    for (const [uid, u] of usersStore.entries()) {
       const { unlockedAmount } = normalizeAndReleaseUser(u);
       if (unlockedAmount > 0) releasedAny = true;
+      if (!canPersistUserProfile(u)) {
+        usersStore.delete(uid);
+        prunedAny = true;
+        continue;
+      }
       const online = presenceRegistry.isUidOnline(u.uid);
       u.isOnline = online;
       u.status = online ? 'online' : 'offline';
-      return u;
-    });
-    if (releasedAny) saveUsersToDisk();
+      users.push(u);
+    }
+    if (releasedAny || prunedAny) saveUsersToDisk();
     const onlineUserIds = presenceRegistry.getOnlineUserIds();
     res.json({ success: true, users, onlineUserIds, onlineCount: onlineUserIds.length, dbEpoch: DB_EPOCH });
   });
@@ -2747,7 +2886,7 @@ Suhbatlashish qoidalaringiz:
         }
       }
     }
-    if (!found) {
+    if (!found || !canPersistUserProfile(found)) {
       return res.status(404).json({ success: false, error: 'Foydalanuvchi topilmadi' });
     }
     const online = presenceRegistry.isUidOnline(found.uid);
@@ -2829,7 +2968,7 @@ Suhbatlashish qoidalaringiz:
 
   app.post('/api/users/sync', async (req, res) => {
     try {
-      const { user } = req.body;
+      const { user, lookupOnly } = req.body;
       if (!user || !user.uid) {
         return res.status(400).json({ error: 'Valid user with uid required' });
       }
@@ -2883,6 +3022,33 @@ Suhbatlashish qoidalaringiz:
             }
           }
         }
+      }
+
+      if (canonicalUser && !canPersistUserProfile(canonicalUser)) {
+        usersStore.delete(canonicalUser.uid);
+        saveUsersToDisk();
+        canonicalUser = undefined;
+      }
+
+      if (lookupOnly === true) {
+        if (!canonicalUser) {
+          return res.json({ success: true, exists: false, isNewUser: true, user: null });
+        }
+        const online = presenceRegistry.isUidOnline(canonicalUser.uid);
+        canonicalUser.isOnline = online;
+        canonicalUser.status = online ? 'online' : 'offline';
+        return res.json({ success: true, exists: true, isNewUser: false, user: canonicalUser });
+      }
+
+      // Never create or persist an incomplete non-admin profile before final registration step
+      if (!canonicalUser && !canPersistUserProfile(user)) {
+        return res.status(400).json({
+          success: false,
+          exists: false,
+          isNewUser: true,
+          user: null,
+          error: "Profil yaratish uchun avval Face ID dan o'ting va barcha ma'lumotlarni to'ldiring!",
+        });
       }
 
       const existing = canonicalUser || {};
@@ -2974,10 +3140,21 @@ Suhbatlashish qoidalaringiz:
       };
 
       const isAlreadyCompleted = Boolean(existing?.isProfileCompleted === true);
+      const incomingGender = user.gender === 'male' || user.gender === 'female' ? user.gender : '';
+      const existingGender = existing.gender === 'male' || existing.gender === 'female' ? existing.gender : '';
+      if (!isAdminAccount && !isAlreadyCompleted && user.isProfileCompleted === true && !incomingGender) {
+        return res.status(400).json({
+          success: false,
+          exists: false,
+          isNewUser: true,
+          user: null,
+          error: "Iltimos, jinsingizni tanlang (Erkak / Yigit yoki Ayol / Qiz)!",
+        });
+      }
       const lockedGender =
-        isAlreadyCompleted && (existing.gender === 'male' || existing.gender === 'female')
-          ? existing.gender
-          : (user.gender || existing.gender || 'female');
+        isAlreadyCompleted && existingGender
+          ? existingGender
+          : incomingGender || existingGender;
       const lockedBirthDate =
         isAlreadyCompleted && existing.birthDate
           ? existing.birthDate
@@ -3021,6 +3198,15 @@ Suhbatlashish qoidalaringiz:
         updatedAt: new Date().toISOString()
       };
       normalizeAndReleaseUser(mergedUser);
+      if (!canPersistUserProfile(mergedUser)) {
+        return res.status(400).json({
+          success: false,
+          exists: false,
+          isNewUser: true,
+          user: null,
+          error: "Profil yaratish uchun Face ID tasdiqlash va barcha majburiy ma'lumotlar talab qilinadi!",
+        });
+      }
       usersStore.set(targetUid, mergedUser);
       if (user.uid !== targetUid) {
         usersStore.delete(user.uid);
@@ -3028,7 +3214,7 @@ Suhbatlashish qoidalaringiz:
       saveUsersToDisk();
       io.emit('user_updated', mergedUser);
 
-      res.json({ success: true, user: mergedUser });
+      res.json({ success: true, exists: true, isNewUser: false, user: mergedUser });
     } catch (err: any) {
       res.status(500).json({ error: err.message });
     }
@@ -3070,12 +3256,20 @@ Suhbatlashish qoidalaringiz:
           updated.status = online ? 'online' : 'offline';
         }
         normalizeAndReleaseUser(updated);
+        if (!canPersistUserProfile(updated)) {
+          usersStore.delete(uid);
+          saveUsersToDisk();
+          return res.status(400).json({
+            success: false,
+            error: "Tugallanmagan profilni saqlab bo'lmaydi. Avval ro'yxatdan o'tishni yakunlang.",
+          });
+        }
         usersStore.set(uid, updated);
         saveUsersToDisk();
         io.emit('user_updated', updated);
         return res.json({ success: true, user: updated });
       }
-      res.json({ success: true });
+      res.status(404).json({ success: false, error: 'Foydalanuvchi topilmadi' });
     } catch (err: any) {
       res.status(500).json({ error: err.message });
     }
@@ -3584,7 +3778,7 @@ Suhbatlashish qoidalaringiz:
 
   // --- Gender & Platform Stats API ---
   app.get('/api/stats/gender', (_req, res) => {
-    const allUsers = Array.from(usersStore.values());
+    const allUsers = Array.from(usersStore.values()).filter((u) => canPersistUserProfile(u));
     let male = 0;
     let female = 0;
     allUsers.forEach(u => {
@@ -3935,6 +4129,25 @@ Suhbatlashish qoidalaringiz:
       res.json({ success: true, user: target });
     } catch (err: any) {
       res.status(500).json({ success: false, error: err.message });
+    }
+  });
+
+  app.post('/api/admin/purge-non-admins', (req, res) => {
+    try {
+      const { adminUid } = req.body || {};
+      if (!getVerifiedAdmin(String(adminUid || ''))) {
+        return res.status(403).json({ success: false, error: 'Admin huquqi talab qilinadi' });
+      }
+      const result = purgeNonAdminDatabaseData();
+      cleanupOrphanedLocalMedia([]);
+      io.emit('database_purged', { dbEpoch: DB_EPOCH });
+      return res.json({
+        success: true,
+        removedUsersCount: result.removedUsersCount,
+        remainingUsers: Array.from(usersStore.values()),
+      });
+    } catch (err: any) {
+      return res.status(500).json({ success: false, error: err.message });
     }
   });
 

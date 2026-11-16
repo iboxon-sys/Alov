@@ -84,6 +84,13 @@ import {
   parseTelegramChannelReference,
   type MandatorySubscriptionConfig,
 } from './src/utils/telegramBotUtils';
+import {
+  isExplicitProfileDisplayName,
+  normalizeTelegramUrl,
+  pickNewestCanonicalUser,
+  propagateProfileUpdateAcrossStores,
+  userSharesIdentity,
+} from './src/utils/profileSync';
 
 dotenv.config();
 
@@ -96,7 +103,37 @@ async function startServer() {
   app.set('trust proxy', 1);
   app.use(express.json({ limit: '15mb' }));
 
-  // Security headers via Helmet (HSTS, CSP, clickjacking protection compatible with preview & production)
+  // Security headers via Helmet (HSTS, strict XSS CSP + Trusted Types compatible with preview & production)
+  const scriptSrcDirectives = isProduction
+    ? [
+        "'self'",
+        'https://telegram.org',
+        'https://*.firebaseapp.com',
+        'https://apis.google.com',
+        'https://www.gstatic.com',
+        'https://accounts.google.com',
+        'https://www.recaptcha.net',
+        'https://www.googletagmanager.com',
+        'https://challenges.cloudflare.com',
+        'https://cdn.jsdelivr.net',
+        'blob:',
+      ]
+    : [
+        "'self'",
+        "'unsafe-inline'",
+        "'unsafe-eval'",
+        'https://telegram.org',
+        'https://*.firebaseapp.com',
+        'https://apis.google.com',
+        'https://www.gstatic.com',
+        'https://accounts.google.com',
+        'https://www.recaptcha.net',
+        'https://www.googletagmanager.com',
+        'https://challenges.cloudflare.com',
+        'https://cdn.jsdelivr.net',
+        'blob:',
+      ];
+
   app.use(
     helmet({
       strictTransportSecurity: {
@@ -107,18 +144,8 @@ async function startServer() {
       contentSecurityPolicy: {
         directives: {
           defaultSrc: ["'self'"],
-          scriptSrc: [
-            "'self'",
-            "'unsafe-inline'",
-            "'unsafe-eval'",
-            'https://telegram.org',
-            'https://*.firebaseapp.com',
-            'https://apis.google.com',
-            'https://www.googletagmanager.com',
-            'https://challenges.cloudflare.com',
-            'blob:',
-          ],
-          styleSrc: ["'self'", "'unsafe-inline'", 'https://fonts.googleapis.com', 'https://unpkg.com'],
+          scriptSrc: scriptSrcDirectives,
+          styleSrc: ["'self'", "'unsafe-inline'", 'https://fonts.googleapis.com'],
           fontSrc: ["'self'", 'https://fonts.gstatic.com', 'data:'],
           imgSrc: ["'self'", 'data:', 'blob:', 'https:', 'http:'],
           mediaSrc: ["'self'", 'data:', 'blob:', 'https:', 'http:'],
@@ -151,6 +178,8 @@ async function startServer() {
             'https://*.telegram.org',
           ],
           workerSrc: ["'self'", 'blob:'],
+          requireTrustedTypesFor: ["'script'"],
+          trustedTypes: ['default', 'gapi#gapi', 'goog#html', "'allow-duplicates'"],
         },
       },
       crossOriginEmbedderPolicy: false,
@@ -1812,12 +1841,12 @@ async function startServer() {
     const incomingFirst = (user?.first_name || user?.firstName || user?.name || '').trim();
     const incomingLast = user?.last_name !== undefined ? String(user.last_name).trim() : (user?.lastName !== undefined ? String(user.lastName).trim() : undefined);
 
-    const validIncomingFirst = !isPlaceholderOrUsername(incomingFirst, username, phone) ? incomingFirst : '';
-    const validExistingFirst = !isPlaceholderOrUsername(existingEntry?.firstName, username, phone) ? (existingEntry?.firstName || '') : '';
+    const validIncomingFirst = isExplicitProfileDisplayName(incomingFirst) ? incomingFirst : '';
+    const validExistingFirst = isExplicitProfileDisplayName(existingEntry?.firstName) ? (existingEntry?.firstName || '') : '';
 
     let firstName = validIncomingFirst || validExistingFirst;
     let lastName = incomingLast !== undefined
-      ? (!isPlaceholderOrUsername(incomingLast, username, phone) ? incomingLast : '')
+      ? (isExplicitProfileDisplayName(incomingLast) ? incomingLast : '')
       : (existingEntry?.lastName || '');
     let finalUsername = username;
     let chatPhotoFileId: string | undefined;
@@ -2317,44 +2346,32 @@ async function startServer() {
       const tgHandle = matchedBotUser?.username || (!/^\d+$/.test(cleanUsername) ? cleanUsername : '');
       const formattedTgUrl = tgHandle ? `https://t.me/${tgHandle}` : undefined;
 
-      // 2. Lookup existing COMPLETED user (or admin) by any identifier
-      let existingUser: any = null;
+      // 2. Lookup ALL existing COMPLETED users matching any identifier & pick canonical newest
+      const matchingUsers: any[] = [];
       const staleIncompleteUids: string[] = [];
 
-      // Match by ChatID first
-      if (userChatId) {
-        for (const u of usersStore.values()) {
-          if (u.telegramChatId && Number(u.telegramChatId) === Number(userChatId)) {
-            if (canPersistUserProfile(u)) {
-              existingUser = u;
-              break;
-            } else {
-              staleIncompleteUids.push(u.uid);
-            }
+      for (const u of usersStore.values()) {
+        const matchChat = Boolean(userChatId && u.telegramChatId && Number(u.telegramChatId) === Number(userChatId));
+        const uTgClean = normalizeTelegramHandle(u.telegram);
+        const uPhoneClean = (u.phone || '').replace(/\D/g, '');
+        const matchUsername = Boolean(tgHandle && uTgClean === tgHandle);
+        const matchPhone = Boolean(cleanPhone && cleanPhone.length >= 9 && uPhoneClean.endsWith(cleanPhone.slice(-9)));
+        if (matchChat || matchUsername || matchPhone) {
+          if (canPersistUserProfile(u)) {
+            matchingUsers.push(u);
+          } else {
+            staleIncompleteUids.push(u.uid);
           }
         }
       }
 
-      // Match by Phone/Username
-      if (!existingUser) {
-        for (const u of usersStore.values()) {
-          const uTgClean = normalizeTelegramHandle(u.telegram);
-          const uPhoneClean = (u.phone || '').replace(/\D/g, '');
-          const matchUsername = tgHandle && uTgClean === tgHandle;
-          const matchPhone = cleanPhone && cleanPhone.length >= 9 && uPhoneClean.endsWith(cleanPhone.slice(-9));
-          if (matchUsername || matchPhone) {
-            if (canPersistUserProfile(u)) {
-              existingUser = u;
-              break;
-            } else {
-              staleIncompleteUids.push(u.uid);
-            }
-          }
-        }
-      }
+      const existingUser = pickNewestCanonicalUser(matchingUsers);
 
       if (staleIncompleteUids.length > 0) {
-        staleIncompleteUids.forEach((staleUid) => usersStore.delete(staleUid));
+        staleIncompleteUids.forEach((staleUid) => {
+          usersStore.delete(staleUid);
+          void contentRepository.deleteUser(staleUid);
+        });
         saveUsersToDisk();
       }
 
@@ -2369,7 +2386,6 @@ async function startServer() {
         username: tgHandle || cleanUsername,
         phone: matchedBotUser?.phone || cleanPhone,
       });
-      const botAvatar = pickPreferredAvatar(matchedBotUser?.avatar);
 
       const rawPhoneForTg = cleanPhone ? `+${cleanPhone}` : (matchedBotUser?.phone ? `+${matchedBotUser.phone}` : '');
       const formattedTgPhone = rawPhoneForTg ? formatPhoneNumberPretty(rawPhoneForTg) : undefined;
@@ -2413,18 +2429,17 @@ async function startServer() {
           io.emit('user_updated', user);
         }
       } else {
-        if (botFullName && isPlaceholderOrUsername(user.name, tgHandle || cleanUsername, cleanPhone)) {
-          user.name = botFullName;
-        } else if (isPlaceholderOrUsername(user.name, tgHandle || cleanUsername, cleanPhone)) {
+        // NEVER overwrite an explicit saved display name on re-login
+        if (!isExplicitProfileDisplayName(user.name)) {
           user.name = botFullName || '';
         }
-        if (user.name && !isPlaceholderOrUsername(user.name, tgHandle || cleanUsername, cleanPhone)) {
+        if (isExplicitProfileDisplayName(user.name)) {
           user.firstName = user.name;
           user.first_name = user.name;
           user.lastName = '';
           user.last_name = '';
         }
-        // Preserve explicitly uploaded custom avatar; otherwise prioritize Face ID photo over Telegram photo
+        // Preserve explicitly uploaded custom avatar; otherwise prioritize Face ID photo
         if (user.hasCustomAvatar && user.avatar && !isPlaceholderAvatar(user.avatar)) {
           // keep custom avatar intact
         } else if (user.faceId?.capturedPhotoUrl) {
@@ -2432,22 +2447,21 @@ async function startServer() {
         } else if (!user.faceId?.verified && user.avatar && user.avatar.includes('api.telegram.org/file/')) {
           user.avatar = '';
         }
-        if (formattedTgUrl && (!user.telegram || user.telegram.startsWith('@'))) {
+        if (formattedTgUrl && user.telegram === undefined) {
+          user.telegram = formattedTgUrl;
+        } else if (formattedTgUrl && user.telegram && user.telegram.startsWith('@')) {
           user.telegram = formattedTgUrl;
         }
         if (userChatId && !user.telegramChatId) {
           user.telegramChatId = userChatId;
         }
-        if (formattedTgPhone && !user.phone) {
+        if (formattedTgPhone && user.phone === undefined) {
           user.phone = formattedTgPhone;
         }
         user.isOnline = true;
         user.status = 'online';
         normalizeAndReleaseUser(user);
-        usersStore.set(user.uid, user);
-        saveUsersToDisk();
-        void contentRepository.upsertUser(user);
-        io.emit('user_updated', user);
+        await dedupeAndPropagateUserProfile(user, existingUser);
       }
 
       res.json({
@@ -2478,7 +2492,7 @@ async function startServer() {
       const cleanInput = rawInput.replace(/^(https?:\/\/t\.me\/|@)/i, '').toLowerCase();
       const cleanPhone = rawInput.replace(/\D/g, '');
 
-      let matchedUser: any = null;
+      const matchedCandidates: any[] = [];
       const staleIncompleteUids: string[] = [];
 
       for (const u of usersStore.values()) {
@@ -2496,16 +2510,20 @@ async function startServer() {
           (cleanPhone && cleanPhone.length > 5 && uPhone === cleanPhone)
         ) {
           if (canPersistUserProfile(u)) {
-            matchedUser = u;
-            break;
+            matchedCandidates.push(u);
           } else {
             staleIncompleteUids.push(u.uid);
           }
         }
       }
 
+      const matchedUser = pickNewestCanonicalUser(matchedCandidates);
+
       if (staleIncompleteUids.length > 0) {
-        staleIncompleteUids.forEach((staleUid) => usersStore.delete(staleUid));
+        staleIncompleteUids.forEach((staleUid) => {
+          usersStore.delete(staleUid);
+          void contentRepository.deleteUser(staleUid);
+        });
         saveUsersToDisk();
       }
 
@@ -2530,14 +2548,14 @@ async function startServer() {
         const resolvedBot = findStoredBotUser(chatId, undefined, tgHandle || undefined, matchedUser.phone);
         const finalChatId = chatId || resolvedBot?.chatId;
         if (finalChatId) {
-          const hasValidStoredName = !isPlaceholderOrUsername(matchedUser.name, tgHandle, matchedUser.phone);
+          const hasValidStoredName = isExplicitProfileDisplayName(matchedUser.name);
           const freshBot = await registerBotUser(
             Number(finalChatId),
             {
               username: resolvedBot?.username || tgHandle || undefined,
               first_name: hasValidStoredName ? matchedUser.name : resolvedBot?.firstName,
               last_name: hasValidStoredName ? '' : resolvedBot?.lastName,
-              avatar: resolvedBot?.avatar,
+              avatar: matchedUser.hasCustomAvatar ? matchedUser.avatar : resolvedBot?.avatar,
             },
             matchedUser.phone
           );
@@ -2561,7 +2579,7 @@ async function startServer() {
           matchedUser.telegramChatId = Number(finalChatId);
         }
       }
-      if (matchedUser.name && !isPlaceholderOrUsername(matchedUser.name, tgHandle, matchedUser.phone)) {
+      if (isExplicitProfileDisplayName(matchedUser.name)) {
         matchedUser.firstName = matchedUser.name;
         matchedUser.first_name = matchedUser.name;
         matchedUser.lastName = '';
@@ -2569,9 +2587,7 @@ async function startServer() {
       }
 
       normalizeAndReleaseUser(matchedUser);
-      usersStore.set(matchedUser.uid, matchedUser);
-      saveUsersToDisk();
-      void contentRepository.upsertUser(matchedUser);
+      await dedupeAndPropagateUserProfile(matchedUser, matchedUser);
 
       res.json({
         success: true,
@@ -2938,7 +2954,7 @@ Suhbatlashish qoidalaringiz:
               const isTg = Boolean(u.telegramChatId || u.uid?.startsWith('tg_') || tgHandle);
               if (isTg) {
                 const botMatch = findStoredBotUser(u.telegramChatId, undefined, tgHandle || undefined, u.phone);
-                if (isPlaceholderOrUsername(u.name, tgHandle, u.phone)) {
+                if (!isExplicitProfileDisplayName(u.name)) {
                   const cleanName = buildTelegramDisplayName({
                     firstName: botMatch?.firstName,
                     lastName: botMatch?.lastName,
@@ -2957,7 +2973,7 @@ Suhbatlashish qoidalaringiz:
                   u.telegramChatId,
                   {
                     username: u.telegram,
-                    first_name: !isPlaceholderOrUsername(u.name, tgHandle, u.phone) ? u.name : undefined,
+                    first_name: isExplicitProfileDisplayName(u.name) ? u.name : undefined,
                     avatar: !isPlaceholderAvatar(u.avatar) ? u.avatar : undefined,
                   },
                   u.phone
@@ -3479,60 +3495,23 @@ Suhbatlashish qoidalaringiz:
       if (!user || !user.uid) {
         return res.status(400).json({ error: 'Valid user with uid required' });
       }
-      // --- Robust Duplicate Check & Merge Logic ---
-      let canonicalUser = usersStore.get(user.uid);
+      // --- Robust Duplicate Check & Canonical Merge Logic ---
+      const matchingPool: any[] = [];
+      const exactMatch = usersStore.get(user.uid);
+      if (exactMatch) matchingPool.push(exactMatch);
+      for (const u of usersStore.values()) {
+        if (u.uid !== user.uid && userSharesIdentity(u, user)) {
+          matchingPool.push(u);
+        }
+      }
+      let canonicalUser = pickNewestCanonicalUser(matchingPool) || undefined;
       const incomingTgChatId = user.telegramChatId;
       const incomingPhone = user.phone ? user.phone.replace(/\D/g, '') : null;
       const incomingTgHandle = user.telegram ? user.telegram.replace(/^(https?:\/\/t\.me\/|@)/i, '').toLowerCase() : null;
 
-      if (!canonicalUser) {
-        // Look for match by Email
-        const incomingEmail = user.email ? user.email.toLowerCase().trim() : null;
-        if (incomingEmail) {
-          for (const u of usersStore.values()) {
-            if (u.email && u.email.toLowerCase().trim() === incomingEmail) {
-              canonicalUser = u;
-              break;
-            }
-          }
-        }
-
-        // Look for match by Telegram Chat ID
-        if (!canonicalUser && incomingTgChatId) {
-          for (const u of usersStore.values()) {
-            if (u.telegramChatId && Number(u.telegramChatId) === Number(incomingTgChatId)) {
-              canonicalUser = u;
-              break;
-            }
-          }
-        }
-        
-        // Look for match by Phone
-        if (!canonicalUser && incomingPhone && incomingPhone.length >= 9) {
-          const searchTail = incomingPhone.slice(-9);
-          for (const u of usersStore.values()) {
-            const uPhone = u.phone ? u.phone.replace(/\D/g, '') : null;
-            if (uPhone && uPhone.length >= 9 && uPhone.endsWith(searchTail)) {
-              canonicalUser = u;
-              break;
-            }
-          }
-        }
-
-        // Look for match by Telegram Handle
-        if (!canonicalUser && incomingTgHandle) {
-          for (const u of usersStore.values()) {
-            const uTgHandle = u.telegram ? u.telegram.replace(/^(https?:\/\/t\.me\/|@)/i, '').toLowerCase() : null;
-            if (uTgHandle === incomingTgHandle) {
-              canonicalUser = u;
-              break;
-            }
-          }
-        }
-      }
-
       if (canonicalUser && !canPersistUserProfile(canonicalUser)) {
         usersStore.delete(canonicalUser.uid);
+        void contentRepository.deleteUser(canonicalUser.uid);
         saveUsersToDisk();
         canonicalUser = undefined;
       }
@@ -3561,10 +3540,6 @@ Suhbatlashish qoidalaringiz:
       const existing = canonicalUser || {};
       const targetUid = canonicalUser ? canonicalUser.uid : user.uid;
 
-      // If we matched a user with a different UID, we might have a temporary entry at user.uid
-      // that we should eventually phase out. For now, we sync into targetUid.
-
-      // If user has a telegram or phone, see if bot knows their chatId or photo
       const isTelegramAccount = Boolean(
         incomingTgChatId ||
         existing.telegramChatId ||
@@ -3572,18 +3547,8 @@ Suhbatlashish qoidalaringiz:
         user.uid?.startsWith('tg_')
       );
       let knownChatId = incomingTgChatId || existing.telegramChatId;
-      const incomingValidName =
-        typeof user.name === 'string' &&
-        user.name.trim() &&
-        !isPlaceholderOrUsername(user.name, incomingTgHandle || existing.telegram, incomingPhone || existing.phone)
-          ? user.name.trim()
-          : '';
-      const existingValidName =
-        typeof existing.name === 'string' &&
-        existing.name.trim() &&
-        !isPlaceholderOrUsername(existing.name, incomingTgHandle || existing.telegram, incomingPhone || existing.phone)
-          ? existing.name.trim()
-          : '';
+      const incomingValidName = isExplicitProfileDisplayName(user.name) ? String(user.name).trim() : '';
+      const existingValidName = isExplicitProfileDisplayName(existing.name) ? String(existing.name).trim() : '';
 
       let fetchedAvatar = pickPreferredAvatar(user.avatar, existing.avatar);
       let fetchedName =
@@ -3614,7 +3579,7 @@ Suhbatlashish qoidalaringiz:
         (
           user.hasCustomAvatar === true ||
           (isAlreadyCompleted && incomingAvatarClean && incomingAvatarClean !== faceIdAvatar && incomingAvatarClean !== existing.avatar) ||
-          (existing.hasCustomAvatar === true && (!incomingAvatarClean || incomingAvatarClean === existing.avatar))
+          (existing.hasCustomAvatar === true && (!incomingAvatarClean || incomingAvatarClean === existing.avatar) && existing.avatar !== faceIdAvatar)
         )
       );
 
@@ -3655,7 +3620,7 @@ Suhbatlashish qoidalaringiz:
         return res.status(400).json({ success: false, error: 'Username da bo\x27sh joy bo\'lishi mumkin emas (faqat harflar, raqamlar va pastki chiziq, 3-20 ta belgi).' });
       }
       for (const [uUid, uObj] of usersStore.entries()) {
-        if (uUid !== targetUid) {
+        if (uUid !== targetUid && !userSharesIdentity(uObj, { ...user, uid: targetUid })) {
           const uName = String(uObj.username || '').trim().toLowerCase();
           if (uName === rawUsername.toLowerCase()) {
             return res.status(400).json({ success: false, error: `Ushbu "@${rawUsername}" username band. Iltimos, boshqa username tanlang.` });
@@ -3698,7 +3663,15 @@ Suhbatlashish qoidalaringiz:
           ? computeAgeFromBirth(existing.birthDate, existing.age)
           : Number(user.age || existing.age || computeAgeFromBirth(lockedBirthDate, 22));
       const rawSyncedPhone = user.phone !== undefined ? String(user.phone) : String(existing.phone || '');
-      const formattedSyncedPhone = rawSyncedPhone.trim() ? formatPhoneNumberPretty(rawSyncedPhone) : '';
+      const trimmedSyncedPhone = rawSyncedPhone.trim();
+      const formattedSyncedPhone =
+        trimmedSyncedPhone && trimmedSyncedPhone !== '+' && trimmedSyncedPhone !== '+998'
+          ? formatPhoneNumberPretty(trimmedSyncedPhone)
+          : '';
+      const resolvedSyncedTelegram =
+        user.telegram !== undefined
+          ? (String(user.telegram).trim() ? (normalizeTelegramUrl(String(user.telegram)) || String(user.telegram).trim()) : '')
+          : (existing.telegram || '');
 
       // Strip undefined keys so incoming client payloads never erase server-only fields like password
       const cleanIncomingUser: Record<string, any> = {};
@@ -3741,6 +3714,7 @@ Suhbatlashish qoidalaringiz:
         birthDate: lockedBirthDate,
         age: lockedAge,
         phone: formattedSyncedPhone,
+        telegram: resolvedSyncedTelegram,
         username: rawUsername,
         name: finalResolvedName,
         firstName: finalResolvedName,
@@ -3765,26 +3739,18 @@ Suhbatlashish qoidalaringiz:
           exists: false,
           isNewUser: true,
           user: null,
-          error: "Profil yaratish uchun Face ID tasdiqlash va barcha majburiy ma'lumotlar talab qilinadi!",
+          error: "Profil yaratish uchun Face ID tasdiqlash va barcha majburiy ma'lumotllar talab qilinadi!",
         });
       }
-      usersStore.set(targetUid, mergedUser);
-      if (user.uid !== targetUid) {
-        usersStore.delete(user.uid);
-        void contentRepository.deleteUser(user.uid);
-      }
-      saveUsersToDisk();
-      await contentRepository.upsertUser(mergedUser);
-      syncAuthorSnapshotInPosts(mergedUser);
-      io.emit('user_updated', mergedUser);
 
+      await dedupeAndPropagateUserProfile(mergedUser, existing, user.uid !== targetUid ? [user.uid] : []);
       res.json({ success: true, exists: true, isNewUser: false, user: mergedUser });
     } catch (err: any) {
       res.status(500).json({ error: err.message });
     }
   });
 
-  app.post('/api/users/update', (req, res) => {
+  app.post('/api/users/update', async (req, res) => {
     try {
       const { uid, updates } = req.body;
       if (!uid || !updates) {
@@ -3802,7 +3768,7 @@ Suhbatlashish qoidalaringiz:
             sanitizedUpdates.age = existing.age;
           }
         }
-        if (typeof sanitizedUpdates.name === 'string' && sanitizedUpdates.name.trim()) {
+        if (typeof sanitizedUpdates.name === 'string' && isExplicitProfileDisplayName(sanitizedUpdates.name)) {
           const trimmed = sanitizedUpdates.name.trim();
           sanitizedUpdates.name = trimmed;
           sanitizedUpdates.firstName = trimmed;
@@ -3810,11 +3776,35 @@ Suhbatlashish qoidalaringiz:
           sanitizedUpdates.lastName = '';
           sanitizedUpdates.last_name = '';
         }
-        if (sanitizedUpdates.phone) {
-          sanitizedUpdates.phone = formatPhoneNumberPretty(String(sanitizedUpdates.phone));
+        if (sanitizedUpdates.phone !== undefined) {
+          const cleanP = String(sanitizedUpdates.phone).trim();
+          sanitizedUpdates.phone = cleanP && cleanP !== '+' && cleanP !== '+998' ? formatPhoneNumberPretty(cleanP) : '';
+        }
+        if (sanitizedUpdates.telegram !== undefined) {
+          const cleanTg = String(sanitizedUpdates.telegram).trim();
+          sanitizedUpdates.telegram = cleanTg ? (normalizeTelegramUrl(cleanTg) || cleanTg) : '';
+        }
+        if (sanitizedUpdates.username !== undefined && String(sanitizedUpdates.username).trim()) {
+          const nextUn = String(sanitizedUpdates.username).trim().replace(/^@/, '');
+          if (/\s/.test(nextUn) || !/^[a-zA-Z0-9_]{3,20}$/.test(nextUn)) {
+            return res.status(400).json({ success: false, error: 'Username formati noto\'g\'ri.' });
+          }
+          for (const [uUid, uObj] of usersStore.entries()) {
+            if (uUid !== uid && !userSharesIdentity(uObj, existing) && String(uObj.username || '').trim().toLowerCase() === nextUn.toLowerCase()) {
+              return res.status(400).json({ success: false, error: `Ushbu "@${nextUn}" username band.` });
+            }
+          }
+          sanitizedUpdates.username = nextUn;
         }
         if (sanitizedUpdates.faceId?.capturedPhotoUrl && !sanitizedUpdates.hasCustomAvatar) {
           sanitizedUpdates.avatar = sanitizedUpdates.faceId.capturedPhotoUrl;
+        } else if (
+          sanitizedUpdates.avatar &&
+          !isPlaceholderAvatar(sanitizedUpdates.avatar) &&
+          sanitizedUpdates.avatar !== existing.faceId?.capturedPhotoUrl &&
+          sanitizedUpdates.avatar !== existing.avatar
+        ) {
+          sanitizedUpdates.hasCustomAvatar = true;
         } else if (
           existing.faceId?.capturedPhotoUrl &&
           !existing.hasCustomAvatar &&
@@ -3831,17 +3821,14 @@ Suhbatlashish qoidalaringiz:
         normalizeAndReleaseUser(updated);
         if (!canPersistUserProfile(updated)) {
           usersStore.delete(uid);
+          void contentRepository.deleteUser(uid);
           saveUsersToDisk();
           return res.status(400).json({
             success: false,
             error: "Tugallanmagan profilni saqlab bo'lmaydi. Avval ro'yxatdan o'tishni yakunlang.",
           });
         }
-        usersStore.set(uid, updated);
-        saveUsersToDisk();
-        void contentRepository.upsertUser(updated);
-        syncAuthorSnapshotInPosts(updated);
-        io.emit('user_updated', updated);
+        await dedupeAndPropagateUserProfile(updated, existing);
         return res.json({ success: true, user: updated });
       }
       res.status(404).json({ success: false, error: 'Foydalanuvchi topilmadi' });
@@ -4406,66 +4393,178 @@ Suhbatlashish qoidalaringiz:
     });
   });
 
-  // --- Social Posts CRUD (Photo, Video, Music, Text + Likes & Comments) ---
-  function syncAuthorSnapshotInPosts(author: any) {
-    if (!author?.uid) return;
-    let changed = false;
-    for (let i = 0; i < postsStore.length; i++) {
-      const p = postsStore[i];
-      let postChanged = false;
-      const nextComments = Array.isArray(p.comments)
-        ? p.comments.map((c) => {
-            if (c.authorUid === author.uid || (author.id && c.authorId === author.id)) {
-              const nextC = {
-                ...c,
-                authorName: author.name || c.authorName,
-                authorUsername: author.username !== undefined ? author.username : c.authorUsername,
-                authorAvatar: author.avatar !== undefined ? author.avatar : c.authorAvatar,
-              };
-              if (
-                nextC.authorName !== c.authorName ||
-                nextC.authorUsername !== c.authorUsername ||
-                nextC.authorAvatar !== c.authorAvatar
-              ) {
-                postChanged = true;
-              }
-              return nextC;
-            }
-            return c;
-          })
-        : p.comments;
+  // --- Full Cross-Store Profile Sync, Deduplication & Old Data Cleanup ---
+  function cleanupUnusedLocalMediaUrl(oldUrl?: string | null, canonicalUser?: any) {
+    const clean = String(oldUrl || '').trim();
+    if (!clean.startsWith('/api/media/')) return;
+    const filename = path.basename(clean.split('?')[0]);
+    if (!filename || filename.includes('..')) return;
+    if (
+      canonicalUser?.avatar === clean ||
+      canonicalUser?.banner === clean ||
+      canonicalUser?.faceId?.capturedPhotoUrl === clean
+    ) {
+      return;
+    }
+    const stillReferencedInUsers = Array.from(usersStore.values()).some(
+      (u) => u?.avatar === clean || u?.banner === clean || u?.faceId?.capturedPhotoUrl === clean
+    );
+    if (stillReferencedInUsers) return;
+    const stillReferencedInPosts = postsStore.some(
+      (p) => p?.mediaUrl === clean || p?.coverUrl === clean || p?.authorAvatar === clean
+    );
+    if (stillReferencedInPosts) return;
+    try {
+      const fpath = path.join(MEDIA_UPLOADS_DIR, filename);
+      if (fs.existsSync(fpath)) {
+        fs.unlinkSync(fpath);
+      }
+    } catch {}
+  }
 
-      if (p.authorUid === author.uid || (author.id && p.authorId === author.id)) {
-        const nextPost: PostItem = {
-          ...p,
-          authorName: author.name || p.authorName,
-          authorUsername: author.username !== undefined ? author.username : p.authorUsername,
-          authorAvatar: author.avatar !== undefined ? author.avatar : p.authorAvatar,
-          authorVerified: Boolean(author.faceId?.verified || author.isVerified || p.authorVerified),
-          comments: nextComments,
-        };
-        if (
-          nextPost.authorName !== p.authorName ||
-          nextPost.authorUsername !== p.authorUsername ||
-          nextPost.authorAvatar !== p.authorAvatar ||
-          postChanged
-        ) {
-          postsStore[i] = nextPost;
-          changed = true;
-          void contentRepository.upsertPost(nextPost);
-          io.emit('post_updated', enrichPost(nextPost));
-        }
-      } else if (postChanged) {
-        const nextPost: PostItem = { ...p, comments: nextComments };
-        postsStore[i] = nextPost;
-        changed = true;
-        void contentRepository.upsertPost(nextPost);
-        io.emit('post_updated', enrichPost(nextPost));
+  async function dedupeAndPropagateUserProfile(
+    canonicalUser: any,
+    previousSnapshot?: any,
+    extraAliases: string[] = []
+  ) {
+    if (!canonicalUser?.uid) return;
+    const aliasSet = new Set<string>(
+      [previousSnapshot?.uid, previousSnapshot?.id, ...extraAliases]
+        .map((v) => String(v || '').trim())
+        .filter(Boolean)
+    );
+
+    const deletedDupUids: string[] = [];
+    for (const [otherUid, otherUser] of Array.from(usersStore.entries())) {
+      if (otherUid !== canonicalUser.uid && userSharesIdentity(otherUser, canonicalUser)) {
+        if (otherUser?.uid) aliasSet.add(String(otherUser.uid));
+        if (otherUser?.id) aliasSet.add(String(otherUser.id));
+        usersStore.delete(otherUid);
+        deletedDupUids.push(otherUid);
+        void contentRepository.deleteUser(otherUid);
+        io.emit('user_deleted', { uid: otherUid });
       }
     }
-    if (changed) {
-      savePostsToDisk();
+
+    usersStore.set(canonicalUser.uid, canonicalUser);
+    saveUsersToDisk();
+    await contentRepository.upsertUser(canonicalUser);
+
+    // Update or remove stale keys in telegram_bot_users.json
+    const chatIdNum = Number(canonicalUser.telegramChatId || canonicalUser.chatId || 0);
+    if (chatIdNum > 0) {
+      const existingBot = findStoredBotUser(chatIdNum);
+      for (const [k, entry] of Array.from(telegramBotUsers.entries())) {
+        if (entry && Number(entry.chatId) === chatIdNum) {
+          telegramBotUsers.delete(k);
+        }
+      }
+      const nextHandle = normalizeTelegramHandle(canonicalUser.telegram);
+      const nextPhone = String(canonicalUser.phone || '').replace(/\D/g, '');
+      const updatedBotRecord: TelegramBotUser = {
+        chatId: chatIdNum,
+        username: nextHandle || undefined,
+        phone: nextPhone || undefined,
+        firstName: isExplicitProfileDisplayName(canonicalUser.name)
+          ? String(canonicalUser.name).trim()
+          : (existingBot?.firstName || ''),
+        lastName: isExplicitProfileDisplayName(canonicalUser.name) ? '' : (existingBot?.lastName || ''),
+        avatar: canonicalUser.avatar && !isPlaceholderAvatar(canonicalUser.avatar)
+          ? canonicalUser.avatar
+          : existingBot?.avatar,
+        updatedAt: Date.now(),
+      };
+      if (nextHandle) {
+        telegramBotUsers.set(nextHandle, updatedBotRecord);
+        telegramBotUsers.set(`@${nextHandle}`, updatedBotRecord);
+        telegramBotUsers.set(`https://t.me/${nextHandle}`, updatedBotRecord);
+      }
+      if (nextPhone) {
+        telegramBotUsers.set(nextPhone, updatedBotRecord);
+        telegramBotUsers.set(`+${nextPhone}`, updatedBotRecord);
+        if (nextPhone.length === 9) {
+          telegramBotUsers.set(`998${nextPhone}`, updatedBotRecord);
+          telegramBotUsers.set(`+998${nextPhone}`, updatedBotRecord);
+        }
+        if (nextPhone.startsWith('998') && nextPhone.length === 12) {
+          telegramBotUsers.set(nextPhone.slice(3), updatedBotRecord);
+        }
+      }
+      telegramBotUsers.set(String(chatIdNum), updatedBotRecord);
+      saveTelegramBotUsers(telegramBotUsers);
     }
+
+    // Delete orphaned local avatar / banner files replaced during edit
+    if (previousSnapshot?.avatar && previousSnapshot.avatar !== canonicalUser.avatar) {
+      cleanupUnusedLocalMediaUrl(previousSnapshot.avatar, canonicalUser);
+    }
+    if (previousSnapshot?.banner && previousSnapshot.banner !== canonicalUser.banner) {
+      cleanupUnusedLocalMediaUrl(previousSnapshot.banner, canonicalUser);
+    }
+
+    // Propagate name, username, avatar, verified badge across all persisted stores
+    const propResult = propagateProfileUpdateAcrossStores(
+      {
+        posts: postsStore,
+        userChats: userChatsStore,
+        chatMessages: chatMessagesStore,
+        liveStreams: liveStreamsStore,
+        coinRequests: coinRequestsStore,
+        withdrawals: withdrawalsStore,
+      },
+      canonicalUser,
+      Array.from(aliasSet)
+    );
+
+    if (propResult.postsChanged) {
+      savePostsToDisk();
+      for (const p of postsStore) {
+        if (p.authorUid === canonicalUser.uid) {
+          void contentRepository.upsertPost(p);
+          io.emit('post_updated', enrichPost(p));
+        }
+      }
+    }
+    if (propResult.chatsChanged) {
+      saveChatsToDisk();
+    }
+    if (propResult.messagesChanged) {
+      saveMessagesToDisk();
+    }
+    if (propResult.coinRequestsChanged) {
+      saveCoinRequestsToDisk();
+    }
+    if (propResult.withdrawalsChanged) {
+      saveWithdrawalsToDisk();
+    }
+
+    io.emit('user_updated', canonicalUser);
+  }
+
+  function syncAuthorSnapshotInPosts(author: any) {
+    if (!author?.uid) return;
+    const prop = propagateProfileUpdateAcrossStores(
+      {
+        posts: postsStore,
+        userChats: userChatsStore,
+        chatMessages: chatMessagesStore,
+        liveStreams: liveStreamsStore,
+        coinRequests: coinRequestsStore,
+        withdrawals: withdrawalsStore,
+      },
+      author
+    );
+    if (prop.postsChanged) {
+      savePostsToDisk();
+      for (const p of postsStore) {
+        if (p.authorUid === author.uid) {
+          void contentRepository.upsertPost(p);
+          io.emit('post_updated', enrichPost(p));
+        }
+      }
+    }
+    if (prop.chatsChanged) saveChatsToDisk();
+    if (prop.messagesChanged) saveMessagesToDisk();
   }
 
   function findUserByUidOrId(key: string): any | undefined {
@@ -5547,6 +5646,37 @@ Suhbatlashish qoidalaringiz:
     return res.send("# Alov.uz\n\nO'zbekistonning Face ID bilan tasdiqlangan tanishuv va jonli muloqot platformasi.\n");
   });
 
+  app.get('/ai-catalog.json', (_req, res) => {
+    const catalogPath = path.resolve(__dirname, 'public', 'ai-catalog.json');
+    if (fs.existsSync(catalogPath)) {
+      res.setHeader('Content-Type', 'application/json; charset=utf-8');
+      return res.sendFile(catalogPath);
+    }
+    const ardPath = path.resolve(__dirname, 'public', '.well-known', 'ard.json');
+    if (fs.existsSync(ardPath)) {
+      res.setHeader('Content-Type', 'application/json; charset=utf-8');
+      return res.sendFile(ardPath);
+    }
+    return res.json({
+      specVersion: '1.0',
+      host: {
+        displayName: 'Alov.uz',
+        identifier: 'alov.uz',
+        description: "O'zbekistonning Face ID bilan tasdiqlangan zamonaviy tanishuv, postlar va jonli efir platformasi.",
+        url: 'https://alov.uz',
+        language: 'uz',
+      },
+      entries: [
+        {
+          identifier: 'urn:air:alov.uz:web:platform',
+          displayName: 'Alov.uz Platformasi',
+          type: 'text/html',
+          url: 'https://alov.uz/',
+        },
+      ],
+    });
+  });
+
   app.get('/.well-known/ard.json', (_req, res) => {
     const ardPath = path.resolve(__dirname, 'public', '.well-known', 'ard.json');
     if (fs.existsSync(ardPath)) {
@@ -5554,10 +5684,22 @@ Suhbatlashish qoidalaringiz:
       return res.sendFile(ardPath);
     }
     return res.json({
-      name: 'Alov.uz',
-      description: "O'zbekistonning Face ID bilan tasdiqlangan zamonaviy tanishuv, postlar va jonli efir platformasi.",
-      url: 'https://alov.uz',
-      language: 'uz',
+      specVersion: '1.0',
+      host: {
+        displayName: 'Alov.uz',
+        identifier: 'alov.uz',
+        description: "O'zbekistonning Face ID bilan tasdiqlangan zamonaviy tanishuv, postlar va jonli efir platformasi.",
+        url: 'https://alov.uz',
+        language: 'uz',
+      },
+      entries: [
+        {
+          identifier: 'urn:air:alov.uz:web:platform',
+          displayName: 'Alov.uz Platformasi',
+          type: 'text/html',
+          url: 'https://alov.uz/',
+        },
+      ],
     });
   });
 

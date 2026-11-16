@@ -17,6 +17,7 @@ import {
   ChevronDown,
   Radio,
   Users,
+  Play,
 } from 'lucide-react';
 import { GenderStatsBar } from './components/GenderStatsBar';
 import { SpringPetalsBackground } from './components/SpringPetalsBackground';
@@ -26,19 +27,25 @@ const LANDING_PROMO_VIDEO_URL = 'https://youtu.be/KE1-tslT2DM?si=b_eI_Ppp__ojU9u
 
 const LANDING_GALLERY_IMAGES = [
   {
-    src: 'https://i.pinimg.com/736x/ee/a5/88/eea588b0eecbafacd1d0cb28c433c4b2.jpg',
+    src: 'https://i.pinimg.com/474x/ee/a5/88/eea588b0eecbafacd1d0cb28c433c4b2.jpg',
+    srcSet:
+      'https://i.pinimg.com/474x/ee/a5/88/eea588b0eecbafacd1d0cb28c433c4b2.jpg 474w, https://i.pinimg.com/736x/ee/a5/88/eea588b0eecbafacd1d0cb28c433c4b2.jpg 736w',
     alt: 'Alov.uz samimiy tanishuv va jonli uchrashuvlar',
     eyebrow: 'Jonli efirlar va suhbatlar',
     title: 'Toshkent, Samarqand, Andijon va barcha hududlar',
   },
   {
-    src: 'https://i.pinimg.com/736x/5c/99/46/5c9946ddcc36b8c6f1f3a2b058e42b66.jpg',
+    src: 'https://i.pinimg.com/474x/5c/99/46/5c9946ddcc36b8c6f1f3a2b058e42b66.jpg',
+    srcSet:
+      'https://i.pinimg.com/474x/5c/99/46/5c9946ddcc36b8c6f1f3a2b058e42b66.jpg 474w, https://i.pinimg.com/736x/5c/99/46/5c9946ddcc36b8c6f1f3a2b058e42b66.jpg 736w',
     alt: 'Alov.uz tasdiqlangan hamjamiyat a’zolari',
     eyebrow: 'Samimiy muloqot',
     title: 'Face ID bilan tasdiqlangan haqiqiy insonlar',
   },
   {
-    src: 'https://i.pinimg.com/736x/5f/5c/99/5f5c99056a49f12cc34cca755482d908.jpg',
+    src: 'https://i.pinimg.com/474x/5f/5c/99/5f5c99056a49f12cc34cca755482d908.jpg',
+    srcSet:
+      'https://i.pinimg.com/474x/5f/5c/99/5f5c99056a49f12cc34cca755482d908.jpg 474w, https://i.pinimg.com/736x/5f/5c/99/5f5c99056a49f12cc34cca755482d908.jpg 736w',
     alt: 'Alov.uz ishonchli tanishuv muhiti',
     eyebrow: 'Ishonchli tanishuv',
     title: 'O‘z hududingizdagi munosib davra',
@@ -114,6 +121,7 @@ export const LandingPage: React.FC<LandingPageProps> = ({ onLogin }) => {
   const [communityImgError, setCommunityImgError] = useState(false);
   const [audienceMode, setAudienceMode] = useState<'female' | 'male'>('female');
   const [openFaqIndex, setOpenFaqIndex] = useState<number | null>(0);
+  const [isPromoVideoPlaying, setIsPromoVideoPlaying] = useState(false);
   const promoAutoplayUrl = buildAutoplayYouTubeEmbedUrl(LANDING_PROMO_VIDEO_URL);
   const activeAudience = AUDIENCE_BENEFITS[audienceMode];
 
@@ -206,7 +214,7 @@ export const LandingPage: React.FC<LandingPageProps> = ({ onLogin }) => {
                 rel="noopener noreferrer"
                 className="py-3.5 px-6 rounded-2xl bg-[#14161F] border border-white/15 hover:border-[#229ED9]/70 text-zinc-100 hover:text-[#38BDF8] font-semibold text-sm transition-all flex items-center justify-center gap-2 whitespace-nowrap"
               >
-                <svg className="w-4 h-4 fill-current text-[#38BDF8] shrink-0" viewBox="0 0 24 24">
+                <svg aria-hidden="true" className="w-4 h-4 fill-current text-[#38BDF8] shrink-0" viewBox="0 0 24 24">
                   <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm4.64 6.8c-.15 1.58-.8 5.42-1.13 7.19-.14.75-.42 1-.68 1.03-.58.05-1.02-.38-1.58-.75-.88-.58-1.38-.94-2.23-1.5-.99-.65-.35-1.01.22-1.59.15-.15 2.71-2.48 2.76-2.69.01-.03.01-.14-.07-.2-.08-.06-.19-.04-.27 0-.12.05-1.98 1.26-5.6 3.7-.53.36-1.01.54-1.44.53-.47-.01-1.38-.26-2.06-.48-.83-.27-1.49-.42-1.43-.88.03-.24.37-.49 1.02-.75 3.99-1.74 6.65-2.89 7.98-3.45 3.8-1.6 4.59-1.88 5.1-1.89.11 0 .37.03.54.17.14.12.18.28.2.4-.02.07-.02.13-.04.2z" />
                 </svg>
                 <span>Telegram Bot (@alovuz_bot)</span>
@@ -222,20 +230,48 @@ export const LandingPage: React.FC<LandingPageProps> = ({ onLogin }) => {
             </div>
           </div>
 
-          {/* Hero Auto-Playing Promo Video Card */}
+          {/* Hero Lightweight YouTube Facade Card (loads iframe strictly on user click) */}
           <div id="video" data-testid="landing-hero-video" className="lg:col-span-6 scroll-mt-24 flex">
             <div className="relative w-full rounded-[28px] overflow-hidden border border-white/15 shadow-[0_28px_70px_rgba(0,0,0,0.75)] bg-[#12131B] flex flex-col">
               {promoAutoplayUrl ? (
-                <div className="relative aspect-video w-full bg-black">
-                  <iframe
-                    src={promoAutoplayUrl}
-                    title="Alov.uz taqdimot videosi"
-                    data-testid="landing-promo-iframe"
-                    className="w-full h-full border-0"
-                    allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
-                    referrerPolicy="strict-origin-when-cross-origin"
-                    allowFullScreen
-                  />
+                <div className="relative aspect-video w-full bg-[#09090D] overflow-hidden">
+                  {isPromoVideoPlaying ? (
+                    <iframe
+                      src={promoAutoplayUrl}
+                      title="Alov.uz taqdimot videosi"
+                      data-testid="landing-promo-iframe"
+                      className="w-full h-full border-0"
+                      allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
+                      referrerPolicy="strict-origin-when-cross-origin"
+                      allowFullScreen
+                    />
+                  ) : (
+                    <button
+                      type="button"
+                      data-testid="landing-promo-play-btn"
+                      onClick={() => setIsPromoVideoPlaying(true)}
+                      aria-label="Alov.uz taqdimot videosini ijro etish"
+                      className="relative w-full h-full group cursor-pointer text-left focus:outline-none focus-visible:ring-2 focus-visible:ring-rose-500"
+                    >
+                      <img
+                        src="/assets/images/hero_spring_dating_1794157256006.webp"
+                        alt="Alov.uz video taqdimot muqovasi"
+                        width={1280}
+                        height={720}
+                        decoding="async"
+                        className="w-full h-full object-cover opacity-80 transition-transform duration-500 group-hover:scale-[1.03]"
+                      />
+                      <div className="absolute inset-0 bg-gradient-to-t from-[#09090D] via-[#09090D]/35 to-black/25" />
+                      <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 p-4">
+                        <span className="w-16 h-16 sm:w-20 sm:h-20 rounded-full bg-[#E11D48]/95 group-hover:bg-[#E11D48] text-white flex items-center justify-center shadow-[0_14px_40px_rgba(225,29,72,0.55)] transition-transform duration-300 group-hover:scale-110 border border-white/25">
+                          <Play className="w-7 h-7 sm:w-8 sm:h-8 fill-current ml-0.5" />
+                        </span>
+                        <span className="px-3.5 py-1.5 rounded-full bg-black/70 backdrop-blur-md border border-white/15 text-xs font-semibold text-white">
+                          Taqdimot videosini ko‘rish
+                        </span>
+                      </div>
+                    </button>
+                  )}
                 </div>
               ) : (
                 <div className="aspect-video w-full bg-gradient-to-br from-[#28121B] via-[#181A22] to-[#111218] flex flex-col items-center justify-center p-8 text-center">
@@ -306,12 +342,14 @@ export const LandingPage: React.FC<LandingPageProps> = ({ onLogin }) => {
                   <div className="aspect-[4/5] w-full overflow-hidden">
                     <img
                       src={item.src}
+                      srcSet={item.srcSet}
+                      sizes="(max-width: 767px) 92vw, 360px"
                       alt={item.alt}
                       referrerPolicy="no-referrer"
-                      loading={idx === 0 ? 'eager' : 'lazy'}
+                      {...(idx === 0 ? { fetchPriority: 'high' as const } : { loading: 'lazy' as const })}
                       decoding="async"
-                      width={736}
-                      height={920}
+                      width={474}
+                      height={593}
                       className="w-full h-full object-cover object-top transition-transform duration-500 group-hover:scale-[1.03]"
                       onError={() => setGalleryImgErrors((prev) => ({ ...prev, [idx]: true }))}
                     />
@@ -391,12 +429,14 @@ export const LandingPage: React.FC<LandingPageProps> = ({ onLogin }) => {
                 <div className="w-full h-64 sm:h-72 overflow-hidden">
                   <img
                     src={LANDING_GALLERY_IMAGES[1].src}
+                    srcSet={LANDING_GALLERY_IMAGES[1].srcSet}
+                    sizes="(max-width: 1023px) 92vw, 460px"
                     alt="Do'stona jamoa"
                     referrerPolicy="no-referrer"
                     loading="lazy"
                     decoding="async"
-                    width={736}
-                    height={920}
+                    width={474}
+                    height={593}
                     className="w-full h-full object-cover object-center"
                     onError={() => setCommunityImgError(true)}
                   />

@@ -1,15 +1,33 @@
 {
-  "name": "Alov.uz",
-  "description": "O'zbekistonning Face ID bilan tasdiqlangan zamonaviy tanishuv, postlar va jonli efir platformasi.",
-  "url": "https://alov.uz",
-  "language": "uz",
-  "capabilities": [
-    "face-id-verification",
-    "realtime-chat",
-    "live-streaming",
-    "media-posts"
-  ],
-  "contact": {
-    "telegram": "https://t.me/alovuz_bot"
-  }
+  "specVersion": "1.0",
+  "host": {
+    "displayName": "Alov.uz",
+    "identifier": "alov.uz",
+    "description": "O'zbekistonning Face ID bilan tasdiqlangan zamonaviy tanishuv, postlar va jonli efir platformasi.",
+    "url": "https://alov.uz",
+    "language": "uz"
+  },
+  "entries": [
+    {
+      "identifier": "urn:air:alov.uz:web:platform",
+      "displayName": "Alov.uz Platformasi",
+      "type": "text/html",
+      "url": "https://alov.uz/",
+      "description": "Face ID tasdig'i, postlar lentasi, jonli efirlar, real-time chat va 1-ga-1 video suhbatlar platformasi."
+    },
+    {
+      "identifier": "urn:air:alov.uz:doc:llms",
+      "displayName": "Alov.uz LLMs Summary",
+      "type": "text/markdown",
+      "url": "https://alov.uz/llms.txt",
+      "description": "Platformaning imkoniyatlari, xavfsizlik qoidalari va Telegram bot integratsiyasi haqida tuzilgan ma'lumotnoma."
+    },
+    {
+      "identifier": "urn:air:alov.uz:api:stats",
+      "displayName": "Hamjamiyat Statistikasi",
+      "type": "application/json",
+      "url": "https://alov.uz/api/stats/gender",
+      "description": "Platformada ro'yxatdan o'tgan foydalanuvchilar muvozanati va umumiy soni."
+    }
+  ]
 }

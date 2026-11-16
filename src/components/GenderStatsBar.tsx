@@ -49,7 +49,7 @@ export const GenderStatsBar: React.FC = () => {
             <Users className="w-4.5 h-4.5" />
           </div>
           <div>
-            <h4 className="font-bold text-sm text-white tracking-tight">Hamjamiyat muvozanati</h4>
+            <h2 className="font-bold text-sm text-white tracking-tight">Hamjamiyat muvozanati</h2>
             <p className="text-xs text-zinc-400 font-medium tabular-nums">
               Ro'yxatdan o'tgan a'zolar: <span className="text-zinc-200 font-semibold font-mono">{totalCount.toLocaleString()}</span>
             </p>
@@ -72,14 +72,14 @@ export const GenderStatsBar: React.FC = () => {
           </span>
         </div>
 
-        <div className="relative w-full h-2.5 bg-[#09090D] rounded-full overflow-hidden border border-white/10 flex">
+        <div className="relative w-full h-2.5 bg-[#09090D] rounded-full overflow-hidden border border-white/10">
           <div
-            className="h-full bg-gradient-to-r from-sky-500 to-sky-400 transition-all duration-700 ease-out"
-            style={{ width: `${malePercent}%` }}
+            className="absolute inset-y-0 left-0 w-full bg-gradient-to-r from-sky-500 to-sky-400 origin-left transition-transform duration-700 ease-out will-change-transform"
+            style={{ transform: `scaleX(${Math.max(0, Math.min(1, malePercent / 100))})` }}
           />
           <div
-            className="h-full bg-gradient-to-r from-rose-500 to-rose-400 transition-all duration-700 ease-out"
-            style={{ width: `${femalePercent}%` }}
+            className="absolute inset-y-0 right-0 w-full bg-gradient-to-r from-rose-500 to-rose-400 origin-right transition-transform duration-700 ease-out will-change-transform"
+            style={{ transform: `scaleX(${Math.max(0, Math.min(1, femalePercent / 100))})` }}
           />
         </div>
       </div>

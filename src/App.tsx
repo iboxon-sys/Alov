@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, Suspense, lazy } from 'react';
 import { 
   Heart, Flame, Radio, MessageCircle, User as UserIcon, Sparkles, Video, 
   MapPin, Send, Mic, Play, Plus, Users, Eye, ThumbsUp, Smartphone, 
@@ -16,18 +16,10 @@ import { motion, AnimatePresence, MotionConfig } from 'framer-motion';
 import { clsx, type ClassValue } from 'clsx';
 import { twMerge } from 'tailwind-merge';
 import { LandingPage } from './LandingPage';
-import { LiveStreamModal } from './components/LiveStreamModal';
-import { OneOnOneCallModal } from './components/OneOnOneCallModal';
-import { IncomingCallModal } from './components/IncomingCallModal';
-import { AdminPanelModal } from './components/AdminPanelModal';
-import { FaceIdVerificationModal, type FaceIdVerificationResult } from './components/FaceIdVerificationModal';
-import { FollowListModal } from './components/FollowListModal';
-import { PostsFeed } from './components/PostsFeed';
-import { PublicProfileModal } from './components/PublicProfileModal';
+import type { FaceIdVerificationResult } from './components/FaceIdVerificationModal';
 import { SmartPhoneInput } from './components/SmartPhoneInput';
-import { ChatMediaPicker, type ChatMediaKind } from './components/ChatMediaPicker';
+import type { ChatMediaKind } from './components/ChatMediaPicker';
 import { callNotification } from './services/callNotification';
-import { VideoPlayer, VoiceMessage } from './components/ChatMedia';
 import { CandidateSkeleton, ChatSkeleton } from './components/Skeleton';
 import { 
   auth, googleProvider, GoogleAuthProvider,
@@ -84,16 +76,57 @@ import {
 import { computeAuthorTotalLikes, isPostVisibleToViewer, type PostItem } from './utils/posts';
 import { validateUsername, isUsernameUnique, formatUsernameDisplay } from './utils/username';
 import { formatPhoneNumberPretty } from './utils/phone';
-import { PrivacyPolicyInline } from './components/PrivacyPolicyInline';
-import { TurnstileWidget } from './components/TurnstileWidget';
-import { MandatorySubscriptionGate } from './components/MandatorySubscriptionGate';
 import { buildCanonicalChatId, mergeChatLists } from './utils/chatList';
 import { shouldEnableCaptureProtection, isCaptureShortcutEvent } from './utils/captureProtection';
+import { normalizeTelegramUrl } from './utils/profileSync';
 import {
   DEFAULT_MANDATORY_SUBSCRIPTION_CONFIG,
   evaluateMandatorySubscriptionAccess,
   type MandatorySubscriptionConfig,
 } from './utils/telegramBotUtils';
+
+const LiveStreamModal = lazy(() =>
+  import('./components/LiveStreamModal').then((m) => ({ default: m.LiveStreamModal }))
+);
+const OneOnOneCallModal = lazy(() =>
+  import('./components/OneOnOneCallModal').then((m) => ({ default: m.OneOnOneCallModal }))
+);
+const IncomingCallModal = lazy(() =>
+  import('./components/IncomingCallModal').then((m) => ({ default: m.IncomingCallModal }))
+);
+const AdminPanelModal = lazy(() =>
+  import('./components/AdminPanelModal').then((m) => ({ default: m.AdminPanelModal }))
+);
+const FaceIdVerificationModal = lazy(() =>
+  import('./components/FaceIdVerificationModal').then((m) => ({ default: m.FaceIdVerificationModal }))
+);
+const FollowListModal = lazy(() =>
+  import('./components/FollowListModal').then((m) => ({ default: m.FollowListModal }))
+);
+const PostsFeed = lazy(() =>
+  import('./components/PostsFeed').then((m) => ({ default: m.PostsFeed }))
+);
+const PublicProfileModal = lazy(() =>
+  import('./components/PublicProfileModal').then((m) => ({ default: m.PublicProfileModal }))
+);
+const ChatMediaPicker = lazy(() =>
+  import('./components/ChatMediaPicker').then((m) => ({ default: m.ChatMediaPicker }))
+);
+const VideoPlayer = lazy(() =>
+  import('./components/ChatMedia').then((m) => ({ default: m.VideoPlayer }))
+);
+const VoiceMessage = lazy(() =>
+  import('./components/ChatMedia').then((m) => ({ default: m.VoiceMessage }))
+);
+const PrivacyPolicyInline = lazy(() =>
+  import('./components/PrivacyPolicyInline').then((m) => ({ default: m.PrivacyPolicyInline }))
+);
+const TurnstileWidget = lazy(() =>
+  import('./components/TurnstileWidget').then((m) => ({ default: m.TurnstileWidget }))
+);
+const MandatorySubscriptionGate = lazy(() =>
+  import('./components/MandatorySubscriptionGate').then((m) => ({ default: m.MandatorySubscriptionGate }))
+);
 
 function resolveAvatarUrl(rawUrl?: string | null): string {
   const clean = pickPreferredAvatar(rawUrl);
@@ -607,6 +640,40 @@ export default function App() {
         }
         return prev;
       });
+
+      setChatsList(prev =>
+        prev.map(c => {
+          if (c?.partner && (c.partner.uid === updatedUser.uid || (updatedUser.id && c.partner.id === updatedUser.id))) {
+            return {
+              ...c,
+              partner: {
+                ...c.partner,
+                uid: updatedUser.uid,
+                id: updatedUser.id || c.partner.id,
+                name: updatedUser.name || c.partner.name,
+                username: updatedUser.username ?? c.partner.username,
+                avatar: resolveEffectiveProfileAvatar(updatedUser) || c.partner.avatar,
+                isVerified: Boolean(updatedUser.faceId?.verified || updatedUser.isVerified),
+              },
+            };
+          }
+          return c;
+        })
+      );
+
+      setPostsList(prev =>
+        prev.map(p =>
+          p.authorUid === updatedUser.uid || (updatedUser.id && p.authorId === updatedUser.id)
+            ? {
+                ...p,
+                authorName: updatedUser.name || p.authorName,
+                authorUsername: updatedUser.username ?? p.authorUsername,
+                authorAvatar: resolveEffectiveProfileAvatar(updatedUser) || p.authorAvatar,
+                authorVerified: Boolean(updatedUser.faceId?.verified || updatedUser.isVerified || p.authorVerified),
+              }
+            : p
+        )
+      );
     });
 
     socket.on('user_deleted', ({ uid }: { uid: string }) => {
@@ -1042,7 +1109,7 @@ export default function App() {
             ? {
                 ...parsed,
                 name: getSafeUserDisplayName(parsed, ''),
-                avatar: parsed.faceId?.capturedPhotoUrl || pickPreferredAvatar(parsed.avatar),
+                avatar: resolveEffectiveProfileAvatar(parsed),
               }
             : parsed;
           setCurrentUser(sanitized);
@@ -1113,7 +1180,7 @@ export default function App() {
             const bootDecision = resolveTelegramMiniAppBootAction({ exists, user: u });
             if (bootDecision.shouldAutoLogin && u) {
               setRegName(getSafeUserDisplayName(u, realName));
-              setRegAvatar(u.faceId?.capturedPhotoUrl || pickPreferredAvatar(u.avatar, tgUser.photo_url));
+              setRegAvatar(resolveEffectiveProfileAvatar(u) || pickPreferredAvatar(tgUser.photo_url));
               setCurrentUser(u);
               try {
                 localStorage.setItem('alov_current_user', JSON.stringify(u));
@@ -1187,7 +1254,8 @@ export default function App() {
       // Anketani to'ldirish maydonlarini yangilash
       const userBdate = userData.birthDate || '2002-05-15';
       setRegBirthDate(userBdate);
-      setRegName(userData.name || user.displayName || '');
+      setRegName(getSafeUserDisplayName(userData, user.displayName || ''));
+      setRegUsername(userData.username || '');
       setRegAge(String(calculateAge(userBdate, userData.age || 22)));
       setRegGender(
         userData.isProfileCompleted && (userData.gender === 'male' || userData.gender === 'female')
@@ -1196,8 +1264,13 @@ export default function App() {
       );
       setRegRegion(userData.region || 'Toshkent shahri');
       setRegDistrict(userData.district || 'Yunusobod tumani');
+      setRegNeighborhood(userData.neighborhood || '');
+      setRegPhone(formatPhoneNumberPretty(userData.phone || '+998 '));
+      setRegTelegram(userData.telegram || '');
+      setRegInstagram(userData.instagram || '');
       setRegBio(userData.bio || '');
       setRegAvatar(resolveEffectiveProfileAvatar(userData));
+      setRegBanner(userData.banner || '');
       setRegLocationVisibility(userData.locationVisibility || 'everyone');
       setIsLocationEnabled(userData.isLocationEnabled !== false);
 
@@ -1860,8 +1933,8 @@ export default function App() {
     node.addEventListener('click', handlePopupButtonClick);
 
     if (!mapInstanceRef.current) {
-      import('leaflet')
-        .then((LMod) => {
+      Promise.all([import('leaflet'), import('leaflet/dist/leaflet.css')])
+        .then(([LMod]) => {
           if (cancelled || !mapContainerRef.current || mapInstanceRef.current) return;
           const L = (LMod as any).default || LMod;
           (window as any).L = L;
@@ -1985,7 +2058,7 @@ export default function App() {
             <div style="position:relative;width:42px;height:42px;display:flex;align-items:center;justify-content:center;">
               ${isLive || isOnline ? '<div class="pulse-ring" style="background-color:' + (isLive ? '#EF4444' : '#10B981') + '"></div>' : ''}
               <div style="background:#E11D48;width:36px;height:36px;border-radius:50%;border:2px solid ${isLive ? '#EF4444' : '#FFFFFF'};box-shadow:0 4px 12px rgba(0,0,0,0.45);overflow:hidden;position:relative;z-index:2;display:flex;align-items:center;justify-content:center;color:white;font-weight:800;font-size:13px;">
-                ${safeAvatar ? `<img src="${safeAvatar}" style="width:100%;height:100%;object-fit:cover;" onerror="this.style.display='none'"/>` : initial}
+                ${safeAvatar ? `<img src="${safeAvatar}" style="width:100%;height:100%;object-fit:cover;" />` : initial}
                 ${isOnline ? '<span style="position:absolute;bottom:1px;right:1px;width:9px;height:9px;background:#10B981;border:1.5px solid #131622;border-radius:50%;"></span>' : ''}
               </div>
               ${isLive ? '<span style="position:absolute;top:-4px;left:50%;transform:translateX(-50%);background:#EF4444;color:white;font-size:7px;font-weight:900;padding:0.5px 5px;border-radius:999px;z-index:10;white-space:nowrap;">● LIVE</span>' : ''}
@@ -2325,8 +2398,11 @@ export default function App() {
       const facePhotoUrl = String(currentUser?.faceId?.capturedPhotoUrl || '').trim();
       const hasCustomAvatar = Boolean(
         resolvedSavedAvatar &&
-          ((facePhotoUrl && resolvedSavedAvatar !== facePhotoUrl) ||
-            Boolean(currentUser?.hasCustomAvatar && resolvedSavedAvatar === currentUser?.avatar))
+          resolvedSavedAvatar !== facePhotoUrl &&
+          (Boolean(currentUser?.hasCustomAvatar) ||
+            resolvedSavedAvatar !== String(currentUser?.avatar || '') ||
+            resolvedSavedAvatar.startsWith('/api/media/') ||
+            resolvedSavedAvatar.startsWith('data:'))
       );
 
       const isPrimaryLocked = Boolean(currentUser?.isProfileCompleted === true);
@@ -2336,7 +2412,9 @@ export default function App() {
       const lockedBirthDate = isPrimaryLocked && currentUser?.birthDate ? currentUser.birthDate : regBirthDate;
       const computedAge = calculateAge(lockedBirthDate, Number(currentUser?.age || regAge));
       const trimmedPhone = regPhone.trim();
-      const formattedPhone = trimmedPhone && trimmedPhone !== '+' ? formatPhoneNumberPretty(trimmedPhone) : '';
+      const formattedPhone = trimmedPhone && trimmedPhone !== '+' && trimmedPhone !== '+998' ? formatPhoneNumberPretty(trimmedPhone) : '';
+      const trimmedTelegram = regTelegram.trim();
+      const normalizedTelegram = trimmedTelegram ? (normalizeTelegramUrl(trimmedTelegram) || trimmedTelegram) : '';
       const newUserData = {
         ...currentUser,
         id: currentUser?.id || `ALOV-${activeUid.slice(0, 5).toUpperCase()}`,
@@ -2354,7 +2432,7 @@ export default function App() {
         district: regDistrict,
         neighborhood: regNeighborhood.trim(),
         phone: formattedPhone,
-        telegram: regTelegram.trim(),
+        telegram: normalizedTelegram,
         instagram: regInstagram.trim(),
         bio: regBio.trim(),
         hasCustomAvatar,
@@ -2383,7 +2461,14 @@ export default function App() {
       const savedUser = data.user;
 
       if (auth.currentUser && trimmedName) {
-        updateProfile(auth.currentUser, { displayName: trimmedName }).catch(() => {});
+        const nextPhotoUrl =
+          resolvedSavedAvatar && !resolvedSavedAvatar.startsWith('data:')
+            ? (resolvedSavedAvatar.startsWith('/api/') ? `${window.location.origin}${resolvedSavedAvatar}` : resolvedSavedAvatar)
+            : undefined;
+        updateProfile(auth.currentUser, {
+          displayName: trimmedName,
+          ...(nextPhotoUrl ? { photoURL: nextPhotoUrl } : {}),
+        }).catch(() => {});
       }
 
       try {
@@ -2393,6 +2478,12 @@ export default function App() {
 
       setCurrentUser(savedUser);
       setRegName(getSafeUserDisplayName(savedUser, trimmedName));
+      setRegUsername(savedUser.username || '');
+      setRegPhone(formatPhoneNumberPretty(savedUser.phone || '+998 '));
+      setRegTelegram(savedUser.telegram || '');
+      setRegInstagram(savedUser.instagram || '');
+      setRegNeighborhood(savedUser.neighborhood || '');
+      setRegBanner(savedUser.banner || '');
       setRegAvatar(resolveEffectiveProfileAvatar(savedUser));
       setUsersList(prev => {
         const userMap = new Map<string, any>();
@@ -2400,6 +2491,24 @@ export default function App() {
         userMap.set(savedUser.uid || activeUid, savedUser);
         return Array.from(userMap.values());
       });
+      setChatsList(prev =>
+        prev.map(c => {
+          if (c?.partner && (c.partner.uid === (savedUser.uid || activeUid) || (savedUser.id && c.partner.id === savedUser.id))) {
+            return {
+              ...c,
+              partner: {
+                ...c.partner,
+                uid: savedUser.uid || activeUid,
+                id: savedUser.id || c.partner.id,
+                name: savedUser.name || trimmedName,
+                username: savedUser.username ?? c.partner.username,
+                avatar: resolveEffectiveProfileAvatar(savedUser) || c.partner.avatar,
+              },
+            };
+          }
+          return c;
+        })
+      );
       setPostsList(prev =>
         prev.map(p =>
           p.authorUid === (savedUser.uid || activeUid)
@@ -2544,12 +2653,8 @@ export default function App() {
         }
       }
 
-      setTurnstileToken(null);
-      setTurnstileResetTick((t) => t + 1);
       setErrorMsg(serverLoginRes?.error || "Username, Email yoki parol xato.");
     } catch (err: any) {
-      setTurnstileToken(null);
-      setTurnstileResetTick((t) => t + 1);
       setErrorMsg(formatAuthErrorMessage(err, 'login'));
     } finally {
       setIsLoggingIn(false);
@@ -2922,18 +3027,20 @@ export default function App() {
           localStorage.setItem('alov_tg_started_' + cleanKey, 'true');
         } catch (e) {}
       } else if (data && data.hasStartedBot === false) {
-        setTurnstileToken(null);
-        setTurnstileResetTick((t) => t + 1);
+        if (data?.error && /captcha|cloudflare/i.test(String(data.error))) {
+          setTurnstileToken(null);
+          setTurnstileResetTick((t) => t + 1);
+        }
         setHasStartedBotError(true);
         setErrorMsg(data.error || "Botimiz ro'yxatida topilmadingiz! Iltimos, avval @alovuz_bot ga kirib /start tugmasini bir marta bosing.");
       } else {
-        setTurnstileToken(null);
-        setTurnstileResetTick((t) => t + 1);
+        if (data?.error && /captcha|cloudflare/i.test(String(data.error))) {
+          setTurnstileToken(null);
+          setTurnstileResetTick((t) => t + 1);
+        }
         setErrorMsg(data?.error || "Kod yuborishda xatolik.");
       }
     } catch (err: any) {
-      setTurnstileToken(null);
-      setTurnstileResetTick((t) => t + 1);
       setErrorMsg(err.message || "Tarmoq xatoligi.");
     } finally {
       setIsLoggingIn(false);
@@ -3222,6 +3329,9 @@ export default function App() {
     try {
       localStorage.removeItem('alov_current_user');
       localStorage.removeItem('alov_last_tg_chat');
+      if (activeUid) {
+        localStorage.removeItem('alov_user_' + activeUid);
+      }
     } catch (e) {}
     await signOut(auth).catch(() => {});
     setFirebaseUser(null);
@@ -4169,25 +4279,27 @@ export default function App() {
                     </span>
                   </div>
 
-                  <PostsFeed
-                    posts={postsList}
-                    currentUser={currentUser}
-                    usersList={usersList}
-                    onlineUserIds={onlineUserIds}
-                    allowCompose={true}
-                    onPostCreated={(post) =>
-                      setPostsList((prev) => (prev.some((p) => p.id === post.id) ? prev : [post, ...prev]))
-                    }
-                    onPostUpdated={(post) =>
-                      setPostsList((prev) => prev.map((p) => (p.id === post.id ? post : p)))
-                    }
-                    onPostDeleted={(postId) =>
-                      setPostsList((prev) => prev.filter((p) => p.id !== postId))
-                    }
-                    onOpenProfile={openUserProfileByUid}
-                    onOpenAuth={() => openAuthModalClean('login')}
-                    onNotify={showToast}
-                  />
+                  <Suspense fallback={<div className="py-8 text-center text-xs text-zinc-400">Postlar yuklanmoqda...</div>}>
+                    <PostsFeed
+                      posts={postsList}
+                      currentUser={currentUser}
+                      usersList={usersList}
+                      onlineUserIds={onlineUserIds}
+                      allowCompose={true}
+                      onPostCreated={(post) =>
+                        setPostsList((prev) => (prev.some((p) => p.id === post.id) ? prev : [post, ...prev]))
+                      }
+                      onPostUpdated={(post) =>
+                        setPostsList((prev) => prev.map((p) => (p.id === post.id ? post : p)))
+                      }
+                      onPostDeleted={(postId) =>
+                        setPostsList((prev) => prev.filter((p) => p.id !== postId))
+                      }
+                      onOpenProfile={openUserProfileByUid}
+                      onOpenAuth={() => openAuthModalClean('login')}
+                      onNotify={showToast}
+                    />
+                  </Suspense>
                 </div>
               )}
 
@@ -4460,9 +4572,13 @@ export default function App() {
                                     ) : msg.type === 'image' ? (
                                       <img src={msg.fileUrl} alt="" className="rounded-lg max-h-60 object-cover" />
                                     ) : msg.type === 'video' ? (
-                                      <VideoPlayer url={msg.fileUrl || ''} />
+                                      <Suspense fallback={null}>
+                                        <VideoPlayer url={msg.fileUrl || ''} />
+                                      </Suspense>
                                     ) : (msg.type === 'voice' || msg.type === 'audio') ? (
-                                      <VoiceMessage url={msg.fileUrl || ''} senderId={isMe ? 'me' : msg.senderId} />
+                                      <Suspense fallback={null}>
+                                        <VoiceMessage url={msg.fileUrl || ''} senderId={isMe ? 'me' : msg.senderId} />
+                                      </Suspense>
                                     ) : (
                                       <p className="text-[13px] leading-relaxed whitespace-pre-wrap break-words">{msg.text}</p>
                                     )}
@@ -4528,8 +4644,8 @@ export default function App() {
                               </div>
                               <div className="w-full h-1.5 bg-white/[0.08] rounded-full overflow-hidden">
                                 <div
-                                  className="h-full bg-gradient-to-r from-cyan-500 to-emerald-500 transition-all duration-500 rounded-full"
-                                  style={{ width: `${progressPct}%` }}
+                                  className="h-full w-full origin-left bg-gradient-to-r from-cyan-500 to-emerald-500 transition-transform duration-500 rounded-full"
+                                  style={{ transform: `scaleX(${Math.max(0, Math.min(1, progressPct / 100))})` }}
                                 />
                               </div>
                               {pendingTotal > 0 && (
@@ -4548,12 +4664,14 @@ export default function App() {
                       })()}
 
                       <div className="shrink-0 z-20 px-3 pt-2 pb-2.5 pb-safe bg-[#11131C] border-t border-white/[0.08] flex flex-col">
-                        <ChatMediaPicker
-                          isOpen={showChatMediaPicker}
-                          onToggleOpen={() => setShowChatMediaPicker((prev) => !prev)}
-                          onSendMedia={handleSendPickedChatMedia}
-                          isUploading={isUploadingChatMedia}
-                        />
+                        <Suspense fallback={null}>
+                          <ChatMediaPicker
+                            isOpen={showChatMediaPicker}
+                            onToggleOpen={() => setShowChatMediaPicker((prev) => !prev)}
+                            onSendMedia={handleSendPickedChatMedia}
+                            isUploading={isUploadingChatMedia}
+                          />
+                        </Suspense>
                         <div className="flex items-end space-x-2 w-full">
                         <button
                           type="button"
@@ -4899,8 +5017,8 @@ export default function App() {
                                     </div>
                                     <div className="w-full h-1.5 bg-white/[0.08] rounded-full overflow-hidden">
                                       <div
-                                        className="h-full bg-gradient-to-r from-cyan-500 to-emerald-500 transition-all duration-500"
-                                        style={{ width: `${progressPct}%` }}
+                                        className="h-full w-full origin-left bg-gradient-to-r from-cyan-500 to-emerald-500 transition-transform duration-500"
+                                        style={{ transform: `scaleX(${Math.max(0, Math.min(1, progressPct / 100))})` }}
                                       />
                                     </div>
                                     <p className="text-[10px] text-zinc-400">
@@ -5049,26 +5167,28 @@ export default function App() {
                           Rasm, video va musiqa ulashing
                         </span>
                       </div>
-                      <PostsFeed
-                        posts={postsList}
-                        currentUser={currentUser}
-                        usersList={usersList}
-                        onlineUserIds={onlineUserIds}
-                        authorUid={currentUser?.uid}
-                        allowCompose={true}
-                        onPostCreated={(post) =>
-                          setPostsList((prev) => (prev.some((p) => p.id === post.id) ? prev : [post, ...prev]))
-                        }
-                        onPostUpdated={(post) =>
-                          setPostsList((prev) => prev.map((p) => (p.id === post.id ? post : p)))
-                        }
-                        onPostDeleted={(postId) =>
-                          setPostsList((prev) => prev.filter((p) => p.id !== postId))
-                        }
-                        onOpenProfile={openUserProfileByUid}
-                        onOpenAuth={() => openAuthModalClean('login')}
-                        onNotify={showToast}
-                      />
+                      <Suspense fallback={<div className="py-6 text-center text-xs text-zinc-400">Postlar yuklanmoqda...</div>}>
+                        <PostsFeed
+                          posts={postsList}
+                          currentUser={currentUser}
+                          usersList={usersList}
+                          onlineUserIds={onlineUserIds}
+                          authorUid={currentUser?.uid}
+                          allowCompose={true}
+                          onPostCreated={(post) =>
+                            setPostsList((prev) => (prev.some((p) => p.id === post.id) ? prev : [post, ...prev]))
+                          }
+                          onPostUpdated={(post) =>
+                            setPostsList((prev) => prev.map((p) => (p.id === post.id ? post : p)))
+                          }
+                          onPostDeleted={(postId) =>
+                            setPostsList((prev) => prev.filter((p) => p.id !== postId))
+                          }
+                          onOpenProfile={openUserProfileByUid}
+                          onOpenAuth={() => openAuthModalClean('login')}
+                          onNotify={showToast}
+                        />
+                      </Suspense>
                     </div>
                   </div>
                 );
@@ -5645,47 +5765,51 @@ export default function App() {
             )}
 
             {inlinePolicyReturnMode !== null ? (
-              <PrivacyPolicyInline
-                onAccept={() => {
-                  setPrivacyAgreed(true);
-                  setPrivacyReadToBottom(true);
-                  setErrorMsg('');
-                  setInlinePolicyReturnMode(null);
-                }}
-                onBack={() => setInlinePolicyReturnMode(null)}
-              />
+              <Suspense fallback={<div className="py-10 text-center text-xs text-zinc-400">Yuklanmoqda...</div>}>
+                <PrivacyPolicyInline
+                  onAccept={() => {
+                    setPrivacyAgreed(true);
+                    setPrivacyReadToBottom(true);
+                    setErrorMsg('');
+                    setInlinePolicyReturnMode(null);
+                  }}
+                  onBack={() => setInlinePolicyReturnMode(null)}
+                />
+              </Suspense>
             ) : (authMode === 'google_face_id' || authMode === 'register_face_id' || (authMode === 'telegram' && telegramStep === 'face_id')) ? (
-              <FaceIdVerificationModal
-                apiBaseUrl={getBaseUrl()}
-                userUid={
-                  authMode === 'telegram'
-                    ? pendingTgUser?.uid
-                    : (pendingGoogleUser?.uid || firebaseUser?.uid || currentUser?.uid)
-                }
-                userName={
-                  regName ||
-                  pendingTgUser?.name ||
-                  pendingGoogleUser?.displayName ||
-                  firebaseUser?.displayName ||
-                  'Foydalanuvchi'
-                }
-                onVerified={(result) =>
-                  handleFaceIdVerified(
-                    result,
+              <Suspense fallback={<div className="py-10 text-center text-xs text-zinc-400">Face ID tayyorlanmoqda...</div>}>
+                <FaceIdVerificationModal
+                  apiBaseUrl={getBaseUrl()}
+                  userUid={
                     authMode === 'telegram'
-                      ? 'telegram'
-                      : authMode === 'register_face_id'
-                        ? 'register'
-                        : 'google'
-                  )
-                }
-                onCancel={() => {
-                  resetAuthFormState();
-                  setShowAuthModal(false);
-                  setAuthMode('login');
-                  setTelegramStep('input_phone');
-                }}
-              />
+                      ? pendingTgUser?.uid
+                      : (pendingGoogleUser?.uid || firebaseUser?.uid || currentUser?.uid)
+                  }
+                  userName={
+                    regName ||
+                    pendingTgUser?.name ||
+                    pendingGoogleUser?.displayName ||
+                    firebaseUser?.displayName ||
+                    'Foydalanuvchi'
+                  }
+                  onVerified={(result) =>
+                    handleFaceIdVerified(
+                      result,
+                      authMode === 'telegram'
+                        ? 'telegram'
+                        : authMode === 'register_face_id'
+                          ? 'register'
+                          : 'google'
+                    )
+                  }
+                  onCancel={() => {
+                    resetAuthFormState();
+                    setShowAuthModal(false);
+                    setAuthMode('login');
+                    setTelegramStep('input_phone');
+                  }}
+                />
+              </Suspense>
             ) : authMode === 'google_setup' ? (
               <div className="space-y-4 relative z-10">
                 <div className="space-y-1 text-center">
@@ -6036,10 +6160,12 @@ export default function App() {
                   </div>
 
                   {!turnstileToken ? (
-                    <TurnstileWidget
-                      onTokenChange={setTurnstileToken}
-                      resetSignal={turnstileResetTick}
-                    />
+                    <Suspense fallback={<div className="h-[66px] rounded-xl bg-white/[0.04] animate-pulse" />}>
+                      <TurnstileWidget
+                        onTokenChange={setTurnstileToken}
+                        resetSignal={turnstileResetTick}
+                      />
+                    </Suspense>
                   ) : (
                     <div className="px-3 py-2 rounded-xl bg-emerald-500/10 border border-emerald-500/25 text-emerald-300 text-[11px] font-semibold flex items-center justify-center gap-1.5">
                       <CheckCircle2 className="w-3.5 h-3.5" />
@@ -6515,10 +6641,12 @@ export default function App() {
                           </button>
                         </div>
                       </div>
-                      <TurnstileWidget
-                        onTokenChange={setTurnstileToken}
-                        resetSignal={turnstileResetTick}
-                      />
+                      <Suspense fallback={<div className="h-[66px] rounded-xl bg-white/[0.04] animate-pulse" />}>
+                        <TurnstileWidget
+                          onTokenChange={setTurnstileToken}
+                          resetSignal={turnstileResetTick}
+                        />
+                      </Suspense>
 
                       <button 
                         type="submit"
@@ -6610,10 +6738,12 @@ export default function App() {
                         </label>
                       </div>
 
-                      <TurnstileWidget
-                        onTokenChange={setTurnstileToken}
-                        resetSignal={turnstileResetTick}
-                      />
+                      <Suspense fallback={<div className="h-[66px] rounded-xl bg-white/[0.04] animate-pulse" />}>
+                        <TurnstileWidget
+                          onTokenChange={setTurnstileToken}
+                          resetSignal={turnstileResetTick}
+                        />
+                      </Suspense>
 
                       <button 
                         type="submit"
@@ -7465,166 +7595,180 @@ export default function App() {
 
       {/* --- 2ND-PERSON EDITORIAL PUBLIC USER PROFILE MODAL --- */}
       {selectedProfile && (
-        <PublicProfileModal
-          profile={selectedProfile}
-          currentUser={currentUser}
-          usersList={usersList}
-          onlineUserIds={onlineUserIds}
-          posts={postsList}
-          onClose={() => setSelectedProfile(null)}
-          onToggleFollow={(u) => handleToggleFollow(u.uid || u.id)}
-          onOpenChat={(u) => {
-            openChatWithUser(u);
-            setSelectedProfile(null);
-          }}
-          onStartCall={(u) => {
-            setActiveCallUser(u);
-            setSelectedProfile(null);
-          }}
-          onShowRoute={(u) => {
-            handleDrawRouteToUser(u);
-            setSelectedProfile(null);
-          }}
-          onOpenConnections={(u, tab) => setFollowModalState({ user: u, tab })}
-          onOpenProfile={openUserProfileByUid}
-          onPostCreated={(post) =>
-            setPostsList((prev) => (prev.some((p) => p.id === post.id) ? prev : [post, ...prev]))
-          }
-          onPostUpdated={(post) =>
-            setPostsList((prev) => prev.map((p) => (p.id === post.id ? post : p)))
-          }
-          onPostDeleted={(postId) =>
-            setPostsList((prev) => prev.filter((p) => p.id !== postId))
-          }
-          onOpenAuth={() => openAuthModalClean('login')}
-        />
+        <Suspense fallback={null}>
+          <PublicProfileModal
+            profile={selectedProfile}
+            currentUser={currentUser}
+            usersList={usersList}
+            onlineUserIds={onlineUserIds}
+            posts={postsList}
+            onClose={() => setSelectedProfile(null)}
+            onToggleFollow={(u) => handleToggleFollow(u.uid || u.id)}
+            onOpenChat={(u) => {
+              openChatWithUser(u);
+              setSelectedProfile(null);
+            }}
+            onStartCall={(u) => {
+              setActiveCallUser(u);
+              setSelectedProfile(null);
+            }}
+            onShowRoute={(u) => {
+              handleDrawRouteToUser(u);
+              setSelectedProfile(null);
+            }}
+            onOpenConnections={(u, tab) => setFollowModalState({ user: u, tab })}
+            onOpenProfile={openUserProfileByUid}
+            onPostCreated={(post) =>
+              setPostsList((prev) => (prev.some((p) => p.id === post.id) ? prev : [post, ...prev]))
+            }
+            onPostUpdated={(post) =>
+              setPostsList((prev) => prev.map((p) => (p.id === post.id ? post : p)))
+            }
+            onPostDeleted={(postId) =>
+              setPostsList((prev) => prev.filter((p) => p.id !== postId))
+            }
+            onOpenAuth={() => openAuthModalClean('login')}
+          />
+        </Suspense>
       )}
 
       {/* --- INTERACTIVE FOLLOWERS / FOLLOWING LIST MODAL --- */}
-      <FollowListModal
-        isOpen={Boolean(followModalState)}
-        targetUser={followModalState?.user || null}
-        initialTab={followModalState?.tab || 'followers'}
-        currentUser={currentUser}
-        usersList={usersList}
-        onlineUserIds={onlineUserIds}
-        onClose={() => setFollowModalState(null)}
-        onOpenProfile={openUserProfileByUid}
-        onToggleFollow={(u) => handleToggleFollow(u.uid || u.id)}
-      />
+      {followModalState && (
+        <Suspense fallback={null}>
+          <FollowListModal
+            isOpen={true}
+            targetUser={followModalState?.user || null}
+            initialTab={followModalState?.tab || 'followers'}
+            currentUser={currentUser}
+            usersList={usersList}
+            onlineUserIds={onlineUserIds}
+            onClose={() => setFollowModalState(null)}
+            onOpenProfile={openUserProfileByUid}
+            onToggleFollow={(u) => handleToggleFollow(u.uid || u.id)}
+          />
+        </Suspense>
+      )}
 
       {/* --- PROFILE FACE ID VERIFICATION MODAL --- */}
       {showProfileFaceIdModal && currentUser && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/75 backdrop-blur-md">
           <div className="bg-[#11131C] rounded-[28px] max-w-md w-full p-6 relative shadow-[0_28px_80px_rgba(0,0,0,0.85)] border border-white/10 max-h-[92vh] overflow-y-auto text-zinc-100">
-            <FaceIdVerificationModal
-              apiBaseUrl={getBaseUrl()}
-              userUid={currentUser.uid}
-              userName={getSafeUserDisplayName(currentUser, currentUser.name || 'Foydalanuvchi')}
-              onVerified={async (result) => {
-                const facePhoto = result.photoUrl || result.photoDataUrl;
-                const preservedGender =
-                  currentUser.gender === 'male' || currentUser.gender === 'female'
-                    ? currentUser.gender
-                    : (result.userSelectedGender || currentUser.gender);
-                const updatedUser = {
-                  ...currentUser,
-                  avatar: facePhoto,
-                  gender: preservedGender,
-                  faceId: {
-                    ...result.faceId,
-                    detectedGender: preservedGender || result.faceId?.detectedGender || null,
-                    genderLabelUz: preservedGender ? genderToUzLabel(preservedGender) : result.faceId?.genderLabelUz,
-                  },
-                  isVerified: true,
-                };
-                const syncData = await safeFetchJson(getApiUrl('/api/users/sync'), {
-                  method: 'POST',
-                  headers: { 'Content-Type': 'application/json' },
-                  body: JSON.stringify({ user: updatedUser }),
-                });
-                const finalUser = syncData?.user || updatedUser;
-                setCurrentUser(finalUser);
-                setRegAvatar(resolveEffectiveProfileAvatar(finalUser));
-                setUsersList(prev => {
-                  const userMap = new Map<string, any>();
-                  prev.forEach(u => userMap.set(u.uid || u.id, u));
-                  userMap.set(finalUser.uid, finalUser);
-                  return Array.from(userMap.values());
-                });
-                try {
-                  localStorage.setItem('alov_current_user', JSON.stringify(finalUser));
-                  localStorage.setItem('alov_user_' + finalUser.uid, JSON.stringify(finalUser));
-                } catch {}
-                setShowProfileFaceIdModal(false);
-                showToast("Face ID surati profilingizga qo'yildi");
-              }}
-              onCancel={() => setShowProfileFaceIdModal(false)}
-            />
+            <Suspense fallback={<div className="py-10 text-center text-xs text-zinc-400">Face ID tayyorlanmoqda...</div>}>
+              <FaceIdVerificationModal
+                apiBaseUrl={getBaseUrl()}
+                userUid={currentUser.uid}
+                userName={getSafeUserDisplayName(currentUser, currentUser.name || 'Foydalanuvchi')}
+                onVerified={async (result) => {
+                  const facePhoto = result.photoUrl || result.photoDataUrl;
+                  const preservedGender =
+                    currentUser.gender === 'male' || currentUser.gender === 'female'
+                      ? currentUser.gender
+                      : (result.userSelectedGender || currentUser.gender);
+                  const updatedUser = {
+                    ...currentUser,
+                    avatar: facePhoto,
+                    gender: preservedGender,
+                    faceId: {
+                      ...result.faceId,
+                      detectedGender: preservedGender || result.faceId?.detectedGender || null,
+                      genderLabelUz: preservedGender ? genderToUzLabel(preservedGender) : result.faceId?.genderLabelUz,
+                    },
+                    isVerified: true,
+                  };
+                  const syncData = await safeFetchJson(getApiUrl('/api/users/sync'), {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ user: updatedUser }),
+                  });
+                  const finalUser = syncData?.user || updatedUser;
+                  setCurrentUser(finalUser);
+                  setRegAvatar(resolveEffectiveProfileAvatar(finalUser));
+                  setUsersList(prev => {
+                    const userMap = new Map<string, any>();
+                    prev.forEach(u => userMap.set(u.uid || u.id, u));
+                    userMap.set(finalUser.uid, finalUser);
+                    return Array.from(userMap.values());
+                  });
+                  try {
+                    localStorage.setItem('alov_current_user', JSON.stringify(finalUser));
+                    localStorage.setItem('alov_user_' + finalUser.uid, JSON.stringify(finalUser));
+                  } catch {}
+                  setShowProfileFaceIdModal(false);
+                  showToast("Face ID surati profilingizga qo'yildi");
+                }}
+                onCancel={() => setShowProfileFaceIdModal(false)}
+              />
+            </Suspense>
           </div>
         </div>
       )}
 
       {/* --- LIVE STREAM (JONLI EFIR) MODAL --- */}
       {showLiveModal && (
-        <LiveStreamModal
-          mode={liveModalMode}
-          streamId={activeLiveStreamId}
-          hostUser={activeLiveHostUser}
-          currentUser={{
-            uid: currentUser?.uid || firebaseUser?.uid,
-            id: currentUser?.id,
-            name: currentUser?.name || firebaseUser?.displayName || 'Alov Foydalanuvchisi',
-            avatar: currentUser?.avatar || firebaseUser?.photoURL || ''
-          }}
-          onClose={() => {
-            setShowLiveModal(false);
-            setActiveLiveStreamId(undefined);
-            setActiveLiveHostUser(undefined);
-          }}
-        />
+        <Suspense fallback={null}>
+          <LiveStreamModal
+            mode={liveModalMode}
+            streamId={activeLiveStreamId}
+            hostUser={activeLiveHostUser}
+            currentUser={{
+              uid: currentUser?.uid || firebaseUser?.uid,
+              id: currentUser?.id,
+              name: currentUser?.name || firebaseUser?.displayName || 'Alov Foydalanuvchisi',
+              avatar: currentUser?.avatar || firebaseUser?.photoURL || ''
+            }}
+            onClose={() => {
+              setShowLiveModal(false);
+              setActiveLiveStreamId(undefined);
+              setActiveLiveHostUser(undefined);
+            }}
+          />
+        </Suspense>
       )}
 
 
       {/* --- WHATSAPP / TELEGRAM STYLE INCOMING CALL MODAL WITH RINGTONE --- */}
       {incomingCallData && !activeCallUser && (
-        <IncomingCallModal
-          caller={incomingCallData.caller}
-          onAccept={() => {
-            setActiveCallUser(incomingCallData.caller);
-          }}
-          onReject={() => {
-            const targetUid = incomingCallData.caller?.uid || incomingCallData.caller?.id;
-            socketRef.current?.emit('reject-call', {
-              targetUid,
-              targetSocketId: incomingCallData.callerSocketId
-            });
-            socketRef.current?.emit('end-call', {
-              targetUid,
-              targetSocketId: incomingCallData.callerSocketId
-            });
-            setIncomingCallData(null);
-          }}
-        />
+        <Suspense fallback={null}>
+          <IncomingCallModal
+            caller={incomingCallData.caller}
+            onAccept={() => {
+              setActiveCallUser(incomingCallData.caller);
+            }}
+            onReject={() => {
+              const targetUid = incomingCallData.caller?.uid || incomingCallData.caller?.id;
+              socketRef.current?.emit('reject-call', {
+                targetUid,
+                targetSocketId: incomingCallData.callerSocketId
+              });
+              socketRef.current?.emit('end-call', {
+                targetUid,
+                targetSocketId: incomingCallData.callerSocketId
+              });
+              setIncomingCallData(null);
+            }}
+          />
+        </Suspense>
       )}
 
       {/* --- 1-ON-1 WEBRTC VIDEO CALL & SCREEN SHARING MODAL --- */}
       {activeCallUser && (
-        <OneOnOneCallModal
-          socket={socketRef.current}
-          currentUser={{
-            uid: currentUser?.uid || firebaseUser?.uid || 'user_' + Date.now(),
-            name: currentUser?.name || firebaseUser?.displayName || 'Alov Foydalanuvchisi',
-            avatar: currentUser?.avatar || firebaseUser?.photoURL || ''
-          }}
-          remoteUser={activeCallUser}
-          isIncoming={!!incomingCallData}
-          incomingOffer={incomingCallData?.offer}
-          onClose={() => {
-            setActiveCallUser(null);
-            setIncomingCallData(null);
-          }}
-        />
+        <Suspense fallback={null}>
+          <OneOnOneCallModal
+            socket={socketRef.current}
+            currentUser={{
+              uid: currentUser?.uid || firebaseUser?.uid || 'user_' + Date.now(),
+              name: currentUser?.name || firebaseUser?.displayName || 'Alov Foydalanuvchisi',
+              avatar: currentUser?.avatar || firebaseUser?.photoURL || ''
+            }}
+            remoteUser={activeCallUser}
+            isIncoming={!!incomingCallData}
+            incomingOffer={incomingCallData?.offer}
+            onClose={() => {
+              setActiveCallUser(null);
+              setIncomingCallData(null);
+            }}
+          />
+        </Suspense>
       )}
 
       {/* --- GIFT SELECTION MODAL --- */}
@@ -7989,28 +8133,30 @@ export default function App() {
 
       {/* --- ADMIN PANEL MODAL (@Salikh_07) --- */}
       {showAdminPanel && isAdminTelegramUser(currentUser) && (
-        <AdminPanelModal
-          currentUser={currentUser}
-          apiBaseUrl={getBaseUrl()}
-          socket={socketRef.current}
-          onClose={() => setShowAdminPanel(false)}
-          onOpenUserProfile={(uid, snapshot) => {
-            const { isSelf } = resolveExactUserByUid(uid, usersList, currentUser, snapshot);
-            if (isSelf) {
-              setShowAdminPanel(false);
-            }
-            openUserProfileByUid(uid, snapshot);
-          }}
-          onUserUpdated={(updatedUser) => {
-            if (updatedUser?.uid === currentUser?.uid) {
-              setCurrentUser(updatedUser);
-              try {
-                localStorage.setItem('alov_current_user', JSON.stringify(updatedUser));
-                localStorage.setItem('alov_user_' + updatedUser.uid, JSON.stringify(updatedUser));
-              } catch (e) {}
-            }
-          }}
-        />
+        <Suspense fallback={null}>
+          <AdminPanelModal
+            currentUser={currentUser}
+            apiBaseUrl={getBaseUrl()}
+            socket={socketRef.current}
+            onClose={() => setShowAdminPanel(false)}
+            onOpenUserProfile={(uid, snapshot) => {
+              const { isSelf } = resolveExactUserByUid(uid, usersList, currentUser, snapshot);
+              if (isSelf) {
+                setShowAdminPanel(false);
+              }
+              openUserProfileByUid(uid, snapshot);
+            }}
+            onUserUpdated={(updatedUser) => {
+              if (updatedUser?.uid === currentUser?.uid) {
+                setCurrentUser(updatedUser);
+                try {
+                  localStorage.setItem('alov_current_user', JSON.stringify(updatedUser));
+                  localStorage.setItem('alov_user_' + updatedUser.uid, JSON.stringify(updatedUser));
+                } catch (e) {}
+              }
+            }}
+          />
+        </Suspense>
       )}
 
       {/* --- MANDATORY TELEGRAM CHANNEL SUBSCRIPTION GATE --- */}
@@ -8025,14 +8171,16 @@ export default function App() {
         });
         if (!gateEval.gateRequired || !showSubscriptionGate) return null;
         return (
-          <MandatorySubscriptionGate
-            config={subscriptionConfig}
-            isSubscribed={isChannelSubscribed}
-            isChecking={isCheckingSubscription}
-            errorMsg={subscriptionError}
-            onVerifySubscription={() => void verifyMandatorySubscription()}
-            onContinue={() => setShowSubscriptionGate(false)}
-          />
+          <Suspense fallback={null}>
+            <MandatorySubscriptionGate
+              config={subscriptionConfig}
+              isSubscribed={isChannelSubscribed}
+              isChecking={isCheckingSubscription}
+              errorMsg={subscriptionError}
+              onVerifySubscription={() => void verifyMandatorySubscription()}
+              onContinue={() => setShowSubscriptionGate(false)}
+            />
+          </Suspense>
         );
       })()}
 

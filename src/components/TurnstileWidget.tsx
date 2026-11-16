@@ -37,7 +37,18 @@ export const TurnstileWidget: React.FC<TurnstileWidgetProps> = ({
   useEffect(() => {
     let cancelled = false;
     let pollTimer: number | null = null;
-    let maxAttempts = 40;
+    let maxAttempts = 50;
+
+    if (typeof document !== 'undefined' && !window.turnstile) {
+      const existing = document.querySelector('script[src*="challenges.cloudflare.com/turnstile/"]');
+      if (!existing) {
+        const script = document.createElement('script');
+        script.src = 'https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit';
+        script.async = true;
+        script.defer = true;
+        document.head.appendChild(script);
+      }
+    }
 
     const mountWidget = () => {
       if (cancelled || !containerRef.current) return;

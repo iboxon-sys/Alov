@@ -28,6 +28,7 @@ import {
   deriveAudioMetadataFromUrl,
 } from './src/utils/videoImport';
 import { parseMediaLink } from './src/utils/mediaLinks';
+import { buildGiphyApiUrl, parseGiphyGifItems, GIPHY_PUBLIC_API_KEY } from './src/utils/giphy';
 import {
   buildTelegramDisplayName,
   isPlaceholderAvatar,
@@ -59,13 +60,24 @@ import { canPersistUserProfile, telegramInputMatchesBotRecord } from './src/util
 import {
   togglePostLike,
   appendPostComment,
+  togglePostCommentLike,
+  appendCommentReply,
+  deletePostComment,
+  deleteCommentReply,
+  canUserDeleteComment,
   computeAuthorTotalLikes,
   isPostVisibleToViewer,
   mergePostsLists,
   normalizePostRecord,
   type PostItem,
-  type PostComment
+  type PostComment,
+  type PostCommentReply
 } from './src/utils/posts';
+import {
+  areOppositeGenders,
+  findOppositeGenderRouletteMatchIndex,
+  normalizeBinaryGender,
+} from './src/utils/genderFilter';
 import {
   getStreamRoomName,
   getLegacyStreamRoomName,
@@ -4758,12 +4770,24 @@ Suhbatlashish qoidalaringiz:
     const author = findUserByUidOrId(post.authorUid) || (post.authorId ? findUserByUidOrId(post.authorId) : undefined);
     const enrichedComments = (Array.isArray(post.comments) ? post.comments : []).map((c) => {
       const commentAuthor = findUserByUidOrId(c.authorUid) || (c.authorId ? findUserByUidOrId(c.authorId) : undefined);
+      const enrichedReplies = (Array.isArray(c.replies) ? c.replies : []).map((r) => {
+        const replyAuthor = findUserByUidOrId(r.authorUid) || (r.authorId ? findUserByUidOrId(r.authorId) : undefined);
+        return {
+          ...r,
+          authorName: replyAuthor?.name || r.authorName,
+          authorUsername: replyAuthor?.username || r.authorUsername || '',
+          authorAvatar: replyAuthor?.avatar || r.authorAvatar || '',
+          authorId: replyAuthor?.id || r.authorId,
+        };
+      });
       return {
         ...c,
         authorName: commentAuthor?.name || c.authorName,
         authorUsername: commentAuthor?.username || c.authorUsername || '',
         authorAvatar: commentAuthor?.avatar || c.authorAvatar || '',
         authorId: commentAuthor?.id || c.authorId,
+        likes: Array.isArray(c.likes) ? c.likes.map(String) : [],
+        replies: enrichedReplies,
       };
     });
     return {
@@ -4797,7 +4821,7 @@ Suhbatlashish qoidalaringiz:
     const sorted = [...filtered]
       .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
       .map(enrichPost)
-      .filter((p) => isPostVisibleToViewer(p, viewerUser));
+      .filter((p) => isPostVisibleToViewer(p, viewerUser, p.authorGender, { allowSelf: true }));
     res.json({ success: true, posts: sorted, storageMode: contentRepository.getMode() });
   });
 
@@ -4922,6 +4946,8 @@ Suhbatlashish qoidalaringiz:
         authorUsername: commentAuthor?.username || String(authorUsername || '').trim() || '',
         authorAvatar: commentAuthor?.avatar || String(authorAvatar || '').trim() || '',
         text: String(text).trim(),
+        likes: [],
+        replies: [],
         createdAt: new Date().toISOString(),
       };
 
@@ -4935,6 +4961,175 @@ Suhbatlashish qoidalaringiz:
       res.json({ success: true, comment, post: enriched });
     } catch (err: any) {
       res.status(500).json({ success: false, error: err.message });
+    }
+  });
+
+  app.post('/api/posts/:postId/comments/:commentId/like', async (req, res) => {
+    try {
+      const { postId, commentId } = req.params;
+      const uid = String(req.body?.uid || '').trim();
+      if (!uid) return res.status(400).json({ success: false, error: 'uid talab qilinadi' });
+
+      const idx = postsStore.findIndex((p) => p.id === postId);
+      if (idx === -1) return res.status(404).json({ success: false, error: 'Post topilmadi' });
+
+      const requester = findUserByUidOrId(uid);
+      const canonicalUid = requester?.uid || uid;
+      const result = togglePostCommentLike(postsStore[idx], commentId, canonicalUid);
+      if (!result.found) return res.status(404).json({ success: false, error: 'Izoh topilmadi' });
+
+      postsStore[idx] = result.post;
+      savePostsToDisk();
+      await contentRepository.upsertPost(result.post);
+
+      const enriched = enrichPost(result.post);
+      io.emit('post_updated', enriched);
+      res.json({ success: true, liked: result.liked, post: enriched });
+    } catch (err: any) {
+      res.status(500).json({ success: false, error: err.message });
+    }
+  });
+
+  app.post('/api/posts/:postId/comments/:commentId/replies', async (req, res) => {
+    try {
+      const { postId, commentId } = req.params;
+      const { authorUid, authorName = '', authorUsername = '', authorAvatar = '', text } = req.body || {};
+      if (!authorUid || !String(text || '').trim()) {
+        return res.status(400).json({ success: false, error: 'Javob matni kiritilmagan' });
+      }
+      const idx = postsStore.findIndex((p) => p.id === postId);
+      if (idx === -1) return res.status(404).json({ success: false, error: 'Post topilmadi' });
+
+      const replyAuthor = findUserByUidOrId(String(authorUid));
+      const reply: PostCommentReply = {
+        id: `rep_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+        commentId,
+        postId,
+        authorUid: replyAuthor?.uid || String(authorUid),
+        authorId: replyAuthor?.id,
+        authorName: replyAuthor?.name || String(authorName || '').trim() || 'Foydalanuvchi',
+        authorUsername: replyAuthor?.username || String(authorUsername || '').trim() || '',
+        authorAvatar: replyAuthor?.avatar || String(authorAvatar || '').trim() || '',
+        text: String(text).trim(),
+        createdAt: new Date().toISOString(),
+      };
+
+      const result = appendCommentReply(postsStore[idx], commentId, reply);
+      if (!result.found) return res.status(404).json({ success: false, error: 'Izoh topilmadi' });
+
+      postsStore[idx] = result.post;
+      savePostsToDisk();
+      await contentRepository.upsertPost(result.post);
+
+      const enriched = enrichPost(result.post);
+      io.emit('post_updated', enriched);
+      res.json({ success: true, reply, post: enriched });
+    } catch (err: any) {
+      res.status(500).json({ success: false, error: err.message });
+    }
+  });
+
+  app.delete('/api/posts/:postId/comments/:commentId', async (req, res) => {
+    try {
+      const { postId, commentId } = req.params;
+      const requesterUid = String(req.body?.uid || req.query.uid || '').trim();
+      const idx = postsStore.findIndex((p) => p.id === postId);
+      if (idx === -1) return res.status(404).json({ success: false, error: 'Post topilmadi' });
+
+      const targetPost = postsStore[idx];
+      const targetComment = (Array.isArray(targetPost.comments) ? targetPost.comments : []).find(
+        (c) => c.id === commentId
+      );
+      if (!targetComment) return res.status(404).json({ success: false, error: 'Izoh topilmadi' });
+
+      const verifiedAdmin = getVerifiedAdmin(requesterUid);
+      const requesterUser = requesterUid ? findUserByUidOrId(requesterUid) : undefined;
+      const allowed = Boolean(
+        verifiedAdmin ||
+          canUserDeleteComment(targetPost, targetComment, requesterUser || (requesterUid ? { uid: requesterUid } : null))
+      );
+      if (!allowed) {
+        return res.status(403).json({ success: false, error: "Izohni o'chirish huquqi yo'q" });
+      }
+
+      const result = deletePostComment(targetPost, commentId);
+      postsStore[idx] = result.post;
+      savePostsToDisk();
+      await contentRepository.upsertPost(result.post);
+
+      const enriched = enrichPost(result.post);
+      io.emit('post_updated', enriched);
+      res.json({ success: true, commentId, post: enriched });
+    } catch (err: any) {
+      res.status(500).json({ success: false, error: err.message });
+    }
+  });
+
+  app.delete('/api/posts/:postId/comments/:commentId/replies/:replyId', async (req, res) => {
+    try {
+      const { postId, commentId, replyId } = req.params;
+      const requesterUid = String(req.body?.uid || req.query.uid || '').trim();
+      const idx = postsStore.findIndex((p) => p.id === postId);
+      if (idx === -1) return res.status(404).json({ success: false, error: 'Post topilmadi' });
+
+      const targetPost = postsStore[idx];
+      const targetComment = (Array.isArray(targetPost.comments) ? targetPost.comments : []).find(
+        (c) => c.id === commentId
+      );
+      const targetReply = (Array.isArray(targetComment?.replies) ? targetComment!.replies : []).find(
+        (r) => r.id === replyId
+      );
+      if (!targetComment || !targetReply) {
+        return res.status(404).json({ success: false, error: 'Javob topilmadi' });
+      }
+
+      const verifiedAdmin = getVerifiedAdmin(requesterUid);
+      const requesterUser = requesterUid ? findUserByUidOrId(requesterUid) : undefined;
+      const allowed = Boolean(
+        verifiedAdmin ||
+          canUserDeleteComment(targetPost, targetReply, requesterUser || (requesterUid ? { uid: requesterUid } : null))
+      );
+      if (!allowed) {
+        return res.status(403).json({ success: false, error: "Javobni o'chirish huquqi yo'q" });
+      }
+
+      const result = deleteCommentReply(targetPost, commentId, replyId);
+      postsStore[idx] = result.post;
+      savePostsToDisk();
+      await contentRepository.upsertPost(result.post);
+
+      const enriched = enrichPost(result.post);
+      io.emit('post_updated', enriched);
+      res.json({ success: true, replyId, post: enriched });
+    } catch (err: any) {
+      res.status(500).json({ success: false, error: err.message });
+    }
+  });
+
+  app.get('/api/gifs', async (req, res) => {
+    try {
+      const q = String(req.query.q || '').trim();
+      const limit = Math.max(1, Math.min(50, Number(req.query.limit) || 20));
+      const apiKey = String(process.env.GIPHY_API_KEY || GIPHY_PUBLIC_API_KEY).trim();
+      const targetUrl = buildGiphyApiUrl(q, apiKey, limit);
+      const upstream = await fetch(targetUrl);
+      const payload = await upstream.json().catch(() => null);
+      if (!upstream.ok) {
+        return res.status(upstream.status).json({
+          success: false,
+          status: upstream.status,
+          error: payload?.meta?.msg || `Giphy HTTP ${upstream.status}`,
+          gifs: [],
+        });
+      }
+      const gifs = parseGiphyGifItems(payload);
+      return res.json({
+        success: true,
+        mode: q ? 'search' : 'trending',
+        gifs,
+      });
+    } catch (err: any) {
+      return res.status(500).json({ success: false, error: err?.message || 'GIF yuklash xatosi', gifs: [] });
     }
   });
 
@@ -5643,8 +5838,16 @@ Suhbatlashish qoidalaringiz:
   });
 
   // --- Live Streams Endpoints ---
-  app.get('/api/live-streams', (_req, res) => {
-    const activeStreams = Object.values(liveStreamsStore).filter((s: any) => s.status === 'active');
+  app.get('/api/live-streams', (req, res) => {
+    const viewerUid = req.query.viewerUid ? String(req.query.viewerUid).trim() : '';
+    const viewerUser = viewerUid ? findUserByUidOrId(viewerUid) || null : null;
+    const activeStreams = Object.values(liveStreamsStore).filter((s: any) => {
+      if (s?.status !== 'active') return false;
+      if (!viewerUser) return true;
+      const hostUser = findUserByUidOrId(String(s.hostUid || ''));
+      if (!hostUser) return false;
+      return areOppositeGenders(hostUser, viewerUser);
+    });
     res.json({ success: true, streams: activeStreams });
   });
 
@@ -6131,7 +6334,15 @@ Suhbatlashish qoidalaringiz:
       userChatsStore[chatId] = {
         id: chatId,
         participants: [senderId, recipientId].filter(Boolean),
-        lastMessage: message.text || (message.type === 'image' ? 'Rasm 🖼️' : (message.type === 'video' ? 'Video 🎥' : 'Xabar')),
+        lastMessage:
+          message.text ||
+          (message.type === 'gif'
+            ? 'GIF 🎬'
+            : message.type === 'image'
+            ? 'Rasm 🖼️'
+            : message.type === 'video'
+            ? 'Video 🎥'
+            : 'Xabar'),
         lastSenderId: senderId,
         updatedAt: new Date().toISOString()
       };
@@ -6692,17 +6903,25 @@ Suhbatlashish qoidalaringiz:
 
     const joinRouletteForSocket = (payload: any = {}) => {
       leaveRouletteForSocket(socket.id, true);
+      const rawUid = String(payload.uid || presenceRegistry.getSocketInfo(socket.id)?.uid || socket.id).trim();
+      const canonicalUser = findUserByUidOrId(rawUid);
+      const resolvedGender = normalizeBinaryGender(canonicalUser || payload);
+      if (!resolvedGender) {
+        socket.emit('roulette_error', {
+          message: "Chatruletka uchun profilingizda jinsingiz (Erkak / Ayol) ko'rsatilgan bo'lishi kerak.",
+        });
+        return;
+      }
+
       const myInfo = {
         socketId: socket.id,
-        uid: String(payload.uid || presenceRegistry.getSocketInfo(socket.id)?.uid || socket.id),
-        name: String(payload.name || 'Alov Foydalanuvchisi'),
-        avatar: String(payload.avatar || ''),
-        gender: String(payload.gender || ''),
+        uid: canonicalUser?.uid || rawUid,
+        name: canonicalUser?.name || String(payload.name || 'Alov Foydalanuvchisi'),
+        avatar: canonicalUser?.avatar || String(payload.avatar || ''),
+        gender: resolvedGender,
       };
 
-      const matchIdx = rouletteQueue.findIndex(
-        (candidate) => candidate.socketId !== socket.id && candidate.uid !== myInfo.uid
-      );
+      const matchIdx = findOppositeGenderRouletteMatchIndex(rouletteQueue, myInfo);
 
       if (matchIdx >= 0) {
         const partner = rouletteQueue.splice(matchIdx, 1)[0];

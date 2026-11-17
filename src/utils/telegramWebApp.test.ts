@@ -4,6 +4,7 @@ import {
   extractTelegramWebAppProfile,
   detectDualModePlatform,
   applyTelegramWebAppTheme,
+  enterTelegramMiniAppFullscreen,
 } from './telegramWebApp.ts';
 
 describe('Telegram WebApp & Web dual-mode helpers', () => {
@@ -65,5 +66,38 @@ describe('Telegram WebApp & Web dual-mode helpers', () => {
       'bottom:#111218',
     ]);
     assert.equal(extractTelegramWebAppProfile(null), null);
+  });
+
+  it('requests Telegram Mini App fullscreen automatically when supported', () => {
+    const calls: string[] = [];
+    const res = enterTelegramMiniAppFullscreen({
+      isFullscreen: false,
+      ready: () => calls.push('ready'),
+      expand: () => calls.push('expand'),
+      disableVerticalSwipes: () => calls.push('disableVerticalSwipes'),
+      requestFullscreen: () => calls.push('requestFullscreen'),
+    });
+
+    assert.deepEqual(res, { expanded: true, fullscreenRequested: true });
+    assert.deepEqual(calls, ['ready', 'expand', 'disableVerticalSwipes', 'requestFullscreen']);
+    assert.deepEqual(enterTelegramMiniAppFullscreen(null), {
+      expanded: false,
+      fullscreenRequested: false,
+    });
+  });
+
+  it('skips requestFullscreen and disableVerticalSwipes on older Telegram SDK versions (e.g. 6.0)', () => {
+    const calls: string[] = [];
+    const res = enterTelegramMiniAppFullscreen({
+      version: '6.0',
+      isVersionAtLeast: () => false,
+      ready: () => calls.push('ready'),
+      expand: () => calls.push('expand'),
+      disableVerticalSwipes: () => calls.push('disableVerticalSwipes'),
+      requestFullscreen: () => calls.push('requestFullscreen'),
+    });
+
+    assert.deepEqual(res, { expanded: true, fullscreenRequested: false });
+    assert.deepEqual(calls, ['ready', 'expand']);
   });
 });

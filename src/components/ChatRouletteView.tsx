@@ -10,10 +10,12 @@ import {
   ShieldCheck,
   Sparkles,
   UserCheck,
+  X,
 } from 'lucide-react';
 import { io, Socket } from 'socket.io-client';
 import { MAIN_RENDER_ORIGIN, getBaseUrl, resolveApiMediaUrl } from '../config/api';
 import { extractLocalAuthCredentials, resolveRealtimeBackendUrl } from '../utils/microFrontendBridge';
+import { normalizeBinaryGender } from '../utils/genderFilter';
 
 interface ChatRouletteViewProps {
   currentUser: any | null;
@@ -21,6 +23,7 @@ interface ChatRouletteViewProps {
   onOpenAuth?: () => void;
   onOpenProfile?: (uid: string, snapshot?: any) => void;
   onNotify?: (msg: string) => void;
+  onClose?: () => void;
 }
 
 const ICE_SERVERS: RTCConfiguration = {
@@ -62,6 +65,7 @@ export const ChatRouletteView: React.FC<ChatRouletteViewProps> = ({
   onOpenAuth,
   onOpenProfile,
   onNotify,
+  onClose,
 }) => {
   const [status, setStatus] = useState<'idle' | 'searching' | 'connected'>('idle');
   const [partner, setPartner] = useState<any | null>(null);
@@ -295,6 +299,13 @@ export const ChatRouletteView: React.FC<ChatRouletteViewProps> = ({
       onNotify?.('Suhbatdosh suhbatni tark etdi. Yangi suhbatdosh qidirilmoqda...');
     });
 
+    socket.on('roulette_error', ({ message }: { message?: string } = {}) => {
+      cleanupPeer();
+      setPartner(null);
+      setStatus('idle');
+      if (message) onNotify?.(message);
+    });
+
     return () => {
       socket.emit('leave_roulette');
       socket.disconnect();
@@ -309,6 +320,11 @@ export const ChatRouletteView: React.FC<ChatRouletteViewProps> = ({
       onOpenAuth?.();
       return;
     }
+    const myGender = normalizeBinaryGender(currentUser);
+    if (!myGender) {
+      onNotify?.("Chatruletka uchun profilingizda jinsingiz (Erkak / Ayol) ko'rsatilgan bo'lishi kerak.");
+      return;
+    }
     await ensureLocalMedia();
     setStatus('searching');
     setPartner(null);
@@ -316,7 +332,7 @@ export const ChatRouletteView: React.FC<ChatRouletteViewProps> = ({
       uid: currentUser.uid,
       name: currentUser.name || 'Foydalanuvchi',
       avatar: currentUser.avatar || '',
-      gender: currentUser.gender || '',
+      gender: myGender,
     });
   };
 
@@ -359,32 +375,52 @@ export const ChatRouletteView: React.FC<ChatRouletteViewProps> = ({
     setIsCamOff(next);
   };
 
+  const handleCloseFullscreen = () => {
+    handleStop();
+    if (onClose) {
+      onClose();
+      return;
+    }
+    try {
+      window.parent.postMessage({ type: 'ALOV_EMBED_NAVIGATE', tab: 'discover' }, '*');
+    } catch {}
+  };
+
   return (
     <div
       data-testid="chatruletka-view"
-      className="relative w-full h-full min-h-[calc(100dvh-140px)] bg-[#09090D] rounded-[24px] border border-white/[0.08] overflow-hidden flex flex-col justify-between text-white"
+      className="relative w-full h-full flex-1 min-h-0 bg-[#09090D] overflow-hidden flex flex-col justify-between text-white"
     >
       {/* Top Status Bar */}
-      <div className="relative z-20 p-4 flex items-center justify-between gap-2 bg-gradient-to-b from-black/75 to-transparent">
-        <div className="flex items-center gap-2.5">
-          <div className="w-9 h-9 rounded-xl bg-rose-600/20 border border-rose-500/35 flex items-center justify-center">
+      <div className="relative z-20 px-4 pt-4 pb-3 flex items-center justify-between gap-2 bg-gradient-to-b from-black/80 via-black/45 to-transparent">
+        <div className="flex items-center gap-2.5 min-w-0">
+          <button
+            type="button"
+            onClick={handleCloseFullscreen}
+            data-testid="chatruletka-close-btn"
+            aria-label="Chatruletkani yopish"
+            className="w-11 h-11 rounded-full bg-black/50 hover:bg-white/20 backdrop-blur-md border border-white/15 flex items-center justify-center text-white transition shrink-0 cursor-pointer"
+          >
+            <X className="w-5 h-5" />
+          </button>
+          <div className="w-9 h-9 rounded-xl bg-rose-600/20 border border-rose-500/35 flex items-center justify-center shrink-0">
             <Shuffle className="w-4.5 h-4.5 text-rose-400" />
           </div>
-          <div>
-            <h2 className="font-editorial text-lg font-bold leading-tight">Chatruletka</h2>
-            <p className="text-[11px] text-zinc-400">
+          <div className="min-w-0">
+            <h2 className="font-editorial text-lg font-bold leading-tight truncate">Chatruletka</h2>
+            <p className="text-[11px] text-zinc-400 truncate">
               {status === 'connected' && partner
                 ? `${partner.name} bilan jonli video suhbat`
                 : status === 'searching'
-                ? 'Tasodifiy suhbatdosh qidirilmoqda...'
-                : 'Yangi insonlar bilan tasodifiy 1-ga-1 video chat'}
+                ? 'Qarama-qarshi jinsli suhbatdosh qidirilmoqda...'
+                : 'Qarama-qarshi jinsli insonlar bilan jonli video tanishuv'}
             </p>
           </div>
         </div>
 
         <span
           data-testid="chatruletka-status-badge"
-          className={`px-3 py-1 rounded-full text-[11px] font-bold border ${
+          className={`px-3 py-1 rounded-full text-[11px] font-bold border shrink-0 whitespace-nowrap ${
             status === 'connected'
               ? 'bg-emerald-500/15 border-emerald-400/30 text-emerald-300'
               : status === 'searching'

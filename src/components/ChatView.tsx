@@ -39,6 +39,8 @@ import {
   computeCountdownParts,
 } from '../utils/tokenomics';
 import type { ChatMediaKind } from './ChatMediaPicker';
+import { ChatGifBar } from './ChatGifBar';
+import { isGifMessage, type GiphyGifItem } from '../utils/giphy';
 import { ChatSkeleton } from './Skeleton';
 
 const ChatMediaPicker = lazy(() =>
@@ -708,7 +710,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
   };
 
   const handleSendMessage = async (
-    type: 'text' | 'image' | 'video' | 'audio' | 'voice' = 'text',
+    type: 'text' | 'image' | 'gif' | 'video' | 'audio' | 'voice' = 'text',
     fileUrl?: string,
     customCaption?: string
   ) => {
@@ -725,7 +727,9 @@ export const ChatView: React.FC<ChatViewProps> = ({
       type === 'text'
         ? inputMessage.trim()
         : customCaption?.trim() ||
-          (type === 'image'
+          (type === 'gif'
+            ? 'GIF'
+            : type === 'image'
             ? 'Rasm 🖼️'
             : type === 'video'
             ? 'Video 🎥'
@@ -844,6 +848,12 @@ export const ChatView: React.FC<ChatViewProps> = ({
     if (isAIBot) {
       setIsAiTyping(true);
     }
+  };
+
+  const handleSendGif = async (gif: GiphyGifItem) => {
+    if (!gif?.sendUrl || !selectedChatUser) return;
+    setInputMessage('');
+    await handleSendMessage('image', gif.sendUrl, 'GIF');
   };
 
   const handleSendPickedMedia = async (file: File, kind: ChatMediaKind, caption?: string) => {
@@ -1236,7 +1246,9 @@ export const ChatView: React.FC<ChatViewProps> = ({
               className={`flex ${isMe ? 'justify-end' : 'justify-start'}`}
             >
               <div
-                className={`max-w-[85%] rounded-[18px] px-4 py-2.5 relative ${
+                className={`max-w-[85%] rounded-[18px] relative ${
+                  msg.type === 'image' || msg.type === 'gif' ? 'p-2' : 'px-4 py-2.5'
+                } ${
                   isMe
                     ? 'bg-gradient-to-br from-[#E11D48] to-[#BE123C] text-white rounded-tr-none shadow-md shadow-rose-950/30'
                     : 'bg-[#151824] text-zinc-100 border border-white/[0.08] rounded-tl-none'
@@ -1256,8 +1268,16 @@ export const ChatView: React.FC<ChatViewProps> = ({
                     <span>Google Meet Qo'shilish</span>
                     <ArrowUpRight className="w-3.5 h-3.5" />
                   </a>
-                ) : msg.type === 'image' ? (
-                  <img src={resolvedUrl} alt="" className="rounded-lg max-h-60 object-cover" />
+                ) : msg.type === 'image' || msg.type === 'gif' ? (
+                  <img
+                    src={resolvedUrl}
+                    alt={msg.text || (isGifMessage(msg) ? 'GIF' : '')}
+                    className={`rounded-xl max-h-60 ${
+                      isGifMessage(msg)
+                        ? 'min-w-[148px] min-h-[104px] max-w-[260px] w-auto object-contain bg-black/25 block'
+                        : 'object-cover block'
+                    }`}
+                  />
                 ) : msg.type === 'video' ? (
                   <Suspense fallback={null}>
                     <VideoPlayer url={resolvedUrl} />
@@ -1343,6 +1363,11 @@ export const ChatView: React.FC<ChatViewProps> = ({
             isUploading={isUploadingChatMedia}
           />
         </Suspense>
+        <ChatGifBar
+          query={inputMessage}
+          apiOrigin={apiOrigin}
+          onSelectGif={handleSendGif}
+        />
         <div className="flex items-end space-x-2 w-full">
           <button
             type="button"

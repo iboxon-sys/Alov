@@ -14,9 +14,16 @@ export interface TelegramWebAppLike {
     start_param?: string;
   };
   platform?: string;
+  version?: string;
+  isVersionAtLeast?: (version: string) => boolean;
   colorScheme?: 'light' | 'dark';
+  isExpanded?: boolean;
+  isFullscreen?: boolean;
   ready?: () => void;
   expand?: () => void;
+  requestFullscreen?: () => void;
+  exitFullscreen?: () => void;
+  disableVerticalSwipes?: () => void;
   setHeaderColor?: (color: string) => void;
   setBackgroundColor?: (color: string) => void;
   setBottomBarColor?: (color: string) => void;
@@ -72,14 +79,53 @@ export function detectDualModePlatform(win?: {
   };
 }
 
+export function enterTelegramMiniAppFullscreen(
+  tg: TelegramWebAppLike | null | undefined
+): { expanded: boolean; fullscreenRequested: boolean } {
+  if (!tg) return { expanded: false, fullscreenRequested: false };
+  let expanded = false;
+  let fullscreenRequested = false;
+  const canSwipeLock =
+    typeof tg.isVersionAtLeast === 'function' ? tg.isVersionAtLeast('7.7') : true;
+  const canFullscreen =
+    typeof tg.isVersionAtLeast === 'function' ? tg.isVersionAtLeast('8.0') : true;
+  try {
+    tg.ready?.();
+    if (typeof tg.expand === 'function') {
+      tg.expand();
+      expanded = true;
+    }
+    if (canSwipeLock && typeof tg.disableVerticalSwipes === 'function') {
+      tg.disableVerticalSwipes();
+    }
+    if (canFullscreen && typeof tg.requestFullscreen === 'function' && !tg.isFullscreen) {
+      tg.requestFullscreen();
+      fullscreenRequested = true;
+    }
+  } catch {
+    // Older Telegram clients may throw on requestFullscreen/disableVerticalSwipes
+  }
+  return { expanded, fullscreenRequested };
+}
+
 export function applyTelegramWebAppTheme(
   tg: TelegramWebAppLike | null | undefined,
   isDark: boolean = true
 ): boolean {
   if (!tg) return false;
+  const canSwipeLock =
+    typeof tg.isVersionAtLeast === 'function' ? tg.isVersionAtLeast('7.7') : true;
+  const canFullscreen =
+    typeof tg.isVersionAtLeast === 'function' ? tg.isVersionAtLeast('8.0') : true;
   try {
     tg.ready?.();
     tg.expand?.();
+    if (canSwipeLock && typeof tg.disableVerticalSwipes === 'function') {
+      tg.disableVerticalSwipes();
+    }
+    if (canFullscreen && typeof tg.requestFullscreen === 'function' && !tg.isFullscreen) {
+      tg.requestFullscreen();
+    }
     const bgHex = isDark ? '#09090D' : '#FDFBF9';
     const bottomHex = isDark ? '#111218' : '#FFFFFF';
     tg.setHeaderColor?.(bgHex);

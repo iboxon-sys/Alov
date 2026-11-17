@@ -8,6 +8,13 @@ import {
   formatPostTimeUz,
   isPostVisibleToViewer,
   canUserDeletePost,
+  canUserDeleteComment,
+  didPostAuthorLikeComment,
+  togglePostCommentLike,
+  appendCommentReply,
+  deletePostComment,
+  deleteCommentReply,
+  splitCommentRepliesForDisplay,
   filterPostsForAdminModeration,
   normalizePostRecord,
   mergePostsLists,
@@ -83,7 +90,7 @@ describe('Posts pure helpers', () => {
     assert.equal(formatPostTimeUz('2026-11-14T08:00:00Z', now), '4 soat oldin');
   });
 
-  it('shows valid posts to everyone across genders, missing gender, and guest sessions', () => {
+  it('strictly shows only opposite-gender posts to non-admins (plus own post), while admin sees all', () => {
     const maleViewer = { uid: 'm1', gender: 'male' };
     const femaleViewer = { uid: 'f1', gender: 'female' };
     const adminViewer = { uid: 'tg_salikh_07', telegram: '@Salikh_07', gender: 'male' };
@@ -94,25 +101,28 @@ describe('Posts pure helpers', () => {
     const missingGenderPost = { authorUid: 'u3' };
 
     assert.equal(isPostVisibleToViewer(ownMalePost, maleViewer), true);
-    assert.equal(isPostVisibleToViewer(otherMalePost, maleViewer), true);
+    assert.equal(isPostVisibleToViewer(otherMalePost, maleViewer), false);
     assert.equal(isPostVisibleToViewer(femalePost, maleViewer), true);
-    assert.equal(isPostVisibleToViewer(missingGenderPost, maleViewer), true);
-    assert.equal(isPostVisibleToViewer(femalePost, femaleViewer), true);
+    assert.equal(isPostVisibleToViewer(missingGenderPost, maleViewer), false);
+
+    assert.equal(isPostVisibleToViewer(femalePost, femaleViewer), false);
     assert.equal(isPostVisibleToViewer(otherMalePost, femaleViewer), true);
+
     assert.equal(isPostVisibleToViewer(otherMalePost, adminViewer), true);
     assert.equal(isPostVisibleToViewer(femalePost, adminViewer), true);
     assert.equal(isPostVisibleToViewer(missingGenderPost, adminViewer), true);
-    assert.equal(isPostVisibleToViewer(missingGenderPost, null), true);
+    assert.equal(isPostVisibleToViewer(missingGenderPost, null), false);
     assert.equal(isPostVisibleToViewer({ authorUid: '' }, maleViewer), false);
   });
 
-  it('allows admin (@Salikh_07 or role admin) to delete any user post while non-admins can delete only own posts', () => {
+  it('allows admin (@Salikh_07 or role admin) to delete any user post and any comment while non-admins can delete only own/post items', () => {
     const femalePost = { authorUid: 'u_female_1', authorId: 'id_f1' };
     const malePost = { authorUid: 'u_male_1', authorId: 'id_m1' };
 
     const adminByHandle = { uid: 'tg_salikh_07', telegram: '@Salikh_07' };
     const adminByRole = { uid: 'u_mod_1', role: 'admin' };
     const regularUser = { uid: 'u_female_1', id: 'id_f1', role: 'user' };
+    const thirdPartyUser = { uid: 'u_other', id: 'id_other', role: 'user' };
 
     assert.equal(canUserDeletePost(femalePost, adminByHandle), true);
     assert.equal(canUserDeletePost(malePost, adminByHandle), true);
@@ -121,6 +131,88 @@ describe('Posts pure helpers', () => {
     assert.equal(canUserDeletePost(femalePost, regularUser), true);
     assert.equal(canUserDeletePost(malePost, regularUser), false);
     assert.equal(canUserDeletePost(femalePost, null), false);
+
+    const commentOnMalePost = { authorUid: 'u_commenter', authorId: 'id_c' };
+    assert.equal(canUserDeleteComment(malePost, commentOnMalePost, adminByHandle), true);
+    assert.equal(canUserDeleteComment(malePost, commentOnMalePost, adminByRole), true);
+    assert.equal(canUserDeleteComment(malePost, commentOnMalePost, { uid: 'u_male_1' }), true);
+    assert.equal(canUserDeleteComment(malePost, commentOnMalePost, { uid: 'u_commenter' }), true);
+    assert.equal(canUserDeleteComment(malePost, commentOnMalePost, thirdPartyUser), false);
+  });
+
+  it('handles comment likes, author-liked badges, replies, author-reply surfacing, and deletion', () => {
+    let post: PostItem = {
+      id: 'p1',
+      authorUid: 'author_1',
+      authorId: 'A1',
+      authorName: 'Madina',
+      authorGender: 'female',
+      type: 'text',
+      caption: 'Salom!',
+      likes: [],
+      comments: [
+        {
+          id: 'c1',
+          postId: 'p1',
+          authorUid: 'u_m1',
+          authorName: 'Aziz',
+          text: 'Chiroyli!',
+          likes: [],
+          replies: [],
+          createdAt: '2026-11-16T10:00:00Z',
+        },
+      ],
+      createdAt: '2026-11-16T09:00:00Z',
+    };
+
+    // Non-author like does NOT show author-liked badge
+    const likedByOther = togglePostCommentLike(post, 'c1', 'u_m2');
+    assert.equal(likedByOther.liked, true);
+    assert.equal(didPostAuthorLikeComment(likedByOther.post, likedByOther.post.comments[0]), false);
+
+    // Author like DOES show author-liked badge
+    const likedByAuthor = togglePostCommentLike(likedByOther.post, 'c1', 'author_1');
+    assert.equal(likedByAuthor.liked, true);
+    assert.equal(didPostAuthorLikeComment(likedByAuthor.post, likedByAuthor.post.comments[0]), true);
+    post = likedByAuthor.post;
+
+    // Add one regular user reply (hidden when collapsed) and one author reply (immediately visible!)
+    post = appendCommentReply(post, 'c1', {
+      id: 'r_user',
+      commentId: 'c1',
+      postId: 'p1',
+      authorUid: 'u_m3',
+      authorName: 'Bobur',
+      text: 'Men ham qo‘shilaman',
+      createdAt: '2026-11-16T10:02:00Z',
+    }).post;
+    post = appendCommentReply(post, 'c1', {
+      id: 'r_author',
+      commentId: 'c1',
+      postId: 'p1',
+      authorUid: 'author_1',
+      authorName: 'Madina',
+      text: 'Rahmat Aziz!',
+      createdAt: '2026-11-16T10:03:00Z',
+    }).post;
+
+    const collapsed = splitCommentRepliesForDisplay(post, post.comments[0], false);
+    assert.equal(collapsed.totalRepliesCount, 2);
+    assert.equal(collapsed.hiddenRepliesCount, 1);
+    assert.deepEqual(collapsed.visibleReplies.map((r) => r.id), ['r_author']);
+
+    const expanded = splitCommentRepliesForDisplay(post, post.comments[0], true);
+    assert.equal(expanded.hiddenRepliesCount, 0);
+    assert.deepEqual(expanded.visibleReplies.map((r) => r.id), ['r_user', 'r_author']);
+
+    // Delete single reply and entire comment
+    const afterReplyDel = deleteCommentReply(post, 'c1', 'r_user');
+    assert.equal(afterReplyDel.deleted, true);
+    assert.equal(afterReplyDel.post.comments[0].replies?.length, 1);
+
+    const afterCommentDel = deletePostComment(afterReplyDel.post, 'c1');
+    assert.equal(afterCommentDel.deleted, true);
+    assert.equal(afterCommentDel.post.comments.length, 0);
   });
 
   it('filters posts for admin moderation by all/female/male and search query', () => {

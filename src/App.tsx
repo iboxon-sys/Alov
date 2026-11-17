@@ -73,6 +73,8 @@ import {
   resolvePostFaceIdStep,
 } from './utils/profileLookup';
 import { computeAuthorTotalLikes, isPostVisibleToViewer, type PostItem } from './utils/posts';
+import { areOppositeGenders, isOppositeGenderUserVisible } from './utils/genderFilter';
+import { applyTelegramWebAppTheme, enterTelegramMiniAppFullscreen } from './utils/telegramWebApp';
 import { validateUsername, isUsernameUnique, formatUsernameDisplay } from './utils/username';
 import { formatPhoneNumberPretty } from './utils/phone';
 import { shouldEnableCaptureProtection, isCaptureShortcutEvent } from './utils/captureProtection';
@@ -1017,8 +1019,8 @@ export default function App() {
     try {
       const tg = (window as any).Telegram?.WebApp;
       if (tg) {
-        tg.ready();
-        tg.expand();
+        enterTelegramMiniAppFullscreen(tg);
+        applyTelegramWebAppTheme(tg, true);
         const tgUser = tg.initDataUnsafe?.user;
         if (tgUser?.id) {
           const realName = [tgUser.first_name, tgUser.last_name].filter(Boolean).join(' ').trim();
@@ -1791,10 +1793,9 @@ export default function App() {
         delete markersRef.current['me'];
       }
 
-      // 2. Sync Other Users — ALL users who enabled location visibility appear on the shared map
-      const myUid = currentUser?.uid || firebaseUser?.uid;
+      // 2. Sync Other Users — STRICTLY opposite-gender users who enabled location visibility appear on the map
       const activeUsers = usersList.filter((u) => {
-        if (myUid && (u.uid === myUid || u.id === myUid)) return false;
+        if (!isOppositeGenderUserVisible(u, currentUser)) return false;
         if (filterRegion !== 'Barchasi' && u.region !== filterRegion) return false;
         if (filterDistrict !== 'Barchasi' && u.district !== filterDistrict) return false;
         const hasCoords = u.location && u.location.lat != null && u.location.lng != null;
@@ -3319,13 +3320,12 @@ export default function App() {
 
 
 
-  const targetGender = currentUser?.gender === 'male' ? 'female' : 'male';
   const viewerIsAdmin = isAdminTelegramUser(currentUser);
   const filteredCandidates = usersList.filter(u => {
     if (!currentUser) return false;
     if (currentUser.uid && (u.uid === currentUser.uid || u.id === currentUser.uid)) return false;
     if (currentUser.id && (u.id === currentUser.id || u.uid === currentUser.id)) return false;
-    if (!viewerIsAdmin && u.gender !== targetGender) return false;
+    if (!areOppositeGenders(u, currentUser)) return false;
     if (filterRegion !== 'Barchasi' && u.region !== filterRegion) return false;
     if (filterDistrict !== 'Barchasi' && u.district !== filterDistrict) return false;
     if (searchQuery.trim() && !u.name.toLowerCase().includes(searchQuery.toLowerCase()) && !u.bio.toLowerCase().includes(searchQuery.toLowerCase())) {
@@ -3340,7 +3340,8 @@ export default function App() {
       {/* Subtle Ambient Rose Glow */}
       <div className="pointer-events-none absolute -top-24 left-1/2 -translate-x-1/2 w-[540px] h-[180px] rounded-full bg-rose-600/10 blur-[90px]" />
 
-      {/* Top Header */}
+      {/* Top Header (hidden during full-screen Efirlar & Chatruletka) */}
+      {activeTab !== 'reels' && activeTab !== 'chatruletka' && (
       <header className="shrink-0 bg-[#0D0F17]/92 backdrop-blur-xl border-b border-white/[0.08] px-3 sm:px-5 h-14 flex items-center justify-between gap-2 z-40 overflow-hidden">
         <div
           className="flex items-center gap-2 sm:gap-2.5 min-w-0 shrink-0 cursor-pointer group"
@@ -3468,6 +3469,7 @@ export default function App() {
           </button>
         </div>
       </header>
+      )}
 
       {/* Scrollable Inner Viewport or Fixed-Height Reels / Map / Chat / Micro-Frontend Container */}
       {(() => {
@@ -3521,12 +3523,12 @@ export default function App() {
         }
 
         return (
-      <div className={`flex-1 min-h-0 relative z-10 ${(activeTab === 'reels' || activeTab === 'map') ? 'overflow-hidden flex flex-col p-0' : 'overflow-y-auto overscroll-y-contain p-3 sm:p-5 space-y-4 pb-24'}`}>
+      <div className={`flex-1 min-h-0 relative z-10 ${(activeTab === 'reels' || activeTab === 'map' || activeTab === 'chatruletka') ? 'overflow-hidden flex flex-col p-0' : 'overflow-y-auto overscroll-y-contain p-3 sm:p-5 space-y-4 pb-24'}`}>
         {/* --- LANDING TAB --- */}
         {activeTab === 'landing' && <LandingPage onLogin={() => openAuthModalClean('login')} />}
 
         {/* --- DISCOVER, POSTS, PROFILE WITH SMOOTH ANIMATEPRESENCE --- */}
-        {activeTab !== 'landing' && activeTab !== 'map' && activeTab !== 'reels' && (
+        {activeTab !== 'landing' && activeTab !== 'map' && activeTab !== 'reels' && activeTab !== 'chatruletka' && (
           <AnimatePresence mode="wait">
             <motion.div
               key={activeTab}
@@ -4229,7 +4231,23 @@ export default function App() {
           </AnimatePresence>
         )}
 
-        {/* --- REELS / EFIRLAR TAB (Only active live streamers) --- */}
+        {/* --- CHATRULETKA FULLSCREEN FALLBACK (when inline / non-iframe) --- */}
+        {activeTab === 'chatruletka' && (
+          <div className="absolute inset-0 z-30 bg-[#09090D] flex flex-col overflow-hidden" data-testid="inline-chatruletka-fullscreen">
+            <Suspense fallback={<div className="flex-1 flex items-center justify-center text-xs text-zinc-400">Chatruletka yuklanmoqda...</div>}>
+              <ChatRouletteView
+                currentUser={currentUser}
+                backendOrigin={getBaseUrl()}
+                onOpenAuth={() => openAuthModalClean('login')}
+                onOpenProfile={openUserProfileByUid}
+                onNotify={showToast}
+                onClose={() => setActiveTab('discover')}
+              />
+            </Suspense>
+          </div>
+        )}
+
+        {/* --- REELS / EFIRLAR TAB (Only active opposite-gender live streamers) --- */}
         {activeTab === 'reels' && (
           <div
             className="absolute inset-0 z-30 bg-black flex flex-col select-none"
@@ -4248,7 +4266,9 @@ export default function App() {
             }}
           >
             {(() => {
-              const activeLiveUsers = usersList.filter(u => u.isLive === true);
+              const activeLiveUsers = usersList.filter(
+                (u) => u.isLive === true && isOppositeGenderUserVisible(u, currentUser)
+              );
 
               if (activeLiveUsers.length === 0) {
                 return (
@@ -4428,8 +4448,7 @@ export default function App() {
                     <MapPin className="w-3.5 h-3.5 text-rose-400" />
                     <span className="tabular-nums">
                       {usersList.filter((u) => {
-                        const myUid = currentUser?.uid || firebaseUser?.uid;
-                        if (myUid && (u.uid === myUid || u.id === myUid)) return false;
+                        if (!isOppositeGenderUserVisible(u, currentUser)) return false;
                         if (filterRegion !== 'Barchasi' && u.region !== filterRegion) return false;
                         if (filterDistrict !== 'Barchasi' && u.district !== filterDistrict) return false;
                         return u.location?.lat != null && u.location?.lng != null && u.locationVisibility !== 'ghost' && u.isLocationEnabled !== false;
@@ -4632,7 +4651,7 @@ export default function App() {
       })()}
 
       {/* Sticky Bottom Navigation Dock with Animated Active Pill */}
-      {activeTab !== 'reels' && !(activeTab === 'chats' && chatView === 'conversation') && (
+      {activeTab !== 'reels' && activeTab !== 'chatruletka' && !(activeTab === 'chats' && chatView === 'conversation') && (
         <div className="sticky bottom-0 left-0 right-0 z-50 shrink-0 pointer-events-none pb-2.5 pt-1 px-1.5 sm:px-4">
           <nav className="pointer-events-auto max-w-2xl mx-auto bg-[#11131C]/92 backdrop-blur-2xl border border-white/[0.1] rounded-2xl sm:rounded-full px-1 py-1.5 flex items-center justify-around shadow-[0_16px_42px_rgba(0,0,0,0.65)]">
             {[
@@ -4760,7 +4779,7 @@ export default function App() {
           )}
 
           {embedRouteInfo.section === 'chatroulette' && (
-            <div className="flex-1 min-h-0 p-2 sm:p-4 flex flex-col">
+            <div className="flex-1 min-h-0 flex flex-col p-0">
               <Suspense fallback={<div className="py-12 text-center text-xs text-zinc-400">Chatruletka yuklanmoqda...</div>}>
                 <ChatRouletteView
                   currentUser={currentUser}
@@ -4768,6 +4787,11 @@ export default function App() {
                   onOpenAuth={() => openAuthModalClean('login')}
                   onOpenProfile={openUserProfileByUid}
                   onNotify={showToast}
+                  onClose={() => {
+                    try {
+                      window.parent.postMessage({ type: 'ALOV_EMBED_NAVIGATE', tab: 'discover' }, '*');
+                    } catch {}
+                  }}
                 />
               </Suspense>
             </div>
@@ -4814,7 +4838,9 @@ export default function App() {
                 <X className="w-5 h-5" />
               </button>
               {(() => {
-                const activeLiveUsers = usersList.filter((u) => u.isLive === true);
+                const activeLiveUsers = usersList.filter(
+                  (u) => u.isLive === true && isOppositeGenderUserVisible(u, currentUser)
+                );
                 const firstLive = activeLiveUsers[0];
                 return (
                   <div className="w-full h-full flex flex-col items-center justify-center p-6 text-center space-y-4">
@@ -7309,6 +7335,9 @@ export default function App() {
             socket={socketRef.current}
             onClose={() => setShowAdminPanel(false)}
             onPostDeleted={(postId) => setPostsList((prev) => prev.filter((p) => p.id !== postId))}
+            onPostUpdated={(updatedPost) =>
+              setPostsList((prev) => prev.map((p) => (p.id === updatedPost.id ? updatedPost : p)))
+            }
             onOpenUserProfile={(uid, snapshot) => {
               const { isSelf } = resolveExactUserByUid(uid, usersList, currentUser, snapshot);
               if (isSelf) {

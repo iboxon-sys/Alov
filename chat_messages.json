@@ -3,19 +3,19 @@
     {
       "id": "msg_1794928657067bk1",
       "senderId": "tg_salikh_07",
-      "senderName": "Salikh",
+      "senderName": "Salikh Admin",
       "text": "Salom Alov AI!",
       "type": "text",
       "fileUrl": null,
-      "status": "sent",
-      "read": false,
+      "status": "read",
+      "read": true,
       "createdAt": "2026-11-17T15:17:37.067Z",
       "time": "03:17 PM",
       "senderAvatar": "/api/telegram/avatar/6621230534",
       "sender": {
         "_id": "tg_salikh_07",
         "uid": "tg_salikh_07",
-        "name": "Salikh",
+        "name": "Salikh Admin",
         "avatar": "/api/telegram/avatar/6621230534"
       }
     }

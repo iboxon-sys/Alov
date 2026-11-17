@@ -21,6 +21,9 @@ import {
   Camera,
   Download,
   Loader2,
+  Reply,
+  ChevronDown,
+  ChevronUp,
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
@@ -29,6 +32,10 @@ import {
   formatPostTimeUz,
   isPostVisibleToViewer,
   canUserDeletePost,
+  canUserDeleteComment,
+  didPostAuthorLikeComment,
+  isActorPostAuthor,
+  splitCommentRepliesForDisplay,
   resolvePostAuthorGender,
   isPostCommentsOpen,
   validateNewPostDraft,
@@ -248,10 +255,16 @@ export const PostsFeed: React.FC<PostsFeedProps> = ({
   const [publishing, setPublishing] = useState(false);
   const [draftError, setDraftError] = useState('');
 
-  // Comments State
+  // Comments & Replies State
   const [commentInputs, setCommentInputs] = useState<Record<string, string>>({});
   const [expandedComments, setExpandedComments] = useState<Record<string, boolean>>({});
   const [submittingCommentId, setSubmittingCommentId] = useState<string | null>(null);
+  const [expandedReplies, setExpandedReplies] = useState<Record<string, boolean>>({});
+  const [openReplyComposerId, setOpenReplyComposerId] = useState<string | null>(null);
+  const [replyInputs, setReplyInputs] = useState<Record<string, string>>({});
+  const [submittingReplyId, setSubmittingReplyId] = useState<string | null>(null);
+  const [togglingCommentLikeId, setTogglingCommentLikeId] = useState<string | null>(null);
+  const [deletingCommentId, setDeletingCommentId] = useState<string | null>(null);
   const [detectedVerticalByPostId, setDetectedVerticalByPostId] = useState<Record<string, boolean>>({});
 
   // File Inputs
@@ -562,6 +575,130 @@ export const PostsFeed: React.FC<PostsFeedProps> = ({
       }
     } finally {
       setSubmittingCommentId(null);
+    }
+  };
+
+  const handleToggleCommentLike = async (postId: string, commentId: string) => {
+    if (!currentUser) {
+      onOpenAuth();
+      return;
+    }
+    setTogglingCommentLikeId(commentId);
+    try {
+      const res = await fetch(
+        getApiUrl(`/api/posts/${encodeURIComponent(postId)}/comments/${encodeURIComponent(commentId)}/like`),
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ uid: currentUser.uid }),
+        }
+      );
+      const data = await res.json().catch(() => ({}));
+      if (res.ok && data?.success && data?.post) {
+        onPostUpdated(data.post);
+      }
+    } finally {
+      setTogglingCommentLikeId(null);
+    }
+  };
+
+  const handleAddReply = async (postId: string, commentId: string, e: React.FormEvent) => {
+    e.preventDefault();
+    if (!currentUser) {
+      onOpenAuth();
+      return;
+    }
+    const text = (replyInputs[commentId] || '').trim();
+    if (!text) return;
+
+    setSubmittingReplyId(commentId);
+    try {
+      const res = await fetch(
+        getApiUrl(`/api/posts/${encodeURIComponent(postId)}/comments/${encodeURIComponent(commentId)}/replies`),
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            authorUid: currentUser.uid,
+            authorName: currentUser.name || '',
+            authorUsername: currentUser.username || '',
+            authorAvatar: currentUser.avatar || '',
+            text,
+          }),
+        }
+      );
+      const data = await res.json().catch(() => ({}));
+      if (res.ok && data?.success && data?.post) {
+        onPostUpdated(data.post);
+        setReplyInputs((prev) => ({ ...prev, [commentId]: '' }));
+        setOpenReplyComposerId(null);
+        // Non-author replies stay collapsed behind toggle unless user expands them,
+        // while author replies automatically surface immediately via splitCommentRepliesForDisplay.
+      } else {
+        if (onNotify) onNotify(data?.error || "Javob yozib bo'lmadi");
+      }
+    } finally {
+      setSubmittingReplyId(null);
+    }
+  };
+
+  const handleDeleteComment = async (postId: string, commentId: string) => {
+    if (!currentUser) return;
+    setDeletingCommentId(commentId);
+    try {
+      const res = await fetch(
+        getApiUrl(
+          `/api/posts/${encodeURIComponent(postId)}/comments/${encodeURIComponent(commentId)}?uid=${encodeURIComponent(
+            currentUser.uid
+          )}`
+        ),
+        {
+          method: 'DELETE',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ uid: currentUser.uid }),
+        }
+      );
+      const data = await res.json().catch(() => ({}));
+      if (res.ok && data?.success && data?.post) {
+        onPostUpdated(data.post);
+        if (onNotify) onNotify("Izoh o'chirildi");
+      } else {
+        if (onNotify) onNotify(data?.error || "Izohni o'chirib bo'lmadi");
+      }
+    } catch {
+      if (onNotify) onNotify("Izohni o'chirishda tarmoq xatoligi");
+    } finally {
+      setDeletingCommentId(null);
+    }
+  };
+
+  const handleDeleteReply = async (postId: string, commentId: string, replyId: string) => {
+    if (!currentUser) return;
+    setDeletingCommentId(replyId);
+    try {
+      const res = await fetch(
+        getApiUrl(
+          `/api/posts/${encodeURIComponent(postId)}/comments/${encodeURIComponent(commentId)}/replies/${encodeURIComponent(
+            replyId
+          )}?uid=${encodeURIComponent(currentUser.uid)}`
+        ),
+        {
+          method: 'DELETE',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ uid: currentUser.uid }),
+        }
+      );
+      const data = await res.json().catch(() => ({}));
+      if (res.ok && data?.success && data?.post) {
+        onPostUpdated(data.post);
+        if (onNotify) onNotify("Javob o'chirildi");
+      } else {
+        if (onNotify) onNotify(data?.error || "Javobni o'chirib bo'lmadi");
+      }
+    } catch {
+      if (onNotify) onNotify("Javobni o'chirishda tarmoq xatoligi");
+    } finally {
+      setDeletingCommentId(null);
     }
   };
 
@@ -1479,7 +1616,7 @@ export const PostsFeed: React.FC<PostsFeedProps> = ({
                     className="px-4 sm:px-5 py-3.5 bg-[#0D0F16] border-t border-white/[0.06] space-y-3"
                   >
                     {comments.length > 0 ? (
-                      <div className="space-y-2 max-h-[320px] overflow-y-auto pr-1">
+                      <div className="space-y-2.5 max-h-[380px] overflow-y-auto pr-1">
                         {comments.map((c) => {
                           const commentLiveUser =
                             usersList.find((u) => u.uid === c.authorUid || (c.authorId && u.id === c.authorId)) ||
@@ -1493,50 +1630,22 @@ export const PostsFeed: React.FC<PostsFeedProps> = ({
                           );
                           const commentName = commentLiveUser?.name || c.authorName || 'Foydalanuvchi';
                           const commentUsername = commentLiveUser?.username || c.authorUsername || '';
+                          const commentLikes = Array.isArray(c.likes) ? c.likes : [];
+                          const isCommentLikedByMe = Boolean(currentUser?.uid && commentLikes.includes(currentUser.uid));
+                          const authorLikedComment = didPostAuthorLikeComment(post, c);
+                          const isCommentAuthorSameAsPost = isActorPostAuthor(post, c);
+                          const canDeleteThisComment = canUserDeleteComment(post, c, currentUser);
+                          const isRepliesOpen = Boolean(expandedReplies[c.id]);
+                          const { visibleReplies, hiddenRepliesCount, totalRepliesCount } =
+                            splitCommentRepliesForDisplay(post, c, isRepliesOpen);
 
-                        return (
-                          <div
-                            key={c.id}
-                            data-testid={`comment-item-${c.id}`}
-                            className="flex items-start gap-2.5 bg-[#151822] p-2.5 sm:p-3 rounded-2xl border border-white/[0.06]"
-                          >
-                            <button
-                              type="button"
-                              onClick={() =>
-                                onOpenProfile(
-                                  c.authorUid,
-                                  commentLiveUser || {
-                                    uid: c.authorUid,
-                                    id: c.authorId,
-                                    name: commentName,
-                                    username: commentUsername,
-                                    avatar: commentAvatar,
-                                  }
-                                )
-                              }
-                              data-testid={`comment-author-avatar-${c.id}`}
-                              className="shrink-0 cursor-pointer group"
-                              title={`${commentName} profiliga o'tish`}
+                          return (
+                            <div
+                              key={c.id}
+                              data-testid={`comment-item-${c.id}`}
+                              className="bg-[#151822] p-3 rounded-2xl border border-white/[0.06] space-y-2"
                             >
-                              <img
-                                src={commentAvatar}
-                                alt={commentName}
-                                onError={(e) => {
-                                  e.currentTarget.style.display = 'none';
-                                  const fallback = e.currentTarget.nextElementSibling as HTMLElement | null;
-                                  if (fallback) fallback.style.display = 'flex';
-                                }}
-                                className="w-8 h-8 rounded-full object-cover border border-white/10 group-hover:ring-2 group-hover:ring-rose-500/50 transition-all"
-                              />
-                              <div
-                                className="hidden w-8 h-8 rounded-full bg-[#1C1F2B] text-rose-400 font-editorial font-black text-xs items-center justify-center border border-white/10"
-                                aria-hidden="true"
-                              >
-                                {commentName.charAt(0).toUpperCase()}
-                              </div>
-                            </button>
-                            <div className="flex-1 min-w-0">
-                              <div className="flex items-center gap-1.5 flex-wrap">
+                              <div className="flex items-start gap-2.5">
                                 <button
                                   type="button"
                                   onClick={() =>
@@ -1551,28 +1660,272 @@ export const PostsFeed: React.FC<PostsFeedProps> = ({
                                       }
                                     )
                                   }
-                                  data-testid={`comment-author-name-${c.id}`}
-                                  className="text-xs font-bold text-white hover:text-rose-400 hover:underline transition-colors text-left cursor-pointer"
+                                  data-testid={`comment-author-avatar-${c.id}`}
+                                  className="shrink-0 cursor-pointer group"
+                                  title={`${commentName} profiliga o'tish`}
                                 >
-                                  {commentName}
+                                  <img
+                                    src={commentAvatar}
+                                    alt={commentName}
+                                    onError={(e) => {
+                                      e.currentTarget.style.display = 'none';
+                                      const fallback = e.currentTarget.nextElementSibling as HTMLElement | null;
+                                      if (fallback) fallback.style.display = 'flex';
+                                    }}
+                                    className="w-8 h-8 rounded-full object-cover border border-white/10 group-hover:ring-2 group-hover:ring-rose-500/50 transition-all"
+                                  />
+                                  <div
+                                    className="hidden w-8 h-8 rounded-full bg-[#1C1F2B] text-rose-400 font-editorial font-black text-xs items-center justify-center border border-white/10"
+                                    aria-hidden="true"
+                                  >
+                                    {commentName.charAt(0).toUpperCase()}
+                                  </div>
                                 </button>
-                                {commentUsername && (
-                                  <span className="text-[10px] font-semibold text-zinc-400 font-mono">
-                                    {formatUsernameDisplay(commentUsername)}
-                                  </span>
-                                )}
-                                <span className="text-[10px] text-zinc-600">·</span>
-                                <span className="text-[10px] text-zinc-500">
-                                  {formatPostTimeUz(c.createdAt)}
-                                </span>
+                                <div className="flex-1 min-w-0">
+                                  <div className="flex items-start justify-between gap-2">
+                                    <div className="flex items-center gap-1.5 flex-wrap min-w-0">
+                                      <button
+                                        type="button"
+                                        onClick={() =>
+                                          onOpenProfile(
+                                            c.authorUid,
+                                            commentLiveUser || {
+                                              uid: c.authorUid,
+                                              id: c.authorId,
+                                              name: commentName,
+                                              username: commentUsername,
+                                              avatar: commentAvatar,
+                                            }
+                                          )
+                                        }
+                                        data-testid={`comment-author-name-${c.id}`}
+                                        className="text-xs font-bold text-white hover:text-rose-400 hover:underline transition-colors text-left cursor-pointer"
+                                      >
+                                        {commentName}
+                                      </button>
+                                      {isCommentAuthorSameAsPost && (
+                                        <span className="text-[10px] font-bold text-amber-300">
+                                          · Muallif
+                                        </span>
+                                      )}
+                                      {commentUsername && (
+                                        <span className="text-[10px] font-semibold text-zinc-400 font-mono">
+                                          {formatUsernameDisplay(commentUsername)}
+                                        </span>
+                                      )}
+                                      <span className="text-[10px] text-zinc-600">·</span>
+                                      <span className="text-[10px] text-zinc-500">
+                                        {formatPostTimeUz(c.createdAt)}
+                                      </span>
+                                    </div>
+
+                                    {canDeleteThisComment && (
+                                      <button
+                                        type="button"
+                                        disabled={deletingCommentId === c.id}
+                                        onClick={() => handleDeleteComment(post.id, c.id)}
+                                        data-testid={`delete-comment-btn-${c.id}`}
+                                        aria-label="Izohni o'chirish"
+                                        title={viewerIsAdmin ? "Admin sifatida izohni o'chirish" : "Izohni o'chirish"}
+                                        className="p-1.5 rounded-lg text-zinc-400 hover:text-rose-400 hover:bg-rose-500/15 transition-colors shrink-0 cursor-pointer disabled:opacity-40"
+                                      >
+                                        <Trash2 className="w-3.5 h-3.5" />
+                                      </button>
+                                    )}
+                                  </div>
+
+                                  <p className="text-xs text-zinc-200 mt-1 leading-relaxed break-words">
+                                    {c.text}
+                                  </p>
+
+                                  {/* Comment Actions Row + Author Liked Marker */}
+                                  <div className="flex items-center flex-wrap gap-3 mt-2 pt-1.5 border-t border-white/[0.05]">
+                                    <button
+                                      type="button"
+                                      disabled={togglingCommentLikeId === c.id}
+                                      onClick={() => handleToggleCommentLike(post.id, c.id)}
+                                      data-testid={`like-comment-btn-${c.id}`}
+                                      className={`inline-flex items-center gap-1 text-[11px] font-bold py-1 px-2 rounded-lg transition-colors cursor-pointer ${
+                                        isCommentLikedByMe
+                                          ? 'text-rose-400 bg-rose-500/15'
+                                          : 'text-zinc-400 hover:text-rose-400 hover:bg-white/[0.05]'
+                                      }`}
+                                    >
+                                      <Heart className={`w-3.5 h-3.5 ${isCommentLikedByMe ? 'fill-rose-500 text-rose-500' : ''}`} />
+                                      <span className="tabular-nums">{commentLikes.length}</span>
+                                    </button>
+
+                                    <button
+                                      type="button"
+                                      onClick={() =>
+                                        setOpenReplyComposerId((prev) => (prev === c.id ? null : c.id))
+                                      }
+                                      data-testid={`reply-comment-btn-${c.id}`}
+                                      className="inline-flex items-center gap-1 text-[11px] font-semibold text-zinc-400 hover:text-white py-1 px-2 rounded-lg hover:bg-white/[0.05] transition-colors cursor-pointer"
+                                    >
+                                      <Reply className="w-3.5 h-3.5" />
+                                      <span>Javob yozish</span>
+                                    </button>
+
+                                    {authorLikedComment && (
+                                      <span
+                                        data-testid={`author-liked-badge-${c.id}`}
+                                        className="inline-flex items-center gap-1 text-[10.5px] font-bold text-rose-300"
+                                      >
+                                        <Heart className="w-3 h-3 fill-rose-500 text-rose-500" />
+                                        <span>Muallifga yoqdi</span>
+                                      </span>
+                                    )}
+                                  </div>
+
+                                  {/* Replies List: Author replies show immediately, other replies hidden until user clicks "Javoblarni ko'rish" */}
+                                  {(visibleReplies.length > 0 || hiddenRepliesCount > 0) && (
+                                    <div
+                                      data-testid={`comment-replies-section-${c.id}`}
+                                      className="mt-2.5 pl-3 border-l border-white/10 space-y-2"
+                                    >
+                                      {visibleReplies.map((r) => {
+                                        const replyLiveUser =
+                                          usersList.find(
+                                            (u) => u.uid === r.authorUid || (r.authorId && u.id === r.authorId)
+                                          ) ||
+                                          (currentUser && (currentUser.uid === r.authorUid || currentUser.id === r.authorId)
+                                            ? currentUser
+                                            : null);
+                                        const replyAvatar = resolveApiMediaUrl(
+                                          replyLiveUser?.avatar ||
+                                            r.authorAvatar ||
+                                            `https://ui-avatars.com/api/?name=${encodeURIComponent(
+                                              replyLiveUser?.name || r.authorName || 'U'
+                                            )}&background=1C1F2B&color=F4F4F6`
+                                        );
+                                        const replyName = replyLiveUser?.name || r.authorName || 'Foydalanuvchi';
+                                        const replyIsAuthor = isActorPostAuthor(post, r);
+                                        const canDeleteThisReply = canUserDeleteComment(post, r, currentUser);
+
+                                        return (
+                                          <div
+                                            key={r.id}
+                                            data-testid={`reply-item-${r.id}`}
+                                            data-author-reply={replyIsAuthor ? 'true' : 'false'}
+                                            className={`flex items-start gap-2 p-2 rounded-xl border ${
+                                              replyIsAuthor
+                                                ? 'bg-rose-500/[0.08] border-rose-500/25'
+                                                : 'bg-[#10121B] border-white/[0.05]'
+                                            }`}
+                                          >
+                                            <img
+                                              src={replyAvatar}
+                                              alt={replyName}
+                                              className="w-6 h-6 rounded-full object-cover border border-white/10 shrink-0"
+                                            />
+                                            <div className="flex-1 min-w-0">
+                                              <div className="flex items-start justify-between gap-1.5">
+                                                <div className="flex items-center gap-1.5 flex-wrap text-[11px]">
+                                                  <button
+                                                    type="button"
+                                                    onClick={() => onOpenProfile(r.authorUid, replyLiveUser || r)}
+                                                    className="font-bold text-white hover:text-rose-400 transition-colors cursor-pointer"
+                                                  >
+                                                    {replyName}
+                                                  </button>
+                                                  {replyIsAuthor && (
+                                                    <span
+                                                      data-testid={`author-reply-label-${r.id}`}
+                                                      className="text-[10px] font-bold text-rose-300"
+                                                    >
+                                                      · Avtor javobi
+                                                    </span>
+                                                  )}
+                                                  <span className="text-[10px] text-zinc-600">·</span>
+                                                  <span className="text-[10px] text-zinc-500">
+                                                    {formatPostTimeUz(r.createdAt)}
+                                                  </span>
+                                                </div>
+                                                {canDeleteThisReply && (
+                                                  <button
+                                                    type="button"
+                                                    disabled={deletingCommentId === r.id}
+                                                    onClick={() => handleDeleteReply(post.id, c.id, r.id)}
+                                                    data-testid={`delete-reply-btn-${r.id}`}
+                                                    aria-label="Javobni o'chirish"
+                                                    className="p-1 rounded text-zinc-400 hover:text-rose-400 hover:bg-rose-500/15 transition-colors shrink-0 cursor-pointer"
+                                                  >
+                                                    <Trash2 className="w-3 h-3" />
+                                                  </button>
+                                                )}
+                                              </div>
+                                              <p className="text-[11.5px] text-zinc-200 mt-0.5 leading-relaxed break-words">
+                                                {r.text}
+                                              </p>
+                                            </div>
+                                          </div>
+                                        );
+                                      })}
+
+                                      {hiddenRepliesCount > 0 && !isRepliesOpen && (
+                                        <button
+                                          type="button"
+                                          onClick={() =>
+                                            setExpandedReplies((prev) => ({ ...prev, [c.id]: true }))
+                                          }
+                                          data-testid={`toggle-replies-btn-${c.id}`}
+                                          className="inline-flex items-center gap-1 text-[11px] font-bold text-rose-300 hover:text-rose-200 py-1 cursor-pointer"
+                                        >
+                                          <ChevronDown className="w-3.5 h-3.5" />
+                                          <span>Javoblarni ko&apos;rish ({hiddenRepliesCount})</span>
+                                        </button>
+                                      )}
+
+                                      {isRepliesOpen && totalRepliesCount > 0 && (
+                                        <button
+                                          type="button"
+                                          onClick={() =>
+                                            setExpandedReplies((prev) => ({ ...prev, [c.id]: false }))
+                                          }
+                                          data-testid={`toggle-replies-btn-${c.id}`}
+                                          className="inline-flex items-center gap-1 text-[11px] font-semibold text-zinc-400 hover:text-zinc-200 py-1 cursor-pointer"
+                                        >
+                                          <ChevronUp className="w-3.5 h-3.5" />
+                                          <span>Javoblarni yashirish</span>
+                                        </button>
+                                      )}
+                                    </div>
+                                  )}
+
+                                  {/* Inline Reply Composer */}
+                                  {openReplyComposerId === c.id && (
+                                    <form
+                                      onSubmit={(e) => handleAddReply(post.id, c.id, e)}
+                                      className="flex items-center gap-1.5 mt-2"
+                                      data-testid={`reply-form-${c.id}`}
+                                    >
+                                      <input
+                                        type="text"
+                                        value={replyInputs[c.id] || ''}
+                                        onChange={(e) =>
+                                          setReplyInputs((prev) => ({ ...prev, [c.id]: e.target.value }))
+                                        }
+                                        placeholder={`${commentName}ga javob yozing...`}
+                                        data-testid={`reply-input-${c.id}`}
+                                        className="flex-1 px-3 py-1.5 bg-[#0D0F16] border border-white/10 rounded-xl text-[11.5px] text-zinc-100 placeholder-zinc-500 focus:outline-none focus:border-rose-500"
+                                      />
+                                      <button
+                                        type="submit"
+                                        disabled={submittingReplyId === c.id || !(replyInputs[c.id] || '').trim()}
+                                        data-testid={`reply-submit-${c.id}`}
+                                        aria-label="Javob yuborish"
+                                        className="px-3 py-1.5 rounded-xl bg-[#E11D48] hover:bg-[#BE123C] text-white text-[11px] font-bold disabled:opacity-40 cursor-pointer shrink-0"
+                                      >
+                                        Yuborish
+                                      </button>
+                                    </form>
+                                  )}
+                                </div>
                               </div>
-                              <p className="text-xs text-zinc-300 mt-1 leading-relaxed break-words">
-                                {c.text}
-                              </p>
                             </div>
-                          </div>
-                        );
-                      })}
+                          );
+                        })}
                       </div>
                     ) : (
                       <p className="text-[11px] text-zinc-500">

@@ -49,6 +49,7 @@ interface AdminPanelModalProps {
   onClose: () => void;
   onUserUpdated?: (user: any) => void;
   onPostDeleted?: (postId: string) => void;
+  onPostUpdated?: (post: PostItem) => void;
   onOpenUserProfile?: (uid: string, snapshot?: any) => void;
 }
 
@@ -66,6 +67,7 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
   onClose,
   onUserUpdated,
   onPostDeleted,
+  onPostUpdated,
   onOpenUserProfile,
 }) => {
   const [activeSubTab, setActiveSubTab] = useState<'requests' | 'posts' | 'users' | 'transactions' | 'telegram'>('requests');
@@ -73,6 +75,7 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
   const [onlyPending, setOnlyPending] = useState(false);
   const [userSegment, setUserSegment] = useState<'all' | 'verified' | 'banned' | 'admins'>('all');
   const [postGenderFilter, setPostGenderFilter] = useState<'all' | 'female' | 'male'>('all');
+  const [expandedAdminComments, setExpandedAdminComments] = useState<Record<string, boolean>>({});
   const [postSearchQuery, setPostSearchQuery] = useState('');
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
@@ -286,6 +289,64 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
         setPosts((prev) => prev.filter((p) => p.id !== postId));
         if (onPostDeleted) onPostDeleted(postId);
         setNotice("Post tizimdan butunlay o'chirildi");
+      }
+    } catch (e: any) {
+      setError(e?.message || 'Tarmoq xatoligi');
+    } finally {
+      setBusyId(null);
+    }
+  };
+
+  const handleDeleteCommentAsAdmin = async (postId: string, commentId: string) => {
+    if (!adminUid || !postId || !commentId) return;
+    setBusyId(commentId);
+    setError('');
+    setNotice('');
+    try {
+      const res = await fetch(
+        `${apiBaseUrl}/api/posts/${encodeURIComponent(postId)}/comments/${encodeURIComponent(commentId)}?uid=${encodeURIComponent(adminUid)}`,
+        {
+          method: 'DELETE',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ uid: adminUid }),
+        }
+      );
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data?.success || !data?.post) {
+        setError(data?.error || "Izohni o'chirishda xatolik yuz berdi");
+      } else {
+        setPosts((prev) => prev.map((p) => (p.id === postId ? data.post : p)));
+        onPostUpdated?.(data.post);
+        setNotice("Izoh tizimdan o'chirildi");
+      }
+    } catch (e: any) {
+      setError(e?.message || 'Tarmoq xatoligi');
+    } finally {
+      setBusyId(null);
+    }
+  };
+
+  const handleDeleteReplyAsAdmin = async (postId: string, commentId: string, replyId: string) => {
+    if (!adminUid || !postId || !commentId || !replyId) return;
+    setBusyId(replyId);
+    setError('');
+    setNotice('');
+    try {
+      const res = await fetch(
+        `${apiBaseUrl}/api/posts/${encodeURIComponent(postId)}/comments/${encodeURIComponent(commentId)}/replies/${encodeURIComponent(replyId)}?uid=${encodeURIComponent(adminUid)}`,
+        {
+          method: 'DELETE',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ uid: adminUid }),
+        }
+      );
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data?.success || !data?.post) {
+        setError(data?.error || "Javobni o'chirishda xatolik yuz berdi");
+      } else {
+        setPosts((prev) => prev.map((p) => (p.id === postId ? data.post : p)));
+        onPostUpdated?.(data.post);
+        setNotice("Javob tizimdan o'chirildi");
       }
     } catch (e: any) {
       setError(e?.message || 'Tarmoq xatoligi');
@@ -1179,18 +1240,90 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
                             )}
                           </div>
 
-                          <div className="flex items-center justify-between pt-2 border-t border-white/[0.06] text-[11px] text-zinc-400">
-                            <div className="flex items-center gap-3">
-                              <span className="inline-flex items-center gap-1">
-                                <Heart className="w-3.5 h-3.5 text-rose-400" />
-                                {Array.isArray(p.likes) ? p.likes.length : 0}
-                              </span>
-                              <span className="inline-flex items-center gap-1">
-                                <MessageCircle className="w-3.5 h-3.5 text-zinc-400" />
-                                {Array.isArray(p.comments) ? p.comments.length : 0}
-                              </span>
+                          <div className="space-y-2 pt-2 border-t border-white/[0.06]">
+                            <div className="flex items-center justify-between text-[11px] text-zinc-400">
+                              <div className="flex items-center gap-3">
+                                <span className="inline-flex items-center gap-1 tabular-nums">
+                                  <Heart className="w-3.5 h-3.5 text-rose-400" />
+                                  {Array.isArray(p.likes) ? p.likes.length : 0}
+                                </span>
+                                <button
+                                  type="button"
+                                  data-testid={`admin-toggle-post-comments-${p.id}`}
+                                  onClick={() =>
+                                    setExpandedAdminComments((prev) => ({ ...prev, [p.id]: !prev[p.id] }))
+                                  }
+                                  className="inline-flex items-center gap-1 text-zinc-300 hover:text-rose-300 font-semibold cursor-pointer tabular-nums"
+                                >
+                                  <MessageCircle className="w-3.5 h-3.5" />
+                                  <span>
+                                    {Array.isArray(p.comments) ? p.comments.length : 0} izoh
+                                    {Array.isArray(p.comments) && p.comments.length > 0
+                                      ? expandedAdminComments[p.id]
+                                        ? ' (Yashirish)'
+                                        : " (Ko'rish)"
+                                      : ''}
+                                  </span>
+                                </button>
+                              </div>
+                              <span className="font-mono text-[10px] text-zinc-500">{p.id}</span>
                             </div>
-                            <span className="font-mono text-[10px] text-zinc-500">{p.id}</span>
+
+                            {expandedAdminComments[p.id] && Array.isArray(p.comments) && p.comments.length > 0 && (
+                              <div
+                                data-testid={`admin-post-comments-list-${p.id}`}
+                                className="space-y-1.5 max-h-56 overflow-y-auto bg-[#0B0C12] p-2.5 rounded-xl border border-white/[0.06]"
+                              >
+                                {p.comments.map((c) => (
+                                  <div key={c.id} className="space-y-1.5 bg-[#12141E] p-2 rounded-lg border border-white/[0.05]">
+                                    <div className="flex items-start justify-between gap-2">
+                                      <div className="min-w-0">
+                                        <p className="text-[11px] font-bold text-white truncate">
+                                          {c.authorName}{' '}
+                                          <span className="text-[10px] font-normal text-zinc-500">
+                                            · {formatPostTimeUz(c.createdAt)}
+                                          </span>
+                                        </p>
+                                        <p className="text-[11px] text-zinc-300 break-words">{c.text}</p>
+                                      </div>
+                                      <button
+                                        type="button"
+                                        disabled={busyId === c.id}
+                                        onClick={() => handleDeleteCommentAsAdmin(p.id, c.id)}
+                                        data-testid={`admin-delete-comment-${c.id}`}
+                                        aria-label="Izohni o'chirish"
+                                        className="px-2 py-1 rounded-lg bg-rose-500/15 hover:bg-rose-600 text-rose-300 hover:text-white text-[10px] font-bold shrink-0 cursor-pointer"
+                                      >
+                                        O&apos;chirish
+                                      </button>
+                                    </div>
+
+                                    {Array.isArray(c.replies) && c.replies.length > 0 && (
+                                      <div className="pl-2.5 border-l border-white/10 space-y-1">
+                                        {c.replies.map((r) => (
+                                          <div key={r.id} className="flex items-start justify-between gap-2 text-[10.5px]">
+                                            <div className="min-w-0">
+                                              <span className="font-semibold text-zinc-200">{r.authorName}: </span>
+                                              <span className="text-zinc-400 break-words">{r.text}</span>
+                                            </div>
+                                            <button
+                                              type="button"
+                                              disabled={busyId === r.id}
+                                              onClick={() => handleDeleteReplyAsAdmin(p.id, c.id, r.id)}
+                                              data-testid={`admin-delete-reply-${r.id}`}
+                                              aria-label="Javobni o'chirish"
+                                              className="px-1.5 py-0.5 rounded bg-rose-500/15 hover:bg-rose-600 text-rose-300 hover:text-white text-[9.5px] font-bold shrink-0 cursor-pointer"
+                                            >
+                                              O&apos;chirish
+                                            </button>
+                                          </div>
+                                        ))}
+                                      </div>
+                                    )}
+                                  </div>
+                                ))}
+                              </div>
+                            )}
                           </div>
                         </div>
                       );

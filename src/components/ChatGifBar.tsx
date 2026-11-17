@@ -5,10 +5,12 @@ import {
   GIPHY_DEBOUNCE_MS,
   GIPHY_PUBLIC_API_KEY,
   GiphyGifItem,
+  translateUzbekToGiphyQuery,
 } from '../utils/giphy';
 
 export interface ChatGifBarProps {
   query: string;
+  hideTrigger?: number;
   apiOrigin?: string;
   disabled?: boolean;
   onSelectGif: (gif: GiphyGifItem) => void;
@@ -16,47 +18,65 @@ export interface ChatGifBarProps {
 
 export const ChatGifBar: React.FC<ChatGifBarProps> = ({
   query,
+  hideTrigger = 0,
   apiOrigin,
   disabled = false,
   onSelectGif,
 }) => {
   const [gifs, setGifs] = useState<GiphyGifItem[]>([]);
-  const [isLoading, setIsLoading] = useState<boolean>(true);
+  const [isVisible, setIsVisible] = useState<boolean>(false);
+  const [isLoading, setIsLoading] = useState<boolean>(false);
   const [errorMsg, setErrorMsg] = useState<string>('');
-  const [activeMode, setActiveMode] = useState<'trending' | 'search'>('trending');
+  const [activeTranslatedQuery, setActiveTranslatedQuery] = useState<string>('');
   const [reloadTick, setReloadTick] = useState(0);
 
-  const trendingCacheRef = useRef<GiphyGifItem[] | null>(null);
   const queryCacheRef = useRef<Map<string, GiphyGifItem[]>>(new Map());
   const abortRef = useRef<AbortController | null>(null);
-  const hasLoadedInitialRef = useRef(false);
+  const debounceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const lastHideTriggerRef = useRef<number>(hideTrigger);
+  const dismissedRef = useRef<boolean>(false);
 
   const resolvedApiKey =
-    (typeof import.meta !== 'undefined' && (import.meta as any).env?.VITE_GIPHY_API_KEY) ||
+    (typeof import.meta !== 'undefined' &&
+      ((import.meta as any).env?.VITE_KLIPY_API_KEY || (import.meta as any).env?.VITE_GIPHY_API_KEY)) ||
     GIPHY_PUBLIC_API_KEY;
 
-  const loadGifs = useCallback(
+  const hideBar = useCallback(() => {
+    if (debounceTimerRef.current) {
+      clearTimeout(debounceTimerRef.current);
+      debounceTimerRef.current = null;
+    }
+    if (abortRef.current) {
+      abortRef.current.abort();
+      abortRef.current = null;
+    }
+    setIsVisible(false);
+    setIsLoading(false);
+    setErrorMsg('');
+  }, []);
+
+  const searchGifs = useCallback(
     async (rawQuery: string, forceRefresh = false) => {
       const cleanQuery = String(rawQuery || '').trim();
-      const mode: 'trending' | 'search' = cleanQuery ? 'search' : 'trending';
+      if (!cleanQuery) {
+        hideBar();
+        setGifs([]);
+        setActiveTranslatedQuery('');
+        return;
+      }
 
+      const translated = translateUzbekToGiphyQuery(cleanQuery);
+      setActiveTranslatedQuery(translated);
+      setIsVisible(true);
+
+      const cacheKey = translated.toLowerCase();
       if (!forceRefresh) {
-        if (!cleanQuery && trendingCacheRef.current && trendingCacheRef.current.length > 0) {
-          setGifs(trendingCacheRef.current);
-          setActiveMode('trending');
+        const cached = queryCacheRef.current.get(cacheKey);
+        if (cached) {
+          setGifs(cached);
           setErrorMsg('');
           setIsLoading(false);
           return;
-        }
-        if (cleanQuery) {
-          const cached = queryCacheRef.current.get(cleanQuery.toLowerCase());
-          if (cached) {
-            setGifs(cached);
-            setActiveMode('search');
-            setErrorMsg('');
-            setIsLoading(false);
-            return;
-          }
         }
       }
 
@@ -68,7 +88,6 @@ export const ChatGifBar: React.FC<ChatGifBarProps> = ({
 
       setIsLoading(true);
       setErrorMsg('');
-      setActiveMode(mode);
 
       try {
         const result = await fetchGiphyGifs({
@@ -82,18 +101,15 @@ export const ChatGifBar: React.FC<ChatGifBarProps> = ({
 
         if (result.ok) {
           setGifs(result.gifs);
-          setActiveMode(result.mode);
           setErrorMsg('');
-          if (result.mode === 'trending' && result.gifs.length > 0) {
-            trendingCacheRef.current = result.gifs;
-          } else if (result.mode === 'search' && result.query) {
-            queryCacheRef.current.set(result.query.toLowerCase(), result.gifs);
+          if (translated) {
+            queryCacheRef.current.set(cacheKey, result.gifs);
           }
         } else {
           setGifs([]);
           setErrorMsg(
             result.status === 401 || result.status === 403
-              ? 'Giphy API kaliti cheklangan'
+              ? 'Klipy API kaliti cheklangan'
               : "GIF yuklab bo'lmadi"
           );
         }
@@ -107,33 +123,60 @@ export const ChatGifBar: React.FC<ChatGifBarProps> = ({
         }
       }
     },
-    [apiOrigin, resolvedApiKey]
+    [apiOrigin, hideBar, resolvedApiKey]
   );
 
+  // Explicitly hide when parent sends a message or resets chat
+  useEffect(() => {
+    if (hideTrigger !== lastHideTriggerRef.current) {
+      lastHideTriggerRef.current = hideTrigger;
+      dismissedRef.current = true;
+      hideBar();
+      setGifs([]);
+      setActiveTranslatedQuery('');
+    }
+  }, [hideTrigger, hideBar]);
+
+  // Debounced Giphy /v1/gifs/search when user stops typing; hidden when input is empty
   useEffect(() => {
     const cleanQuery = String(query || '').trim();
 
+    if (debounceTimerRef.current) {
+      clearTimeout(debounceTimerRef.current);
+      debounceTimerRef.current = null;
+    }
+
     if (!cleanQuery) {
-      hasLoadedInitialRef.current = true;
-      void loadGifs('', reloadTick > 0);
+      dismissedRef.current = false;
+      hideBar();
+      setGifs([]);
+      setActiveTranslatedQuery('');
       return;
     }
-    hasLoadedInitialRef.current = true;
 
-    const timer = setTimeout(() => {
-      void loadGifs(cleanQuery, reloadTick > 0);
+    // If user just clicked Send in the same tick while query hadn't emptied yet, keep hidden
+    if (dismissedRef.current) {
+      dismissedRef.current = false;
+    }
+
+    debounceTimerRef.current = setTimeout(() => {
+      if (!dismissedRef.current) {
+        void searchGifs(cleanQuery, reloadTick > 0);
+      }
     }, GIPHY_DEBOUNCE_MS);
 
     return () => {
-      clearTimeout(timer);
+      if (debounceTimerRef.current) {
+        clearTimeout(debounceTimerRef.current);
+        debounceTimerRef.current = null;
+      }
     };
-  }, [query, reloadTick, loadGifs]);
+  }, [query, reloadTick, searchGifs, hideBar]);
 
   useEffect(() => {
     return () => {
-      if (abortRef.current) {
-        abortRef.current.abort();
-      }
+      if (debounceTimerRef.current) clearTimeout(debounceTimerRef.current);
+      if (abortRef.current) abortRef.current.abort();
     };
   }, []);
 
@@ -142,14 +185,20 @@ export const ChatGifBar: React.FC<ChatGifBarProps> = ({
   return (
     <div
       data-testid="chat-gif-bar"
-      className="w-full mb-2 flex items-center gap-2 overflow-hidden"
+      style={{ display: isVisible ? 'flex' : 'none' }}
+      aria-hidden={!isVisible}
+      className="w-full mb-2 items-center gap-2 overflow-hidden"
     >
       <div className="shrink-0 flex flex-col justify-center pr-1 select-none">
         <span className="text-[11px] font-bold tracking-wide text-rose-400 leading-none">
           GIF
         </span>
-        <span className="text-[10px] text-zinc-400 mt-0.5 max-w-[54px] truncate leading-none">
-          {activeMode === 'search' && trimmedQuery ? trimmedQuery : 'Trend'}
+        <span
+          data-testid="chat-gif-translated-label"
+          className="text-[10px] text-zinc-400 mt-0.5 max-w-[62px] truncate leading-none"
+          title={activeTranslatedQuery || trimmedQuery}
+        >
+          {activeTranslatedQuery || trimmedQuery}
         </span>
       </div>
 
@@ -178,7 +227,7 @@ export const ChatGifBar: React.FC<ChatGifBarProps> = ({
           </div>
         ) : gifs.length === 0 ? (
           <div className="flex items-center h-14 px-3 text-xs text-zinc-400 whitespace-nowrap">
-            {trimmedQuery ? `«${trimmedQuery}» bo'yicha GIF topilmadi` : 'Hozircha GIFlar topilmadi'}
+            {trimmedQuery ? `«${trimmedQuery}» bo'yicha GIF topilmadi` : 'GIF topilmadi'}
           </div>
         ) : (
           gifs.map((gif) => (
@@ -189,7 +238,11 @@ export const ChatGifBar: React.FC<ChatGifBarProps> = ({
               data-testid={`gif-bar-item-${gif.id}`}
               aria-label={`GIF yuborish: ${gif.title || 'GIF'}`}
               title={gif.title || 'GIF yuborish'}
-              onClick={() => onSelectGif(gif)}
+              onClick={() => {
+                dismissedRef.current = true;
+                hideBar();
+                onSelectGif(gif);
+              }}
               className="h-14 min-w-[56px] max-w-[128px] rounded-xl overflow-hidden shrink-0 bg-[#181B29] border border-white/[0.1] hover:border-rose-400/75 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-rose-500 transition-transform active:scale-95 cursor-pointer disabled:opacity-50"
             >
               <img

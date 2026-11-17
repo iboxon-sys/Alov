@@ -18,6 +18,135 @@
         "name": "Salikh Admin",
         "avatar": "/api/telegram/avatar/6621230534"
       }
+    },
+    {
+      "id": "msg_17949333551158q1",
+      "senderId": "tg_salikh_07",
+      "senderName": "Salikh",
+      "text": "GIF",
+      "type": "gif",
+      "fileUrl": "https://media0.giphy.com/media/test_gif_1/giphy.gif",
+      "content": "https://media0.giphy.com/media/test_gif_1/giphy.gif",
+      "status": "read",
+      "read": true,
+      "createdAt": "2026-11-17T16:35:55.115Z",
+      "time": "04:35 PM",
+      "senderAvatar": "/api/telegram/avatar/6621230534",
+      "sender": {
+        "_id": "tg_salikh_07",
+        "uid": "tg_salikh_07",
+        "name": "Salikh",
+        "avatar": "/api/telegram/avatar/6621230534"
+      }
+    },
+    {
+      "id": "msg_1794933356781qku",
+      "senderId": "tg_salikh_07",
+      "senderName": "Salikh",
+      "text": "salom",
+      "type": "text",
+      "fileUrl": null,
+      "status": "read",
+      "read": true,
+      "createdAt": "2026-11-17T16:35:56.781Z",
+      "time": "04:35 PM",
+      "senderAvatar": "/api/telegram/avatar/6621230534",
+      "sender": {
+        "_id": "tg_salikh_07",
+        "uid": "tg_salikh_07",
+        "name": "Salikh",
+        "avatar": "/api/telegram/avatar/6621230534"
+      }
+    },
+    {
+      "id": "ai_1794933358205gxb",
+      "senderId": "alov_ai_bot",
+      "senderName": "Alov AI",
+      "senderAvatar": "/assets/aistudio/image_e20a1307.webp",
+      "text": "Alov.uz da o'zingizga munosib insonni topishingizga ishonaman! Har doim samimiy bo'ling. 💖",
+      "type": "text",
+      "status": "read",
+      "read": true,
+      "createdAt": "2026-11-17T16:35:58.205Z",
+      "time": "04:35 PM"
+    },
+    {
+      "id": "msg_1794933411779g15",
+      "senderId": "tg_salikh_07",
+      "senderName": "Salikh",
+      "text": "GIF",
+      "type": "gif",
+      "fileUrl": "http://localhost:3000/assets/aistudio/image_e20a1307.webp?orig=1",
+      "content": "http://localhost:3000/assets/aistudio/image_e20a1307.webp?orig=1",
+      "status": "read",
+      "read": true,
+      "createdAt": "2026-11-17T16:36:51.779Z",
+      "time": "04:36 PM",
+      "senderAvatar": "/api/telegram/avatar/6621230534",
+      "sender": {
+        "_id": "tg_salikh_07",
+        "uid": "tg_salikh_07",
+        "name": "Salikh",
+        "avatar": "/api/telegram/avatar/6621230534"
+      }
+    },
+    {
+      "id": "msg_1794933413597wf5",
+      "senderId": "tg_salikh_07",
+      "senderName": "Salikh",
+      "text": "salom",
+      "type": "text",
+      "fileUrl": null,
+      "status": "read",
+      "read": true,
+      "createdAt": "2026-11-17T16:36:53.597Z",
+      "time": "04:36 PM",
+      "senderAvatar": "/api/telegram/avatar/6621230534",
+      "sender": {
+        "_id": "tg_salikh_07",
+        "uid": "tg_salikh_07",
+        "name": "Salikh",
+        "avatar": "/api/telegram/avatar/6621230534"
+      }
+    },
+    {
+      "id": "msg_1794933572039f2t",
+      "senderId": "tg_salikh_07",
+      "senderName": "Salikh",
+      "text": "GIF",
+      "type": "gif",
+      "fileUrl": "https://static.klipy.com/ii/35ccce3d852f7995dd2da910f2abd795/8c/69/FhLFVxQb.gif",
+      "content": "https://static.klipy.com/ii/35ccce3d852f7995dd2da910f2abd795/8c/69/FhLFVxQb.gif",
+      "status": "sent",
+      "read": false,
+      "createdAt": "2026-11-17T16:39:32.039Z",
+      "time": "04:39 PM",
+      "senderAvatar": "/api/telegram/avatar/6621230534",
+      "sender": {
+        "_id": "tg_salikh_07",
+        "uid": "tg_salikh_07",
+        "name": "Salikh",
+        "avatar": "/api/telegram/avatar/6621230534"
+      }
+    },
+    {
+      "id": "msg_1794933574089h64",
+      "senderId": "tg_salikh_07",
+      "senderName": "Salikh",
+      "text": "zo'r",
+      "type": "text",
+      "fileUrl": null,
+      "status": "sent",
+      "read": false,
+      "createdAt": "2026-11-17T16:39:34.089Z",
+      "time": "04:39 PM",
+      "senderAvatar": "/api/telegram/avatar/6621230534",
+      "sender": {
+        "_id": "tg_salikh_07",
+        "uid": "tg_salikh_07",
+        "name": "Salikh",
+        "avatar": "/api/telegram/avatar/6621230534"
+      }
     }
   ]
 }

@@ -28,7 +28,7 @@ import {
   deriveAudioMetadataFromUrl,
 } from './src/utils/videoImport';
 import { parseMediaLink } from './src/utils/mediaLinks';
-import { buildGiphyApiUrl, parseGiphyGifItems, GIPHY_PUBLIC_API_KEY } from './src/utils/giphy';
+import { buildGiphyApiUrl, parseGiphyGifItems, translateUzbekToGiphyQuery, GIPHY_PUBLIC_API_KEY } from './src/utils/giphy';
 import {
   buildTelegramDisplayName,
   isPlaceholderAvatar,
@@ -5109,23 +5109,28 @@ Suhbatlashish qoidalaringiz:
   app.get('/api/gifs', async (req, res) => {
     try {
       const q = String(req.query.q || '').trim();
+      const translatedQuery = q ? translateUzbekToGiphyQuery(q) : '';
       const limit = Math.max(1, Math.min(50, Number(req.query.limit) || 20));
-      const apiKey = String(process.env.GIPHY_API_KEY || GIPHY_PUBLIC_API_KEY).trim();
+      const apiKey = String(
+        process.env.KLIPY_API_KEY || process.env.GIPHY_API_KEY || GIPHY_PUBLIC_API_KEY
+      ).trim();
       const targetUrl = buildGiphyApiUrl(q, apiKey, limit);
       const upstream = await fetch(targetUrl);
       const payload = await upstream.json().catch(() => null);
-      if (!upstream.ok) {
-        return res.status(upstream.status).json({
+      if (!upstream.ok || payload?.result === false) {
+        return res.status(upstream.status || 502).json({
           success: false,
           status: upstream.status,
-          error: payload?.meta?.msg || `Giphy HTTP ${upstream.status}`,
+          error: payload?.message || payload?.meta?.msg || `Klipy HTTP ${upstream.status}`,
           gifs: [],
         });
       }
       const gifs = parseGiphyGifItems(payload);
       return res.json({
         success: true,
-        mode: q ? 'search' : 'trending',
+        mode: translatedQuery ? 'search' : 'trending',
+        query: q,
+        translatedQuery,
         gifs,
       });
     } catch (err: any) {
@@ -6298,8 +6303,12 @@ Suhbatlashish qoidalaringiz:
         }
       }
 
+      const normalizedFileUrl =
+        message.fileUrl || (message.type === 'gif' ? message.content : null) || null;
       const deliveredMessage = {
         ...message,
+        fileUrl: normalizedFileUrl,
+        ...(message.type === 'gif' && normalizedFileUrl ? { content: normalizedFileUrl } : {}),
         senderId: senderId,
         senderName: message.senderName || senderUser?.name || 'Foydalanuvchi',
         senderAvatar: message.senderAvatar || senderUser?.avatar || '',
@@ -6335,14 +6344,14 @@ Suhbatlashish qoidalaringiz:
         id: chatId,
         participants: [senderId, recipientId].filter(Boolean),
         lastMessage:
-          message.text ||
-          (message.type === 'gif'
+          message.type === 'gif'
             ? 'GIF 🎬'
-            : message.type === 'image'
-            ? 'Rasm 🖼️'
-            : message.type === 'video'
-            ? 'Video 🎥'
-            : 'Xabar'),
+            : message.text ||
+              (message.type === 'image'
+                ? 'Rasm 🖼️'
+                : message.type === 'video'
+                ? 'Video 🎥'
+                : 'Xabar'),
         lastSenderId: senderId,
         updatedAt: new Date().toISOString()
       };

@@ -111,6 +111,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
   const [isLoadingChats, setIsLoadingChats] = useState(true);
 
   const [inputMessage, setInputMessage] = useState('');
+  const [gifBarHideTrigger, setGifBarHideTrigger] = useState(0);
   const [showChatMediaPicker, setShowChatMediaPicker] = useState(false);
   const [isUploadingChatMedia, setIsUploadingChatMedia] = useState(false);
   const [isOtherTyping, setIsOtherTyping] = useState(false);
@@ -474,7 +475,9 @@ export const ChatView: React.FC<ChatViewProps> = ({
       if (chatId) {
         setChatsList((prev) => {
           const lastMsg =
-            msg.text || (msg.type === 'image' ? 'Rasm 🖼️' : msg.type === 'video' ? 'Video 🎥' : 'Xabar');
+            msg.type === 'gif'
+              ? 'GIF 🎬'
+              : msg.text || (msg.type === 'image' ? 'Rasm 🖼️' : msg.type === 'video' ? 'Video 🎥' : 'Xabar');
           const partnerInfo =
             payload?.message?.sender ||
             (partnerId
@@ -662,6 +665,8 @@ export const ChatView: React.FC<ChatViewProps> = ({
     setSelectedChatUser(targetUser);
     setChatView('conversation');
     setIsOtherTyping(false);
+    setInputMessage('');
+    setGifBarHideTrigger((n) => n + 1);
 
     const myUid = effectiveUser?.uid || effectiveUser?.id;
     const otherUid = targetUser?.uid || targetUser?.id;
@@ -738,6 +743,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
             : 'Audio 🎵');
 
     if (type === 'text') setInputMessage('');
+    setGifBarHideTrigger((n) => n + 1);
 
     const otherUid = selectedChatUser.uid || selectedChatUser.id;
     const isAIBot = otherUid === ALOV_AI_USER.uid;
@@ -750,6 +756,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
       text,
       type,
       fileUrl: fileUrl || null,
+      ...(type === 'gif' && fileUrl ? { content: fileUrl } : {}),
       status: 'sending' as 'sending' | 'sent' | 'read',
       read: false,
       createdAt: new Date().toISOString(),
@@ -831,7 +838,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
       const entry = {
         id: chatId,
         participants: [myUid, otherUid],
-        lastMessage: text,
+        lastMessage: type === 'gif' ? 'GIF 🎬' : text,
         updatedAt: msgObj.createdAt,
         partner: selectedChatUser,
       };
@@ -845,15 +852,17 @@ export const ChatView: React.FC<ChatViewProps> = ({
       return merged;
     });
 
-    if (isAIBot) {
+    if (isAIBot && type === 'text') {
       setIsAiTyping(true);
     }
   };
 
   const handleSendGif = async (gif: GiphyGifItem) => {
-    if (!gif?.sendUrl || !selectedChatUser) return;
+    const selectedGifUrl = gif?.images?.original?.url || gif?.sendUrl;
+    if (!selectedGifUrl || !selectedChatUser) return;
     setInputMessage('');
-    await handleSendMessage('image', gif.sendUrl, 'GIF');
+    setGifBarHideTrigger((n) => n + 1);
+    await handleSendMessage('gif', selectedGifUrl, 'GIF');
   };
 
   const handleSendPickedMedia = async (file: File, kind: ChatMediaKind, caption?: string) => {
@@ -1238,7 +1247,8 @@ export const ChatView: React.FC<ChatViewProps> = ({
       >
         {sortedMessages.map((msg, idx) => {
           const isMe = msg.senderId === 'me' || (myUid && (msg.senderId === myUid || msg.userId === myUid));
-          const resolvedUrl = msg.fileUrl?.startsWith('/api/') ? `${apiOrigin}${msg.fileUrl}` : msg.fileUrl || '';
+          const rawMediaUrl = msg.fileUrl || (msg.type === 'gif' ? msg.content : '') || '';
+          const resolvedUrl = rawMediaUrl.startsWith('/api/') ? `${apiOrigin}${rawMediaUrl}` : rawMediaUrl;
 
           return (
             <div
@@ -1365,6 +1375,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
         </Suspense>
         <ChatGifBar
           query={inputMessage}
+          hideTrigger={gifBarHideTrigger}
           apiOrigin={apiOrigin}
           onSelectGif={handleSendGif}
         />

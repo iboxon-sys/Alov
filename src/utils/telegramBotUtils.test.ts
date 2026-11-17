@@ -5,7 +5,9 @@ import {
   evaluateMandatorySubscriptionAccess,
   formatChatMessageSpoilerNotification,
   isTelegramMemberSubscribedStatus,
+  isVercelEnvironment,
   parseTelegramChannelReference,
+  shouldStartTelegramBot,
 } from './telegramBotUtils';
 
 test('formatChatMessageSpoilerNotification wraps message text in tg-spoiler and escapes HTML', () => {
@@ -92,3 +94,19 @@ test('evaluateMandatorySubscriptionAccess requires bot admin and Telegram contex
   assert.equal(isTelegramMemberSubscribedStatus({ status: 'member' }), true);
   assert.equal(isTelegramMemberSubscribedStatus({ status: 'left' }), false);
 });
+
+test('isVercelEnvironment & shouldStartTelegramBot disable bot on Vercel and allow on Render', () => {
+  assert.equal(isVercelEnvironment({ VERCEL: '1' }), true);
+  assert.equal(isVercelEnvironment({ VERCEL: 'true' }), true);
+  assert.equal(isVercelEnvironment({ VERCEL_ENV: 'production' }), true);
+  assert.equal(isVercelEnvironment({ VERCEL_URL: 'alov-mu.vercel.app' }), true);
+  assert.equal(isVercelEnvironment({ VERCEL: '0' }), false);
+  assert.equal(isVercelEnvironment({ RENDER: 'true' }), false);
+  assert.equal(isVercelEnvironment({}), false);
+
+  assert.equal(shouldStartTelegramBot({ VERCEL: '1' }, '12345:token'), false);
+  assert.equal(shouldStartTelegramBot({ VERCEL_ENV: 'preview' }, '12345:token'), false);
+  assert.equal(shouldStartTelegramBot({ RENDER: 'true' }, '12345:token'), true);
+  assert.equal(shouldStartTelegramBot({ RENDER: 'true' }, ''), false);
+});
+

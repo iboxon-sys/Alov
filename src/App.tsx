@@ -18,9 +18,8 @@ import { twMerge } from 'tailwind-merge';
 import { LandingPage } from './LandingPage';
 import type { FaceIdVerificationResult } from './components/FaceIdVerificationModal';
 import { SmartPhoneInput } from './components/SmartPhoneInput';
-import type { ChatMediaKind } from './components/ChatMediaPicker';
 import { callNotification } from './services/callNotification';
-import { CandidateSkeleton, ChatSkeleton } from './components/Skeleton';
+import { CandidateSkeleton } from './components/Skeleton';
 import { 
   auth, googleProvider, GoogleAuthProvider,
   signInWithPopup, signInWithRedirect, getRedirectResult, signOut, onAuthStateChanged, 
@@ -63,7 +62,7 @@ import {
   COIN_SHOP_PACKAGES,
   type CoinPurchaseRequest,
 } from './utils/coinRequests';
-import { isUserOnlineStrict, formatLastSeenUz } from './utils/presence';
+import { isUserOnlineStrict } from './utils/presence';
 import {
   resolveExactUserByUid,
   getInitialAuthDraftState,
@@ -76,7 +75,6 @@ import {
 import { computeAuthorTotalLikes, isPostVisibleToViewer, type PostItem } from './utils/posts';
 import { validateUsername, isUsernameUnique, formatUsernameDisplay } from './utils/username';
 import { formatPhoneNumberPretty } from './utils/phone';
-import { buildCanonicalChatId, mergeChatLists } from './utils/chatList';
 import { shouldEnableCaptureProtection, isCaptureShortcutEvent } from './utils/captureProtection';
 import { normalizeTelegramUrl } from './utils/profileSync';
 import {
@@ -93,6 +91,7 @@ import {
   parseIncomingAuthMessage,
   parseVercelEmbedRoute,
   persistLocalAuthCredentials,
+  resolveRealtimeBackendUrl,
   shouldRedirectVercelStandaloneToMain,
   shouldUseVercelIframeForSection,
 } from './utils/microFrontendBridge';
@@ -121,15 +120,6 @@ const PostsFeed = lazy(() =>
 const PublicProfileModal = lazy(() =>
   import('./components/PublicProfileModal').then((m) => ({ default: m.PublicProfileModal }))
 );
-const ChatMediaPicker = lazy(() =>
-  import('./components/ChatMediaPicker').then((m) => ({ default: m.ChatMediaPicker }))
-);
-const VideoPlayer = lazy(() =>
-  import('./components/ChatMedia').then((m) => ({ default: m.VideoPlayer }))
-);
-const VoiceMessage = lazy(() =>
-  import('./components/ChatMedia').then((m) => ({ default: m.VoiceMessage }))
-);
 const PrivacyPolicyInline = lazy(() =>
   import('./components/PrivacyPolicyInline').then((m) => ({ default: m.PrivacyPolicyInline }))
 );
@@ -141,6 +131,9 @@ const VercelMicroFrontendFrame = lazy(() =>
 );
 const ChatRouletteView = lazy(() =>
   import('./components/ChatRouletteView').then((m) => ({ default: m.ChatRouletteView }))
+);
+const ChatView = lazy(() =>
+  import('./components/ChatView').then((m) => ({ default: m.ChatView }))
 );
 const MandatorySubscriptionGate = lazy(() =>
   import('./components/MandatorySubscriptionGate').then((m) => ({ default: m.MandatorySubscriptionGate }))
@@ -263,15 +256,6 @@ const UZ_LOCATIONS: Record<string, string[]> = {
   ]
 };
 
-const ALOV_AI_USER = {
-  uid: 'alov_ai_bot',
-  id: 'ALOV-AI',
-  name: 'Alov AI',
-  avatar: '/assets/aistudio/image_e20a1307.webp',
-  bio: 'Sizning samimiy va mehribon virtual suhbatdoshingiz. Sevgi va munosabatlar haqida gaplashamizmi? 😊✨',
-  status: 'online',
-  isAI: true
-};
 
 const APP_VERSION = '1.1.1';
 const LATEST_VERSION = '1.1.1';
@@ -428,13 +412,10 @@ export default function App() {
   const [isDraggingPan, setIsDraggingPan] = useState(false);
   const dragStartRef = useRef<{ x: number; y: number }>({ x: 0, y: 0 });
   const commentsEndRef = useRef<HTMLDivElement>(null);
-  const chatBottomRef = useRef<HTMLDivElement>(null);
-  const chatMessagesContainerRef = useRef<HTMLDivElement>(null);
 
   const [usersList, setUsersList] = useState<any[]>([]);
   const [onlineUserIds, setOnlineUserIds] = useState<Set<string>>(() => new Set());
   const [postsList, setPostsList] = useState<PostItem[]>([]);
-  const [chatsList, setChatsList] = useState<any[]>([]);
   const [filterRegion, setFilterRegion] = useState('Barchasi');
   const [filterDistrict, setFilterDistrict] = useState('Barchasi');
   const [searchQuery, setSearchQuery] = useState('');
@@ -442,7 +423,6 @@ export default function App() {
   const [followModalState, setFollowModalState] = useState<{ user: any; tab: 'followers' | 'following' } | null>(null);
   const [followingIds, setFollowingIds] = useState<string[]>([]);
   const [showAdminPanel, setShowAdminPanel] = useState(false);
-  const [chatFriendships, setChatFriendships] = useState<Record<string, boolean>>({});
   const [countdownNow, setCountdownNow] = useState<number>(() => Date.now());
 
   // OSRM Street Routing State
@@ -456,7 +436,7 @@ export default function App() {
   const hasCenteredMapRef = useRef<boolean>(false);
   const [mapReadyTick, setMapReadyTick] = useState(0);
 
-  // Chat view substate: 'list' or 'conversation'
+  // Chat view substate synced with Vercel /chat iframe ('list' or 'conversation')
   const [chatView, setChatView] = useState<'list' | 'conversation'>('list');
 
   // Live Stream (Jonli Efir) states
@@ -483,12 +463,6 @@ export default function App() {
   const [walletNoticeMsg, setWalletNoticeMsg] = useState('');
 
   const [selectedChatUser, setSelectedChatUser] = useState<any>(null);
-  const [chatMessages, setChatMessages] = useState<Record<string, any[]>>({});
-  const [inputMessage, setInputMessage] = useState('');
-  const [showChatMediaPicker, setShowChatMediaPicker] = useState(false);
-  const [isUploadingChatMedia, setIsUploadingChatMedia] = useState(false);
-  const [isTyping, setIsTyping] = useState(false);
-  const typingTimeoutRef = useRef<any>(null);
 
   // Reels / Efirlar feed index & Touch Swipe & Live Chat
   const [currentReelIndex, setCurrentReelIndex] = useState(0);
@@ -496,14 +470,8 @@ export default function App() {
   const [showFilterModal, setShowFilterModal] = useState(false);
   const [reelComments, setReelComments] = useState<Record<string, any[]>>({});
   const [reelCommentInput, setReelCommentInput] = useState('');
-  const [isOtherTyping, setIsOtherTyping] = useState<boolean>(false);
-  const [isRecording, setIsRecording] = useState(false);
-  const [mediaRecorder, setMediaRecorder] = useState<MediaRecorder | null>(null);
-  const [audioChunks, setAudioChunks] = useState<Blob[]>([]);
   const [isLoadingCandidates, setIsLoadingCandidates] = useState(true);
-  const [isLoadingChats, setIsLoadingChats] = useState(true);
   const [showUpdateBanner, setShowUpdateBanner] = useState(false);
-  const [isAiTyping, setIsAiTyping] = useState(false);
 
   // Real GPS Geolocation & Ghost Mode state
   const [isLocationEnabled, setIsLocationEnabled] = useState<boolean>(false);
@@ -511,27 +479,6 @@ export default function App() {
   const [userCoords, setUserCoords] = useState<{lat: number, lng: number, accuracy?: number}>({ lat: 41.2995, lng: 69.2401, accuracy: 20 });
   const [gpsStatusMsg, setGpsStatusMsg] = useState<string>('');
   const [activeUsersCount, setActiveUsersCount] = useState<number>(0);
-  const [mobileChatViewportHeight, setMobileChatViewportHeight] = useState<number | null>(null);
-
-  useEffect(() => {
-    if (typeof window === 'undefined') return;
-    const handleViewportChange = () => {
-      if (window.visualViewport) {
-        setMobileChatViewportHeight(window.visualViewport.height);
-        window.scrollTo(0, 0);
-        document.body.scrollTop = 0;
-      }
-    };
-
-    if (window.visualViewport) {
-      window.visualViewport.addEventListener('resize', handleViewportChange);
-      window.visualViewport.addEventListener('scroll', handleViewportChange);
-      return () => {
-        window.visualViewport?.removeEventListener('resize', handleViewportChange);
-        window.visualViewport?.removeEventListener('scroll', handleViewportChange);
-      };
-    }
-  }, []);
 
   const socketRef = useRef<Socket | null>(null);
 
@@ -557,22 +504,19 @@ export default function App() {
     const myUid = currentUser?.uid || firebaseUser?.uid;
     if (socket && myUid) {
       socket.emit('register_user', myUid);
-      if (selectedChatUser) {
-        const otherUid = selectedChatUser.uid || selectedChatUser.id;
-        if (otherUid) {
-          const chatId = [myUid, otherUid].sort().join('_');
-          socket.emit('join_chat', chatId);
-        }
-      }
     }
-  }, [currentUser?.uid, firebaseUser?.uid, selectedChatUser?.uid, selectedChatUser?.id]);
+  }, [currentUser?.uid, firebaseUser?.uid]);
 
   useEffect(() => {
-    const socket = io(getBaseUrl(), {
+    if (embedRouteInfo.isEmbedRoute && embedRouteInfo.section === 'chat') {
+      return;
+    }
+    const socket = io(resolveRealtimeBackendUrl(getBaseUrl()), {
       reconnection: true,
       reconnectionAttempts: 20,
       reconnectionDelay: 2000,
       timeout: 10000,
+      withCredentials: true,
       transports: ['websocket', 'polling'],
     });
     socketRef.current = socket;
@@ -581,14 +525,6 @@ export default function App() {
       const myUid = currentUserRef.current?.uid || firebaseUser?.uid || currentUser?.uid;
       if (myUid) {
         socket.emit('register_user', myUid);
-      }
-      const activeSelUser = selectedChatUserRef.current;
-      if (myUid && activeSelUser) {
-        const otherUid = activeSelUser.uid || activeSelUser.id;
-        if (otherUid) {
-          const chatId = [myUid, otherUid].sort().join('_');
-          socket.emit('join_chat', chatId);
-        }
       }
       fetchPostsFromServer();
     };
@@ -660,26 +596,6 @@ export default function App() {
         return prev;
       });
 
-      setChatsList(prev =>
-        prev.map(c => {
-          if (c?.partner && (c.partner.uid === updatedUser.uid || (updatedUser.id && c.partner.id === updatedUser.id))) {
-            return {
-              ...c,
-              partner: {
-                ...c.partner,
-                uid: updatedUser.uid,
-                id: updatedUser.id || c.partner.id,
-                name: updatedUser.name || c.partner.name,
-                username: updatedUser.username ?? c.partner.username,
-                avatar: resolveEffectiveProfileAvatar(updatedUser) || c.partner.avatar,
-                isVerified: Boolean(updatedUser.faceId?.verified || updatedUser.isVerified),
-              },
-            };
-          }
-          return c;
-        })
-      );
-
       setPostsList(prev =>
         prev.map(p =>
           p.authorUid === updatedUser.uid || (updatedUser.id && p.authorId === updatedUser.id)
@@ -738,150 +654,6 @@ export default function App() {
       setPostsList(prev => prev.filter(p => p.id !== postId));
     });
 
-    const handleIncomingChatMessage = (payload: any) => {
-      const msg = payload.message || payload;
-      const chatId = payload.chatId;
-      const myUid = currentUserRef.current?.uid || firebaseUser?.uid || currentUser?.uid;
-      const currentSelUser = selectedChatUserRef.current;
-
-      let partnerId = payload.senderId === myUid ? payload.recipientId : payload.senderId;
-      if (!partnerId && msg.senderId) {
-        partnerId = msg.senderId === myUid ? payload.recipientId : msg.senderId;
-      }
-      if (!partnerId && currentSelUser) {
-        partnerId = currentSelUser.uid || currentSelUser.id;
-      }
-
-      if (!partnerId && !chatId) return;
-
-      const newMsg = {
-        ...msg,
-        status: msg.status || (msg.senderId === myUid ? 'sent' : 'read'),
-        time: msg.time || new Date(msg.createdAt || Date.now()).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
-      };
-
-      setChatMessages(prev => {
-        const keysToUpdate = Array.from(new Set([
-          chatId, partnerId, payload.senderId, payload.recipientId, currentSelUser?.id, currentSelUser?.uid
-        ].filter(Boolean))) as string[];
-
-        const next = { ...prev };
-        keysToUpdate.forEach(k => {
-          const currentMsgs = prev[k] || [];
-          const existingIdx = currentMsgs.findIndex(m => m.id === newMsg.id);
-          let updatedMsgs: any[];
-          if (existingIdx > -1) {
-            updatedMsgs = [...currentMsgs];
-            updatedMsgs[existingIdx] = { ...updatedMsgs[existingIdx], ...newMsg };
-          } else {
-            updatedMsgs = [...currentMsgs, newMsg];
-          }
-          next[k] = updatedMsgs;
-        });
-
-        if (chatId && next[chatId]) {
-          try {
-            localStorage.setItem('alov_msgs_' + chatId, JSON.stringify(next[chatId]));
-          } catch (e) {}
-        }
-
-        return next;
-      });
-
-      // Update chatsList via canonical deduplication so old chats NEVER vanish when new ones arrive
-      if (chatId) {
-        setChatsList(prev => {
-          const lastMsg = msg.text || (msg.type === 'image' ? 'Rasm 🖼️' : (msg.type === 'video' ? 'Video 🎥' : 'Xabar'));
-          const partnerInfo = payload.message?.sender || (partnerId ? {
-            uid: partnerId,
-            id: partnerId,
-            name: msg.senderName || selectedChatUserRef.current?.name || 'Foydalanuvchi',
-            avatar: msg.senderAvatar || selectedChatUserRef.current?.avatar || ''
-          } : undefined);
-          const incomingChat = {
-            id: chatId,
-            participants: [myUid, partnerId].filter(Boolean),
-            lastMessage: lastMsg,
-            updatedAt: msg.createdAt || new Date().toISOString(),
-            partner: partnerInfo
-          };
-          const merged = mergeChatLists([prev, [incomingChat]], myUid || '', {
-            myAliases: [myUid, currentUserRef.current?.id].filter(Boolean) as string[],
-            usersList: usersListRef.current,
-          });
-          if (myUid) {
-            try {
-              localStorage.setItem('alov_chats_' + myUid, JSON.stringify(merged));
-            } catch (e) {}
-          }
-          return merged;
-        });
-      }
-
-      // If incoming message is from partner while we have their chat open, emit mark_read
-      if (msg.senderId && msg.senderId !== myUid && currentSelUser && (currentSelUser.id === partnerId || currentSelUser.uid === partnerId)) {
-        socketRef.current?.emit('mark_read', {
-          chatId,
-          messageIds: [msg.id],
-          senderId: msg.senderId,
-          recipientId: myUid
-        });
-      }
-
-      if (msg.senderId === ALOV_AI_USER.uid || msg.senderId === 'user_kamola_006' || msg.senderId === 'ALOV-006') {
-        setIsAiTyping(false);
-      }
-    };
-
-    socket.on('receive_message', handleIncomingChatMessage);
-    socket.on('chat:message', handleIncomingChatMessage);
-
-    socket.on('message_ack', ({ chatId, messageId, status }: any) => {
-      setChatMessages(prev => {
-        const next = { ...prev };
-        Object.keys(next).forEach(k => {
-          if (next[k]) {
-            next[k] = next[k].map(m => m.id === messageId ? { ...m, status: status || 'sent' } : m);
-          }
-        });
-        if (chatId && next[chatId]) {
-          try {
-            localStorage.setItem('alov_msgs_' + chatId, JSON.stringify(next[chatId]));
-          } catch (e) {}
-        }
-        return next;
-      });
-    });
-
-    socket.on('message_read', ({ chatId, messageIds }: any) => {
-      setChatMessages(prev => {
-        const next = { ...prev };
-        Object.keys(next).forEach(k => {
-          if (next[k]) {
-            next[k] = next[k].map(m => {
-              if (!messageIds || messageIds.includes(m.id)) {
-                return { ...m, status: 'read', read: true };
-              }
-              return m;
-            });
-          }
-        });
-        if (chatId && next[chatId]) {
-          try {
-            localStorage.setItem('alov_msgs_' + chatId, JSON.stringify(next[chatId]));
-          } catch (e) {}
-        }
-        return next;
-      });
-    });
-
-    socket.on('user_typing', ({ uid, isTyping }) => {
-      const currentSelUser = selectedChatUserRef.current;
-      if (currentSelUser && (currentSelUser.uid === uid || currentSelUser.id === uid)) {
-        setIsOtherTyping(isTyping);
-      }
-    });
-
     // 1-on-1 WebRTC Video Call Signaling & Notifications
     const handleIncomingCall = ({ offer, caller, callerSocketId }: any) => {
       setIncomingCallData({ caller, offer, callerSocketId });
@@ -924,12 +696,6 @@ export default function App() {
       callNotification.stopRingtone();
       setIncomingCallData(null);
       setActiveCallUser(null);
-    });
-
-    socket.on('friendship_updated', ({ chatId, friendship }: any) => {
-      if (chatId) {
-        setChatFriendships(prev => ({ ...prev, [chatId]: Boolean(friendship?.active) }));
-      }
     });
 
     socket.on('insufficient_coins', ({ message }: any) => {
@@ -983,16 +749,10 @@ export default function App() {
       socket.off('post_created');
       socket.off('post_updated');
       socket.off('post_deleted');
-      socket.off('receive_message', handleIncomingChatMessage);
-      socket.off('chat:message', handleIncomingChatMessage);
-      socket.off('message_ack');
-      socket.off('message_read');
-      socket.off('user_typing');
       socket.off('incoming-call', handleIncomingCall);
       socket.off('call-made', handleIncomingCall);
       socket.off('call-rejected');
       socket.off('call-ended');
-      socket.off('friendship_updated');
       socket.off('insufficient_coins');
       socket.off('coin_request_updated');
       socket.off('withdrawal_updated');
@@ -1059,18 +819,6 @@ export default function App() {
     return () => clearInterval(interval);
   }, [currentUser?.uid, currentUser?.pendingDiamondBatches]);
 
-  // Auto-scroll chat messages container smoothly without scrolling outer page or hiding top bar
-  useEffect(() => {
-    if (chatView === 'conversation') {
-      requestAnimationFrame(() => {
-        const el = chatMessagesContainerRef.current;
-        if (el) {
-          el.scrollTop = el.scrollHeight;
-        }
-      });
-    }
-  }, [chatMessages, selectedChatUser?.id, selectedChatUser?.uid, chatView]);
-
   // Register user on socket when auth state changes
   useEffect(() => {
     const myUid = currentUser?.uid || firebaseUser?.uid;
@@ -1078,24 +826,6 @@ export default function App() {
       socketRef.current.emit('register_user', myUid);
     }
   }, [currentUser?.uid, firebaseUser?.uid]);
-
-  // Join active conversation room on socket & mark messages read
-  useEffect(() => {
-    if (!selectedChatUser) return;
-    const myUid = currentUser?.uid || firebaseUser?.uid;
-    const otherUid = selectedChatUser.uid || selectedChatUser.id;
-    if (myUid && otherUid && socketRef.current) {
-      const chatId = [myUid, otherUid].sort().join('_');
-      socketRef.current.emit('join_chat', chatId);
-      if (chatView === 'conversation') {
-        socketRef.current.emit('mark_read', {
-          chatId,
-          senderId: otherUid,
-          recipientId: myUid
-        });
-      }
-    }
-  }, [selectedChatUser, currentUser?.uid, firebaseUser?.uid, chatView]);
 
   // Ensure persistent Auth session across browser reloads
   useEffect(() => {
@@ -1213,8 +943,9 @@ export default function App() {
       if (!parsed) return;
 
       if (parsed.backendOrigin && !isVercelHost(parsed.backendOrigin)) {
-        setBridgeBackendOrigin(parsed.backendOrigin);
-        setCustomRenderUrl(parsed.backendOrigin);
+        const safeOrigin = resolveRealtimeBackendUrl(parsed.backendOrigin);
+        setBridgeBackendOrigin(safeOrigin);
+        setCustomRenderUrl(safeOrigin);
       }
 
       persistLocalAuthCredentials(localStorage, {
@@ -1226,6 +957,14 @@ export default function App() {
       if (parsed.user) {
         setCurrentUser({ ...parsed.user, authToken: parsed.token });
         setIsAuthChecking(false);
+      }
+
+      if (parsed.partner) {
+        setSelectedChatUser(parsed.partner);
+        setChatView('conversation');
+      } else if (parsed.partnerUid) {
+        setSelectedChatUser({ uid: parsed.partnerUid, id: parsed.partnerUid, name: 'Foydalanuvchi' });
+        setChatView('conversation');
       }
 
       if (parsed.userId || parsed.token) {
@@ -1254,6 +993,7 @@ export default function App() {
       if (parsed.section === 'efir') setActiveTab('reels');
       else if (parsed.section === 'postlar') setActiveTab('posts');
       else if (parsed.section === 'chatroulette') setActiveTab('chatruletka');
+      else if (parsed.section === 'chat') setActiveTab('chats');
     };
 
     window.addEventListener('message', handleParentBridgeMessage);
@@ -1553,45 +1293,6 @@ export default function App() {
     }
   }, [activeTab, fetchPostsFromServer]);
 
-
-  // Load active 1-on-1 chats from Render API & localStorage with full deduplication & retention
-  useEffect(() => {
-    const myUid = currentUser?.uid || firebaseUser?.uid;
-    if (!myUid) return;
-
-    const fetchChats = async () => {
-      let localChats: any[] = [];
-      try {
-        const cached = localStorage.getItem('alov_chats_' + myUid);
-        if (cached) localChats = JSON.parse(cached);
-      } catch (e) {}
-
-      let serverChats: any[] = [];
-      try {
-        const data = await safeFetchJson(getApiUrl(`/api/chats/user/${myUid}`));
-        if (data && data.success && Array.isArray(data.chats)) {
-          serverChats = data.chats;
-        }
-      } catch (e) {
-        console.warn("Could not fetch chats from server:", e);
-      }
-
-      setChatsList(prev => {
-        const merged = mergeChatLists([prev, localChats, serverChats], myUid, {
-          myAliases: [myUid, currentUser?.id].filter(Boolean) as string[],
-          usersList: usersListRef.current,
-        });
-        try {
-          localStorage.setItem('alov_chats_' + myUid, JSON.stringify(merged));
-        } catch (e) {}
-        return merged;
-      });
-      setIsLoadingChats(false);
-    };
-
-    fetchChats();
-  }, [firebaseUser?.uid, currentUser?.uid]);
-
   // Non-admin screenshot & screen-recording protection (@Salikh_07 admin is completely exempt)
   useEffect(() => {
     const captureProtected = shouldEnableCaptureProtection(currentUser);
@@ -1718,61 +1419,6 @@ export default function App() {
   useEffect(() => {
     void verifyMandatorySubscription();
   }, [verifyMandatorySubscription, subVersionTick]);
-
-  // Load chat messages for the selected conversation from localStorage & Render API
-  useEffect(() => {
-    if (!selectedChatUser || chatView !== 'conversation') return;
-    const myUid = currentUser?.uid || firebaseUser?.uid;
-    const otherUid = selectedChatUser.uid || selectedChatUser.id;
-    if (!myUid || !otherUid) return;
-
-    const chatId = [myUid, otherUid].sort().join('_');
-
-    // 1. Load from localStorage
-    let localMsgs: any[] = [];
-    try {
-      const cached = localStorage.getItem('alov_msgs_' + chatId);
-      if (cached) localMsgs = JSON.parse(cached);
-    } catch (e) {}
-
-    const sanitizedLocalMsgs = localMsgs.map(m => ({
-      ...m,
-      status: (m.status === 'sending' || !m.status) ? 'sent' : m.status
-    }));
-
-    if (sanitizedLocalMsgs.length > 0) {
-      setChatMessages(prev => ({ ...prev, [selectedChatUser.id]: sanitizedLocalMsgs }));
-    }
-
-    // 2. Sync from Render API
-    safeFetchJson(getApiUrl(`/api/chats/${chatId}/messages`))
-      .then(data => {
-        if (data && data.success) {
-          if (data.friendship !== undefined) {
-            setChatFriendships(prev => ({ ...prev, [chatId]: Boolean(data.friendship?.active) }));
-          }
-          if (Array.isArray(data.messages)) {
-            const msgMap = new Map<string, any>();
-            [...sanitizedLocalMsgs, ...data.messages].forEach(m => {
-              const sanitized = {
-                ...m,
-                status: (m.status === 'sending' || !m.status) ? 'sent' : m.status
-              };
-              msgMap.set(m.id, sanitized);
-            });
-            const merged = Array.from(msgMap.values()).sort((a, b) => 
-              new Date(a.createdAt || 0).getTime() - new Date(b.createdAt || 0).getTime()
-            );
-            setChatMessages(prev => ({ ...prev, [selectedChatUser.id]: merged }));
-            try {
-              localStorage.setItem('alov_msgs_' + chatId, JSON.stringify(merged));
-            } catch (e) {}
-          }
-        }
-      })
-      .catch(err => console.warn("Failed to sync chat messages from Render server:", err));
-
-  }, [firebaseUser?.uid, currentUser?.uid, selectedChatUser?.uid, selectedChatUser?.id, chatView]);
 
   useEffect(() => {
     const activeUid = currentUser?.uid || firebaseUser?.uid;
@@ -2619,24 +2265,6 @@ export default function App() {
         userMap.set(savedUser.uid || activeUid, savedUser);
         return Array.from(userMap.values());
       });
-      setChatsList(prev =>
-        prev.map(c => {
-          if (c?.partner && (c.partner.uid === (savedUser.uid || activeUid) || (savedUser.id && c.partner.id === savedUser.id))) {
-            return {
-              ...c,
-              partner: {
-                ...c.partner,
-                uid: savedUser.uid || activeUid,
-                id: savedUser.id || c.partner.id,
-                name: savedUser.name || trimmedName,
-                username: savedUser.username ?? c.partner.username,
-                avatar: resolveEffectiveProfileAvatar(savedUser) || c.partner.avatar,
-              },
-            };
-          }
-          return c;
-        })
-      );
       setPostsList(prev =>
         prev.map(p =>
           p.authorUid === (savedUser.uid || activeUid)
@@ -3529,100 +3157,7 @@ export default function App() {
     }
   };
 
-  const handleToggleFriendship = async () => {
-    const myUid = currentUser?.uid || firebaseUser?.uid;
-    const otherUid = selectedChatUser?.uid || selectedChatUser?.id;
-    if (!myUid || !otherUid) return;
-    const chatId = [myUid, otherUid].sort().join('_');
-    const nextState = !chatFriendships[chatId];
-    setChatFriendships(prev => ({ ...prev, [chatId]: nextState }));
-
-    try {
-      const data = await safeFetchJson(getApiUrl('/api/chats/friendship'), {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ chatId, uid: myUid, enabled: nextState })
-      });
-      if (data?.success && data.friendship) {
-        setChatFriendships(prev => ({ ...prev, [chatId]: Boolean(data.friendship.active) }));
-      }
-    } catch (e) {
-      setChatFriendships(prev => ({ ...prev, [chatId]: !nextState }));
-    }
-  };
-
-  const handleCreateMeetLink = async () => {
-    let meetUrl = 'https://meet.google.com/abc-defg-hij';
-    try {
-      const data = await safeFetchJson(getApiUrl('/api/meet/create-link'), {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ title: `${currentUser?.name} va ${selectedChatUser?.name} Google Meet Qo'ng'irog'i` })
-      });
-      if (data && data.success && data.meetUrl) {
-        meetUrl = data.meetUrl;
-      }
-    } catch (e) {
-      console.warn("Meet link API fallback used");
-    }
-
-    const myUid = currentUser?.uid || firebaseUser?.uid;
-    const otherUid = selectedChatUser?.uid || selectedChatUser?.id;
-
-    if (!myUid || !otherUid) return;
-
-    const chatId = [myUid, otherUid].sort().join('_');
-    const msgObj = {
-      id: 'meet_' + Date.now(),
-      senderId: myUid,
-      senderName: currentUser?.name || firebaseUser?.displayName || 'Foydalanuvchi',
-      type: 'meet' as const,
-      text: "Google Meet Havolasi 📹",
-      meetUrl,
-      createdAt: new Date().toISOString(),
-      time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
-    };
-
-    socketRef.current?.emit('send_message', {
-      chatId,
-      senderId: myUid,
-      recipientId: otherUid,
-      message: msgObj
-    });
-
-    setChatMessages(prev => {
-      const currentMsgs = prev[selectedChatUser.id] || [];
-      const updatedMsgs = [...currentMsgs, msgObj];
-      try {
-        localStorage.setItem('alov_msgs_' + chatId, JSON.stringify(updatedMsgs));
-      } catch (e) {}
-      return {
-        ...prev,
-        [selectedChatUser.id]: updatedMsgs
-      };
-    });
-
-    // Update chatsList via canonical deduplication and persist
-    setChatsList(prev => {
-      const chatEntry = {
-        id: chatId,
-        participants: [myUid, otherUid],
-        lastMessage: msgObj.text,
-        updatedAt: msgObj.createdAt,
-        partner: selectedChatUser
-      };
-      const merged = mergeChatLists([prev, [chatEntry]], myUid, {
-        myAliases: [myUid, currentUser?.id].filter(Boolean) as string[],
-        usersList: usersListRef.current,
-      });
-      try {
-        localStorage.setItem('alov_chats_' + myUid, JSON.stringify(merged));
-      } catch (e) {}
-      return merged;
-    });
-  };
-
-  // Helper to open chat and immediately add to chatsList, localStorage, and backend
+  // Helper to open a chat with a user in the Vercel /chat Micro-Frontend
   const openChatWithUser = (targetUser: any) => {
     setSelectedChatUser(targetUser);
     setChatView('conversation');
@@ -3631,190 +3166,11 @@ export default function App() {
     const myUid = currentUser?.uid || firebaseUser?.uid;
     const otherUid = targetUser?.uid || targetUser?.id;
     if (myUid && otherUid) {
-      const chatId = buildCanonicalChatId(myUid, otherUid);
-      setChatsList(prev => {
-        const existing = prev.find(c => c.id === chatId);
-        const chatEntry = {
-          id: chatId,
-          participants: [myUid, otherUid],
-          lastMessage: existing?.lastMessage || "Yangi suhbat boshlandi",
-          updatedAt: existing?.updatedAt || new Date().toISOString(),
-          partner: targetUser
-        };
-        const merged = mergeChatLists([prev, [chatEntry]], myUid, {
-          myAliases: [myUid, currentUser?.id].filter(Boolean) as string[],
-          usersList: usersListRef.current,
-        });
-        try {
-          localStorage.setItem('alov_chats_' + myUid, JSON.stringify(merged));
-        } catch (e) {}
-        return merged;
-      });
       fetch(getApiUrl('/api/chats/open'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ myUid, targetUid: otherUid, partnerSnapshot: targetUser }),
       }).catch(() => {});
-    }
-  };
-
-
-  const handleTyping = () => {
-    const myUid = currentUser?.uid || firebaseUser?.uid;
-    if (!myUid || !selectedChatUser) return;
-    const otherUid = selectedChatUser.uid || selectedChatUser.id;
-    const chatId = [myUid, otherUid].sort().join('_');
-
-    if (typingTimeoutRef.current) clearTimeout(typingTimeoutRef.current);
-
-    socketRef.current?.emit('typing', { chatId, uid: myUid, isTyping: true });
-
-    typingTimeoutRef.current = setTimeout(() => {
-      socketRef.current?.emit('typing', { chatId, uid: myUid, isTyping: false });
-    }, 2000);
-  };
-
-  const handleSendChatMessage = async (type: 'text' | 'image' | 'video' | 'audio' | 'voice' = 'text', fileUrl?: string, customCaption?: string) => {
-    if (!selectedChatUser) return;
-    if (type === 'text' && !inputMessage.trim()) return;
-    
-    const text =
-      type === 'text'
-        ? inputMessage.trim()
-        : (customCaption?.trim() || (type === 'image' ? "Rasm 🖼️" : (type === 'video' ? "Video 🎥" : (type === 'voice' ? "Ovozli xabar 🎤" : "Audio 🎵"))));
-    if (type === 'text') setInputMessage('');
-
-    const myUid = currentUser?.uid || firebaseUser?.uid;
-    const otherUid = selectedChatUser.uid || selectedChatUser.id;
-    const isAIBot = selectedChatUser.uid === ALOV_AI_USER.uid;
-
-    if (!myUid) return;
-
-    const chatId = [myUid, otherUid].sort().join('_');
-    const msgObj = {
-      id: 'msg_' + Date.now() + Math.random().toString(36).substring(2, 5),
-      senderId: myUid,
-      senderName: currentUser?.name || firebaseUser?.displayName || 'Foydalanuvchi',
-      text,
-      type,
-      fileUrl: fileUrl || null,
-      status: 'sending' as 'sending' | 'sent' | 'read',
-      read: false,
-      createdAt: new Date().toISOString(),
-      time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
-    };
-
-    if (typingTimeoutRef.current) clearTimeout(typingTimeoutRef.current);
-    socketRef.current?.emit('typing', { chatId, uid: myUid, isTyping: false });
-
-    // Send message via Socket.io bridge with ack callback
-    socketRef.current?.emit('send_message', {
-      chatId,
-      senderId: myUid,
-      recipientId: otherUid,
-      message: msgObj
-    }, (ack: any) => {
-      if (ack && ack.success === false) {
-        // Rollback optimistic message if rejected by server (e.g. insufficient coins or banned)
-        setChatMessages(prev => {
-          const next = { ...prev };
-          Object.keys(next).forEach(k => {
-            if (next[k]) {
-              next[k] = next[k].filter(m => m.id !== msgObj.id);
-            }
-          });
-          try {
-            localStorage.setItem('alov_msgs_' + chatId, JSON.stringify(next[chatId] || []));
-          } catch (e) {}
-          return next;
-        });
-        if (ack.error === 'insufficient_coins') {
-          setWalletNoticeMsg(ack.message || `Monetalaringiz yetarli emas! Har bir xabar narxi ${MESSAGE_COIN_COST} moneta.`);
-          setShowTopUpModal(true);
-        } else if (ack.message) {
-          setErrorMsg(ack.message);
-        }
-        return;
-      }
-      if (ack && (ack.status === 'sent' || ack.success)) {
-        setChatMessages(prev => {
-          const next = { ...prev };
-          Object.keys(next).forEach(k => {
-            if (next[k]) {
-              next[k] = next[k].map(m => m.id === msgObj.id ? { ...m, status: 'sent' } : m);
-            }
-          });
-          try {
-            localStorage.setItem('alov_msgs_' + chatId, JSON.stringify(next[chatId] || []));
-          } catch (e) {}
-          return next;
-        });
-      }
-    });
-
-    // Optimistically update local chat messages & localStorage across all key aliases
-    setChatMessages(prev => {
-      const keysToUpdate = Array.from(new Set([
-        chatId, selectedChatUser.id, selectedChatUser.uid, otherUid
-      ].filter(Boolean))) as string[];
-
-      const next = { ...prev };
-      keysToUpdate.forEach(k => {
-        const currentMsgs = prev[k] || [];
-        next[k] = [...currentMsgs, msgObj];
-      });
-
-      try {
-        localStorage.setItem('alov_msgs_' + chatId, JSON.stringify(next[chatId]));
-      } catch (e) {}
-
-      return next;
-    });
-
-    // Fallback timer: update sending status to sent after 300ms if no ack callback fired yet
-    setTimeout(() => {
-      setChatMessages(prev => {
-        const next = { ...prev };
-        Object.keys(next).forEach(k => {
-          if (next[k]) {
-            next[k] = next[k].map(m => {
-              if (m.id === msgObj.id && m.status === 'sending') {
-                return { ...m, status: 'sent' };
-              }
-              return m;
-            });
-          }
-        });
-        if (chatId && next[chatId]) {
-          try {
-            localStorage.setItem('alov_msgs_' + chatId, JSON.stringify(next[chatId]));
-          } catch (e) {}
-        }
-        return next;
-      });
-    }, 300);
-
-    // Update chatsList via canonical deduplication and persist
-    setChatsList(prev => {
-      const chatEntry = {
-        id: chatId,
-        participants: [myUid, otherUid],
-        lastMessage: text,
-        updatedAt: msgObj.createdAt,
-        partner: selectedChatUser
-      };
-      const merged = mergeChatLists([prev, [chatEntry]], myUid, {
-        myAliases: [myUid, currentUser?.id].filter(Boolean) as string[],
-        usersList: usersListRef.current,
-      });
-      try {
-        localStorage.setItem('alov_chats_' + myUid, JSON.stringify(merged));
-      } catch (e) {}
-      return merged;
-    });
-
-    if (isAIBot) {
-      setIsAiTyping(true);
     }
   };
 
@@ -3961,82 +3317,7 @@ export default function App() {
     }
   };
 
-  const handleSendPickedChatMedia = async (file: File, kind: ChatMediaKind, caption?: string) => {
-    if (!file || !selectedChatUser) return;
-    setIsUploadingChatMedia(true);
-    try {
-      const res = await fetch(getApiUrl('/api/media/upload-raw'), {
-        method: 'POST',
-        headers: {
-          'Content-Type': file.type || 'application/octet-stream',
-          'x-file-name': encodeURIComponent(file.name || `chat_media`),
-        },
-        body: file,
-      });
-      const data = await res.json().catch(() => null);
-      if (res.ok && data?.success && data?.url) {
-        await handleSendChatMessage(kind, data.url, caption);
-        setShowChatMediaPicker(false);
-      } else {
-        // Fallback to DataURL for tiny files if upload fails
-        const reader = new FileReader();
-        reader.onloadend = async () => {
-          if (typeof reader.result === 'string') {
-            await handleSendChatMessage(kind, reader.result, caption);
-            setShowChatMediaPicker(false);
-          }
-        };
-        reader.readAsDataURL(file);
-      }
-    } catch (err: any) {
-      showToast(err?.message || "Media yuklashda xatolik yuz berdi");
-    } finally {
-      setIsUploadingChatMedia(false);
-    }
-  };
 
-  const startRecording = async () => {
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      const recorder = new MediaRecorder(stream);
-      const chunks: Blob[] = [];
-
-      recorder.ondataavailable = (e) => {
-        if (e.data.size > 0) chunks.push(e.data);
-      };
-
-      recorder.onstop = () => {
-        const blob = new Blob(chunks, { type: 'audio/webm' });
-        const reader = new FileReader();
-        reader.onloadend = () => {
-          if (typeof reader.result === 'string') {
-            handleSendChatMessage('voice', reader.result);
-          }
-        };
-        reader.readAsDataURL(blob);
-        stream.getTracks().forEach(t => t.stop());
-      };
-
-      recorder.start();
-      setMediaRecorder(recorder);
-      setAudioChunks(chunks);
-      setIsRecording(true);
-    } catch (err) {
-      console.error("Mic error:", err);
-    }
-  };
-
-  const stopRecording = () => {
-    if (mediaRecorder && isRecording) {
-      mediaRecorder.stop();
-      setIsRecording(false);
-      setMediaRecorder(null);
-    }
-  };
-
-  const resetUnreadCount = (_chatId: string) => {
-    // Unread count is reset locally and tracked via Socket.io
-  };
 
   const targetGender = currentUser?.gender === 'male' ? 'female' : 'male';
   const viewerIsAdmin = isAdminTelegramUser(currentUser);
@@ -4218,9 +3499,21 @@ export default function App() {
                 <VercelMicroFrontendFrame
                   section={activeVercelSection}
                   currentUser={currentUser}
+                  partnerUser={activeVercelSection === 'chat' ? selectedChatUser : null}
                   targetOrigin={vercelTargetOrigin}
                   onNavigateTab={(tab) => setActiveTab(tab)}
                   onNotify={showToast}
+                  onOpenProfile={(uid, snapshot) => openUserProfileByUid(uid, snapshot)}
+                  onStartCall={(u) => setActiveCallUser(u)}
+                  onOpenGift={(u) => {
+                    setSelectedChatUser(u);
+                    setShowGiftModal(true);
+                  }}
+                  onOpenTopUp={(notice) => {
+                    if (notice) setWalletNoticeMsg(notice);
+                    setShowTopUpModal(true);
+                  }}
+                  onChatViewChange={(view) => setChatView(view)}
                 />
               </Suspense>
             </div>
@@ -4228,11 +3521,11 @@ export default function App() {
         }
 
         return (
-      <div className={`flex-1 min-h-0 relative z-10 ${(activeTab === 'reels' || activeTab === 'map' || (activeTab === 'chats' && chatView === 'conversation')) ? 'overflow-hidden flex flex-col p-0' : 'overflow-y-auto overscroll-y-contain p-3 sm:p-5 space-y-4 pb-24'}`}>
+      <div className={`flex-1 min-h-0 relative z-10 ${(activeTab === 'reels' || activeTab === 'map') ? 'overflow-hidden flex flex-col p-0' : 'overflow-y-auto overscroll-y-contain p-3 sm:p-5 space-y-4 pb-24'}`}>
         {/* --- LANDING TAB --- */}
         {activeTab === 'landing' && <LandingPage onLogin={() => openAuthModalClean('login')} />}
 
-        {/* --- DISCOVER, POSTS, CHATS, PROFILE WITH SMOOTH ANIMATEPRESENCE --- */}
+        {/* --- DISCOVER, POSTS, PROFILE WITH SMOOTH ANIMATEPRESENCE --- */}
         {activeTab !== 'landing' && activeTab !== 'map' && activeTab !== 'reels' && (
           <AnimatePresence mode="wait">
             <motion.div
@@ -4241,7 +3534,7 @@ export default function App() {
               animate={{ opacity: 1, y: 0 }}
               exit={{ opacity: 0, y: -6 }}
               transition={{ duration: 0.18, ease: [0.16, 1, 0.3, 1] }}
-              className={activeTab === 'chats' ? 'h-full flex flex-col' : 'space-y-4'}
+              className="space-y-4"
             >
               {/* --- DISCOVER TAB --- */}
               {activeTab === 'discover' && (
@@ -4476,442 +3769,7 @@ export default function App() {
               )}
 
               {/* Chatruletka renders exclusively via Vercel Micro-Frontend (/chatroulette) */}
-
-              {/* --- CHATS TAB --- */}
-              {activeTab === 'chats' && (
-                <div className="h-full flex flex-col">
-                  {chatView === 'list' ? (
-                    <div className="bg-[#11131C] rounded-[24px] border border-white/[0.08] overflow-hidden flex flex-col h-full min-h-0">
-                      <div className="p-4 border-b border-white/[0.08] flex items-center justify-between shrink-0">
-                        <h2 className="font-editorial text-2xl font-bold text-white">Xabarlar</h2>
-                        <span className="text-xs font-semibold text-zinc-400 tabular-nums" data-testid="chats-count-badge">
-                          {chatsList.length} faol suhbat
-                        </span>
-                      </div>
-                      <div className="flex-1 min-h-0 divide-y divide-white/[0.06] overflow-y-auto pb-24" data-testid="chats-list-scroll-area">
-                        {isLoadingChats ? (
-                          <>
-                            <ChatSkeleton />
-                            <ChatSkeleton />
-                            <ChatSkeleton />
-                          </>
-                        ) : chatsList.length === 0 ? (
-                          <div className="p-10 text-center space-y-3">
-                            <div className="w-16 h-16 bg-white/[0.05] border border-white/[0.08] rounded-full flex items-center justify-center mx-auto">
-                              <MessageCircle className="w-8 h-8 text-zinc-500" />
-                            </div>
-                            <p className="text-xs text-zinc-400 font-medium">
-                              Hozircha xabarlar yo'q. Nomzodlar bilan suhbatni boshlang!
-                            </p>
-                          </div>
-                        ) : chatsList.map((chat, idx) => {
-                          const myUid = currentUser?.uid || firebaseUser?.uid;
-                          const otherUid = chat.participants?.find((p: string) => p !== myUid) || chat.partner?.uid || chat.partner?.id;
-                          const otherUser = usersList.find(u => u.uid === otherUid || u.id === otherUid) ||
-                                            (otherUid === ALOV_AI_USER.uid ? ALOV_AI_USER : null) ||
-                                            chat.partner ||
-                                            { uid: otherUid, name: 'Foydalanuvchi' };
-                          const unread = chat.unreadCount?.[myUid || ''] || 0;
-                          const chatAvatar = resolveAvatarUrl(resolveEffectiveProfileAvatar(otherUser));
-
-                          return (
-                            <motion.div
-                              key={chat.id ? `${chat.id}_${idx}` : `chat_${idx}`}
-                              initial={{ opacity: 0, x: -8 }}
-                              animate={{ opacity: 1, x: 0 }}
-                              transition={{ duration: 0.16, delay: Math.min(idx * 0.025, 0.2) }}
-                              onClick={() => {
-                                setSelectedChatUser(otherUser);
-                                setChatView('conversation');
-                                setChatsList(prev => prev.map(c => c.id === chat.id ? { ...c, unreadCount: { ...(c.unreadCount || {}), [myUid || '']: 0 } } : c));
-                              }}
-                              className={cn(
-                                "p-4 flex items-center space-x-3 cursor-pointer hover:bg-white/[0.04] transition-colors relative",
-                                chat.isAI && "bg-rose-500/[0.06]"
-                              )}
-                            >
-                              <div className="relative">
-                                {chatAvatar ? (
-                                  <img src={chatAvatar} alt={otherUser?.name || ''} className="w-12 h-12 rounded-full object-cover shrink-0 border border-white/15" />
-                                ) : (
-                                  <div className="w-12 h-12 rounded-full bg-rose-500/20 text-rose-300 font-bold text-base flex items-center justify-center shrink-0 border border-rose-500/30">
-                                    {getSafeUserDisplayName(otherUser, 'F').charAt(0).toUpperCase()}
-                                  </div>
-                                )}
-                                {isUserOnlineStrict(otherUser, onlineUserIds) && (
-                                  <span className="absolute bottom-0 right-0 w-3 h-3 bg-emerald-500 border-2 border-[#11131C] rounded-full"></span>
-                                )}
-                              </div>
-                              <div className="flex-1 min-w-0">
-                                <div className="flex items-center justify-between gap-2">
-                                  <div className="flex items-center space-x-1.5 min-w-0">
-                                    <h4 className="font-bold text-sm text-white truncate">{otherUser?.name || 'Foydalanuvchi'}</h4>
-                                    {chat.isAI && <span className="text-[10px] font-bold text-rose-400 shrink-0">· AI</span>}
-                                  </div>
-                                  <span className="text-[10.5px] text-zinc-500 tabular-nums shrink-0">
-                                    {chat.updatedAt?.toDate ? chat.updatedAt.toDate().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : ''}
-                                  </span>
-                                </div>
-                                <div className="flex items-center justify-between mt-0.5">
-                                  <p className={cn("text-xs truncate flex-1 pr-2", unread > 0 ? "text-white font-semibold" : "text-zinc-400")}>
-                                    {chat.isTyping?.[otherUid] || (chat.isAI && isAiTyping) ? (
-                                      <span className="text-emerald-400 font-semibold">yozmoqda...</span>
-                                    ) : chat.lastMessage}
-                                  </p>
-                                  {unread > 0 && (
-                                    <span className="bg-rose-600 text-white text-[10px] font-bold min-w-[18px] h-[18px] rounded-full flex items-center justify-center px-1 tabular-nums">
-                                      {unread}
-                                    </span>
-                                  )}
-                                </div>
-                              </div>
-                            </motion.div>
-                          );
-                        })}
-                      </div>
-                    </div>
-                  ) : (
-                    <div className="flex-1 min-h-0 w-full bg-[#09090D] flex flex-col overflow-hidden">
-                      <div className="shrink-0 z-20 px-3 py-2.5 border-b border-white/[0.08] flex items-center justify-between bg-[#11131C]">
-                        <div className="flex items-center space-x-2 min-w-0">
-                          <button onClick={() => setChatView('list')} className="p-2 rounded-full hover:bg-white/[0.08] text-zinc-200 transition active:scale-90 shrink-0 cursor-pointer">
-                            <ArrowLeft className="w-5 h-5" />
-                          </button>
-                          {(() => {
-                            const partnerOnline = isUserOnlineStrict(selectedChatUser, onlineUserIds);
-                            const partnerUid = selectedChatUser?.uid || selectedChatUser?.id;
-                            const partnerAvatar = resolveAvatarUrl(resolveEffectiveProfileAvatar(selectedChatUser));
-                            return (
-                              <button
-                                type="button"
-                                onClick={() => partnerUid && openUserProfileByUid(partnerUid, selectedChatUser)}
-                                className="flex items-center space-x-2.5 min-w-0 text-left hover:opacity-85 transition cursor-pointer"
-                                title="Profilni ko'rish"
-                              >
-                                <div className="relative shrink-0">
-                                  {partnerAvatar ? (
-                                    <img src={partnerAvatar} alt={selectedChatUser?.name || ''} className="w-9 h-9 rounded-full object-cover border border-white/15" />
-                                  ) : (
-                                    <div className="w-9 h-9 rounded-full bg-rose-500/20 text-rose-300 font-bold text-sm flex items-center justify-center border border-rose-500/30">
-                                      {getSafeUserDisplayName(selectedChatUser, 'F').charAt(0).toUpperCase()}
-                                    </div>
-                                  )}
-                                  {partnerOnline && (
-                                    <span className="absolute bottom-0 right-0 w-2.5 h-2.5 bg-emerald-500 border-2 border-[#11131C] rounded-full"></span>
-                                  )}
-                                </div>
-                                <div className="min-w-0">
-                                  <h3 className="font-sans font-bold text-sm text-white leading-none truncate">{selectedChatUser?.name}</h3>
-                                  <p className={cn("text-[10.5px] mt-1", partnerOnline ? "text-emerald-400 font-semibold" : "text-zinc-400")}>
-                                    {partnerOnline ? 'tarmoqda' : formatLastSeenUz(selectedChatUser?.lastSeen, false)}
-                                  </p>
-                                </div>
-                              </button>
-                            );
-                          })()}
-                        </div>
-                        <div className="flex items-center space-x-1">
-                          {(() => {
-                            const myUid = currentUser?.uid || firebaseUser?.uid;
-                            const otherUid = selectedChatUser?.uid || selectedChatUser?.id;
-                            const activeChatId = (myUid && otherUid) ? [myUid, otherUid].sort().join('_') : '';
-                            const isAIBotChat = otherUid === ALOV_AI_USER.uid || otherUid === 'user_kamola_006' || otherUid === 'ALOV-006';
-                            const isFriendActive = Boolean(activeChatId && chatFriendships[activeChatId]);
-                            if (currentUser?.gender === 'female' && !isAIBotChat) {
-                              return (
-                                <button
-                                  type="button"
-                                  onClick={handleToggleFriendship}
-                                  title={isFriendActive ? `Do'stlashishni bekor qilish (${MESSAGE_COIN_COST} moneta yechiladi)` : "Do'stlashish — yigitdan moneta yechilmaydi"}
-                                  className={cn(
-                                    "px-2.5 py-1.5 rounded-full text-[10px] font-bold flex items-center space-x-1 transition active:scale-95 whitespace-nowrap shrink-0 cursor-pointer",
-                                    isFriendActive
-                                      ? "bg-emerald-600 text-white"
-                                      : "bg-rose-500/15 hover:bg-rose-500/25 text-rose-300 border border-rose-500/30"
-                                  )}
-                                >
-                                  <Handshake className="w-3.5 h-3.5" />
-                                  <span>{isFriendActive ? "Do'stlashilgan" : "Do'stlashish"}</span>
-                                </button>
-                              );
-                            }
-                            return null;
-                          })()}
-                          <button
-                            onClick={() => setShowGiftModal(true)}
-                            title="Sovg'a yuborish"
-                            className="p-2 rounded-full hover:bg-amber-500/15 text-amber-400 transition active:scale-90 cursor-pointer"
-                          >
-                            <Gift className="w-5 h-5" />
-                          </button>
-                          <button
-                            onClick={() => {
-                              if (selectedChatUser) {
-                                setActiveCallUser(selectedChatUser);
-                              }
-                            }}
-                            title="Video qo'ng'iroq"
-                            className="p-2 rounded-full hover:bg-rose-500/15 text-rose-400 transition active:scale-90 cursor-pointer"
-                          >
-                            <Video className="w-5 h-5" />
-                          </button>
-                        </div>
-                      </div>
-
-                      {(() => {
-                        const myUid = currentUser?.uid || firebaseUser?.uid;
-                        const otherUid = selectedChatUser?.uid || selectedChatUser?.id;
-                        const activeChatId = (myUid && otherUid) ? [myUid, otherUid].sort().join('_') : '';
-                        const isFriendActive = Boolean(activeChatId && chatFriendships[activeChatId]);
-                        const isAIBotChat = otherUid === ALOV_AI_USER.uid || otherUid === 'user_kamola_006' || otherUid === 'ALOV-006';
-
-                        if (isFriendActive && !isAIBotChat) {
-                          return (
-                            <div className="bg-emerald-500/15 border-b border-emerald-500/25 text-emerald-200 px-3.5 py-1.5 text-[10.5px] font-semibold flex items-center justify-between shrink-0">
-                              <span>Do'stlashish faol — Yigitdan moneta yechilmaydi</span>
-                              <span className="text-emerald-300 font-bold whitespace-nowrap">Bepul chat</span>
-                            </div>
-                          );
-                        }
-                        if (currentUser?.gender === 'female') {
-                          return (
-                            <div className="bg-cyan-500/10 border-b border-cyan-500/20 text-cyan-200 px-3.5 py-1.5 text-[10.5px] font-semibold flex items-center justify-between shrink-0">
-                              <span>💎 Har bir javobingiz uchun +{MESSAGE_DIAMOND_REWARD} Almaz limitga qo'shiladi</span>
-                              <span className="font-mono text-cyan-300 font-bold whitespace-nowrap tabular-nums">Wallet: {formatDiamondsDisplay(currentUser?.diamonds)}</span>
-                            </div>
-                          );
-                        }
-                        if (!isAIBotChat) {
-                          return (
-                            <div className="bg-amber-500/10 border-b border-amber-500/20 text-amber-200 px-3.5 py-1.5 text-[10.5px] font-semibold flex items-center justify-between shrink-0">
-                              <span>🪙 Har bir xabar narxi: {MESSAGE_COIN_COST} Moneta</span>
-                              <span className="font-mono text-amber-300 font-bold whitespace-nowrap tabular-nums">Balans: {currentUser?.coins ?? 100}</span>
-                            </div>
-                          );
-                        }
-                        return null;
-                      })()}
-
-                      <div ref={chatMessagesContainerRef} className="flex-1 min-h-0 px-3.5 py-3 overflow-y-auto overscroll-y-contain space-y-2.5 bg-[#09090D] [-webkit-overflow-scrolling:touch]">
-                        <AnimatePresence>
-                          {(() => {
-                            const myUid = currentUser?.uid || firebaseUser?.uid;
-                            const otherUid = selectedChatUser?.uid || selectedChatUser?.id;
-                            const activeKey = selectedChatUser?.id || selectedChatUser?.uid;
-                            const activeChatId = (myUid && otherUid) ? [myUid, otherUid].sort().join('_') : null;
-
-                            const msgs = (activeChatId && chatMessages[activeChatId]) ||
-                                         (activeKey && chatMessages[activeKey]) ||
-                                         (selectedChatUser?.uid && chatMessages[selectedChatUser.uid]) ||
-                                         (selectedChatUser?.id && chatMessages[selectedChatUser.id]) ||
-                                         [];
-
-                            const sortedMessages = [...msgs].sort((a, b) =>
-                              new Date(a.createdAt || 0).getTime() - new Date(b.createdAt || 0).getTime()
-                            );
-
-                            return sortedMessages.map((msg, idx) => {
-                              const isMe = msg.senderId === 'me' || (myUid && (msg.senderId === myUid || msg.userId === myUid));
-
-                              return (
-                                <motion.div
-                                  key={msg.id ? `${msg.id}_${idx}` : `msg_${idx}`}
-                                  initial={{ opacity: 0, y: 8, scale: 0.96 }}
-                                  animate={{ opacity: 1, y: 0, scale: 1 }}
-                                  transition={{ duration: 0.16 }}
-                                  className={cn("flex", isMe ? 'justify-end' : 'justify-start')}
-                                >
-                                  <div className={cn(
-                                    "max-w-[85%] rounded-[18px] px-4 py-2.5 relative",
-                                    isMe
-                                      ? 'bg-gradient-to-br from-[#E11D48] to-[#BE123C] text-white rounded-tr-none shadow-md shadow-rose-950/30'
-                                      : 'bg-[#151824] text-zinc-100 border border-white/[0.08] rounded-tl-none'
-                                  )}>
-                                    {msg.type === 'gift' ? (
-                                      <div className="flex items-center space-x-2.5 py-1">
-                                        <span className="text-3xl shrink-0">{msg.giftIcon || '🎁'}</span>
-                                        <div>
-                                          <p className="font-bold text-xs">{msg.giftName || "Sovg'a"} yuborildi!</p>
-                                          <p className="text-[10px] opacity-90 flex items-center space-x-1 mt-0.5">
-                                            <span>🪙 {msg.coinPrice || 10} moneta</span>
-                                          </p>
-                                        </div>
-                                      </div>
-                                    ) : msg.type === 'meet' ? (
-                                      <a href={msg.meetUrl} target="_blank" rel="noreferrer" className="underline font-bold flex items-center space-x-2 py-1">
-                                        <Video className="w-4 h-4" />
-                                        <span>Google Meet Qo'shilish</span>
-                                        <ArrowUpRight className="w-3.5 h-3.5" />
-                                      </a>
-                                    ) : msg.type === 'image' ? (
-                                      <img src={msg.fileUrl} alt="" className="rounded-lg max-h-60 object-cover" />
-                                    ) : msg.type === 'video' ? (
-                                      <Suspense fallback={null}>
-                                        <VideoPlayer url={msg.fileUrl || ''} />
-                                      </Suspense>
-                                    ) : (msg.type === 'voice' || msg.type === 'audio') ? (
-                                      <Suspense fallback={null}>
-                                        <VoiceMessage url={msg.fileUrl || ''} senderId={isMe ? 'me' : msg.senderId} />
-                                      </Suspense>
-                                    ) : (
-                                      <p className="text-[13px] leading-relaxed whitespace-pre-wrap break-words">{msg.text}</p>
-                                    )}
-                                    <div className="flex items-center justify-end space-x-1 mt-1">
-                                      <span className={cn("text-[9.5px] tabular-nums", isMe ? 'text-rose-100/80' : 'text-zinc-500')}>
-                                        {msg.time}
-                                      </span>
-                                      {isMe && (
-                                        <div className="flex items-center ml-1 shrink-0">
-                                          {msg.status === 'sending' ? (
-                                            <Clock className="w-3 h-3 text-rose-200/90 animate-pulse" />
-                                          ) : (msg.status === 'read' || msg.read) ? (
-                                            <CheckCheck className="w-3.5 h-3.5 text-cyan-200 font-bold" />
-                                          ) : (
-                                            <Check className="w-3.5 h-3.5 text-rose-200" />
-                                          )}
-                                        </div>
-                                      )}
-                                    </div>
-                                  </div>
-                                </motion.div>
-                              );
-                            });
-                          })()}
-                          <div ref={chatBottomRef} />
-
-                          {isOtherTyping || (selectedChatUser?.uid === ALOV_AI_USER.uid && isAiTyping) ? (
-                            <motion.div
-                              initial={{ opacity: 0, y: 5 }}
-                              animate={{ opacity: 1, y: 0 }}
-                              className="flex justify-start"
-                            >
-                              <div className="bg-[#151824] border border-white/[0.08] text-zinc-400 rounded-[18px] rounded-tl-none px-4 py-2 flex items-center space-x-2">
-                                <span className="text-[11px] font-semibold">{selectedChatUser?.uid === ALOV_AI_USER.uid ? 'Alov AI yozmoqda' : 'yozmoqda'}</span>
-                                <div className="flex space-x-1">
-                                  <motion.div animate={{ opacity: [0.3, 1, 0.3] }} transition={{ repeat: Infinity, duration: 1, delay: 0 }} className="w-1 h-1 bg-zinc-400 rounded-full" />
-                                  <motion.div animate={{ opacity: [0.3, 1, 0.3] }} transition={{ repeat: Infinity, duration: 1, delay: 0.2 }} className="w-1 h-1 bg-zinc-400 rounded-full" />
-                                  <motion.div animate={{ opacity: [0.3, 1, 0.3] }} transition={{ repeat: Infinity, duration: 1, delay: 0.4 }} className="w-1 h-1 bg-zinc-400 rounded-full" />
-                                </div>
-                              </div>
-                            </motion.div>
-                          ) : null}
-                        </AnimatePresence>
-                      </div>
-
-                      {(() => {
-                        const progressVal = Number(currentUser?.diamondProgress || 0);
-                        const progressPct = getDiamondProgressPercent(progressVal);
-                        const pendingBatches = Array.isArray(currentUser?.pendingDiamondBatches) ? currentUser.pendingDiamondBatches : [];
-                        const pendingTotal = getPendingDiamondsTotal(pendingBatches);
-                        const nextUnlockAt = getNextUnlockTimestamp(pendingBatches);
-                        const countdown = computeCountdownParts(nextUnlockAt, countdownNow);
-
-                        if (currentUser?.gender === 'female') {
-                          return (
-                            <div className="bg-[#11131C] border-t border-white/[0.08] px-3.5 pt-2 pb-1.5 shrink-0 space-y-1">
-                              <div className="flex items-center justify-between text-[10.5px] font-bold">
-                                <span className="text-zinc-300 flex items-center gap-1">
-                                  <span>💎 Kunlik limit ({DAILY_LIMIT_WINDOW_HOURS} soat):</span>
-                                  <span className="text-cyan-300 tabular-nums">{formatDiamondsDisplay(progressVal)} / {DIAMOND_LIMIT_TARGET}</span>
-                                </span>
-                                <span className="text-emerald-400 tabular-nums">{progressPct}%</span>
-                              </div>
-                              <div className="w-full h-1.5 bg-white/[0.08] rounded-full overflow-hidden">
-                                <div
-                                  className="h-full w-full origin-left bg-gradient-to-r from-cyan-500 to-emerald-500 transition-transform duration-500 rounded-full"
-                                  style={{ transform: `scaleX(${Math.max(0, Math.min(1, progressPct / 100))})` }}
-                                />
-                              </div>
-                              {pendingTotal > 0 && (
-                                <div className="flex items-center justify-between text-[10px] font-semibold text-amber-200 bg-amber-500/10 px-2.5 py-1 rounded-lg border border-amber-400/20">
-                                  <span className="flex items-center gap-1">
-                                    <Clock className="w-3 h-3 shrink-0 text-amber-400" />
-                                    <span>{formatDiamondsDisplay(pendingTotal)} 💎 (limit to'lmasa ham) {DIAMOND_UNLOCK_HOURS} soatda hamyonga tushadi</span>
-                                  </span>
-                                  <span className="font-mono font-bold text-amber-300 tabular-nums">{countdown.formatted}</span>
-                                </div>
-                              )}
-                            </div>
-                          );
-                        }
-                        return null;
-                      })()}
-
-                      <div className="shrink-0 z-20 px-3 pt-2 pb-2.5 pb-safe bg-[#11131C] border-t border-white/[0.08] flex flex-col">
-                        <Suspense fallback={null}>
-                          <ChatMediaPicker
-                            isOpen={showChatMediaPicker}
-                            onToggleOpen={() => setShowChatMediaPicker((prev) => !prev)}
-                            onSendMedia={handleSendPickedChatMedia}
-                            isUploading={isUploadingChatMedia}
-                          />
-                        </Suspense>
-                        <div className="flex items-end space-x-2 w-full">
-                        <button
-                          type="button"
-                          onClick={() => setShowChatMediaPicker((prev) => !prev)}
-                          aria-label="Media yuklash"
-                          data-testid="toggle-chat-media-picker"
-                          className={cn(
-                            "p-2.5 rounded-full transition active:scale-90 cursor-pointer shrink-0",
-                            showChatMediaPicker
-                              ? "bg-rose-500/20 text-rose-400"
-                              : "text-zinc-400 hover:bg-white/[0.06] hover:text-zinc-200"
-                          )}
-                        >
-                          <Plus className={cn("w-5 h-5 transition-transform", showChatMediaPicker && "rotate-45")} />
-                        </button>
-                        <div className="flex-1 relative">
-                          <textarea
-                            placeholder="Xabar yozing..."
-                            rows={1}
-                            value={inputMessage}
-                            onFocus={() => {
-                              setTimeout(() => {
-                                const el = chatMessagesContainerRef.current;
-                                if (el) el.scrollTop = el.scrollHeight;
-                              }, 120);
-                            }}
-                            onChange={(e) => {
-                              setInputMessage(e.target.value);
-                              handleTyping();
-                            }}
-                            onKeyDown={(e) => {
-                              if (e.key === 'Enter' && !e.shiftKey) {
-                                e.preventDefault();
-                                handleSendChatMessage();
-                              }
-                            }}
-                            className="w-full px-4 py-2.5 rounded-[20px] bg-[#181B29] border border-white/[0.08] text-[13px] text-white placeholder:text-zinc-500 focus:outline-none focus:border-rose-500 resize-none max-h-32"
-                          />
-                        </div>
-                        {inputMessage.trim() ? (
-                          <button
-                            onClick={() => handleSendChatMessage()}
-                            className="bg-[#E11D48] text-white p-3 rounded-full shadow-lg hover:bg-[#BE123C] transition-all active:scale-95 flex items-center justify-center cursor-pointer"
-                          >
-                            <Send className="w-4.5 h-4.5" />
-                          </button>
-                        ) : (
-                          <button
-                            onMouseDown={startRecording}
-                            onMouseUp={stopRecording}
-                            onTouchStart={startRecording}
-                            onTouchEnd={stopRecording}
-                            className={cn(
-                              "p-3 rounded-full transition-all active:scale-95 flex items-center justify-center cursor-pointer",
-                              isRecording ? "bg-red-600 text-white animate-pulse" : "bg-white/[0.07] text-zinc-300 hover:bg-white/[0.12]"
-                            )}
-                          >
-                            <Mic className="w-5 h-5" />
-                          </button>
-                        )}
-                        </div>
-                      </div>
-                    </div>
-                  )}
-                </div>
-              )}
+              {/* Chat renders exclusively via Vercel Micro-Frontend (/chat) */}
 
               {/* --- PROFILE TAB (Editorial Obsidian Dating Profile) --- */}
               {activeTab === 'profile' && (() => {
@@ -5783,7 +4641,7 @@ export default function App() {
               { id: 'map', label: 'Xarita', icon: MapPin, onClick: () => setActiveTab('map') },
               { id: 'reels', label: 'Efirlar', icon: Video, onClick: () => setActiveTab('reels') },
               { id: 'chatruletka', label: 'Ruletka', icon: Shuffle, onClick: () => setActiveTab('chatruletka') },
-              { id: 'chats', label: 'Chatlar', icon: MessageCircle, onClick: () => { setChatView('list'); setActiveTab('chats'); } },
+              { id: 'chats', label: 'Chatlar', icon: MessageCircle, onClick: () => { setSelectedChatUser(null); setChatView('list'); setActiveTab('chats'); } },
               { id: 'profile', label: 'Profil', icon: UserIcon, onClick: () => setActiveTab('profile') },
             ].map((tab) => {
               const Icon = tab.icon;
@@ -5910,6 +4768,31 @@ export default function App() {
                   onOpenAuth={() => openAuthModalClean('login')}
                   onOpenProfile={openUserProfileByUid}
                   onNotify={showToast}
+                />
+              </Suspense>
+            </div>
+          )}
+
+          {embedRouteInfo.section === 'chat' && (
+            <div className="flex-1 min-h-0 flex flex-col">
+              <Suspense fallback={<div className="py-12 text-center text-xs text-zinc-400">Chat yuklanmoqda...</div>}>
+                <ChatView
+                  currentUser={currentUser}
+                  backendOrigin={bridgeBackendOrigin}
+                  initialPartner={selectedChatUser}
+                  onOpenAuth={() => openAuthModalClean('login')}
+                  onOpenProfile={openUserProfileByUid}
+                  onStartCall={(u) => setActiveCallUser(u)}
+                  onOpenGift={(u) => {
+                    setSelectedChatUser(u);
+                    setShowGiftModal(true);
+                  }}
+                  onOpenTopUp={(notice) => {
+                    if (notice) setWalletNoticeMsg(notice);
+                    setShowTopUpModal(true);
+                  }}
+                  onNotify={showToast}
+                  onChatViewChange={(view) => setChatView(view)}
                 />
               </Suspense>
             </div>
@@ -7995,6 +6878,7 @@ export default function App() {
             mode={liveModalMode}
             streamId={activeLiveStreamId}
             hostUser={activeLiveHostUser}
+            backendOrigin={resolveRealtimeBackendUrl(bridgeBackendOrigin || getBaseUrl())}
             currentUser={{
               uid: currentUser?.uid || firebaseUser?.uid,
               id: currentUser?.id,

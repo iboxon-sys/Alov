@@ -5,6 +5,7 @@
 import { getApiUrl, getBaseUrl } from '../config/api';
 import { io, Socket } from 'socket.io-client';
 import type { StreamChatMessage } from '../utils/liveStream';
+import { resolveRealtimeBackendUrl } from '../utils/microFrontendBridge';
 
 const ICE_SERVERS: RTCConfiguration = {
   iceServers: [
@@ -79,11 +80,15 @@ export async function requestLiveMediaToken(
  */
 export async function createLiveStream(
   hostUser: { uid: string; name: string; avatar?: string },
-  title: string
+  title: string,
+  backendOrigin?: string
 ): Promise<string> {
   const streamId = `live_${hostUser.uid}_${Date.now()}`;
+  const targetUrl = backendOrigin
+    ? `${resolveRealtimeBackendUrl(backendOrigin)}/api/live-streams/start`
+    : `${resolveRealtimeBackendUrl(getBaseUrl())}/api/live-streams/start`;
   try {
-    await fetch(getApiUrl('/api/live-streams/start'), {
+    await fetch(targetUrl, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -103,9 +108,12 @@ export async function createLiveStream(
 /**
  * Stop live stream session as Host
  */
-export async function stopLiveStream(streamId: string, hostUid: string) {
+export async function stopLiveStream(streamId: string, hostUid: string, backendOrigin?: string) {
+  const targetUrl = backendOrigin
+    ? `${resolveRealtimeBackendUrl(backendOrigin)}/api/live-streams/stop`
+    : `${resolveRealtimeBackendUrl(getBaseUrl())}/api/live-streams/stop`;
   try {
-    await fetch(getApiUrl('/api/live-streams/stop'), {
+    await fetch(targetUrl, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ streamId, hostUid }),
@@ -115,9 +123,11 @@ export async function stopLiveStream(streamId: string, hostUid: string) {
   }
 }
 
-function createSignalingSocket(): Socket {
-  return io(getBaseUrl(), {
+function createSignalingSocket(backendOrigin?: string): Socket {
+  const signalingOrigin = resolveRealtimeBackendUrl(backendOrigin || getBaseUrl());
+  return io(signalingOrigin, {
     transports: ['websocket', 'polling'],
+    withCredentials: true,
     reconnection: true,
     reconnectionAttempts: 12,
     reconnectionDelay: 1000,

@@ -1,1 +1,12 @@
-{}
+{
+  "alov_ai_bot_tg_salikh_07": {
+    "id": "alov_ai_bot_tg_salikh_07",
+    "participants": [
+      "tg_salikh_07",
+      "alov_ai_bot"
+    ],
+    "lastMessage": "Salom Alov AI!",
+    "lastSenderId": "tg_salikh_07",
+    "updatedAt": "2026-11-17T15:17:37.082Z"
+  }
+}

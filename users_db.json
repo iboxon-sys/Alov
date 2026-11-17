@@ -36,7 +36,7 @@
     "isOnline": false,
     "status": "offline",
     "updatedAt": "2026-11-15T21:03:09.752Z",
-    "lastSeen": "2026-11-17T14:31:58.217Z",
+    "lastSeen": "2026-11-17T15:17:43.298Z",
     "firstName": "Salikh",
     "birthDate": "2002-05-15",
     "neighborhood": "Mirzo Salimiy",
@@ -63,7 +63,7 @@
       "exchangeRateUzs": 100,
       "unlockWindowHours": 12,
       "nextUnlockAt": null,
-      "updatedAt": "2026-11-17T14:31:55.892Z"
+      "updatedAt": "2026-11-17T15:17:40.753Z"
     }
   }
 ]

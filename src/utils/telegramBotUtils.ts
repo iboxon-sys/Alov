@@ -177,3 +177,35 @@ export function evaluateMandatorySubscriptionAccess(params: {
   }
   return { gateRequired: true, reason: 'not_subscribed' };
 }
+
+export function isVercelEnvironment(
+  env: Record<string, string | undefined> | undefined = typeof process !== 'undefined' ? process.env : undefined
+): boolean {
+  if (!env) return false;
+  const rawVercel = String(env.VERCEL ?? '').trim().toLowerCase();
+  if (rawVercel === '0' || rawVercel === 'false') {
+    return false;
+  }
+  if (rawVercel.length > 0) {
+    return true;
+  }
+  if (String(env.VERCEL_ENV ?? '').trim().length > 0) {
+    return true;
+  }
+  if (String(env.VERCEL_URL ?? '').trim().length > 0) {
+    return true;
+  }
+  return false;
+}
+
+export function shouldStartTelegramBot(
+  env: Record<string, string | undefined> | undefined = typeof process !== 'undefined' ? process.env : undefined,
+  botToken?: string
+): boolean {
+  if (isVercelEnvironment(env)) {
+    return false;
+  }
+  const effectiveToken = String(botToken ?? env?.TELEGRAM_BOT_TOKEN ?? '').trim();
+  return effectiveToken.length > 0;
+}
+

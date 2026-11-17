@@ -1,7 +1,7 @@
 export const MAIN_RENDER_ORIGIN = 'https://alov.onrender.com';
 export const VERCEL_HEAVY_ORIGIN = 'https://alov-mu.vercel.app';
 
-export const HEAVY_VERCEL_SECTIONS = ['efir', 'postlar', 'chatroulette'] as const;
+export const HEAVY_VERCEL_SECTIONS = ['efir', 'postlar', 'chatroulette', 'chat'] as const;
 export type HeavyVercelSection = (typeof HEAVY_VERCEL_SECTIONS)[number];
 
 export interface AuthBridgePayload {
@@ -11,6 +11,8 @@ export interface AuthBridgePayload {
   user?: Record<string, any> | null;
   backendOrigin: string;
   section?: HeavyVercelSection;
+  partnerUid?: string;
+  partner?: Record<string, any> | null;
   issuedAt: number;
 }
 
@@ -65,6 +67,18 @@ export function isDevPreviewHost(hostname?: string | null): boolean {
     h.endsWith('.usercontent.goog') ||
     h === 'aistudio.google.com'
   );
+}
+
+/**
+ * Ensures real-time Socket.io, Chat REST API, and WebRTC signaling (Efir, Chat, Chatruletka)
+ * ALWAYS resolve to the Render/fullstack backend origin and NEVER route signaling requests to Vercel.
+ */
+export function resolveRealtimeBackendUrl(candidateOrigin?: string | null): string {
+  const parsed = parseOriginHostname(candidateOrigin);
+  if (!parsed.valid || isVercelHost(parsed.hostname)) {
+    return MAIN_RENDER_ORIGIN;
+  }
+  return parsed.origin.replace(/\/+$/, '');
 }
 
 /**
@@ -152,6 +166,11 @@ export function mapTabToVercelSection(tab: string): HeavyVercelSection | null {
     case 'roulette':
     case 'ruletka':
       return 'chatroulette';
+    case 'chats':
+    case 'chat':
+    case 'messages':
+    case 'xabarlar':
+      return 'chat';
     default:
       return null;
   }
@@ -190,6 +209,9 @@ export function parseVercelEmbedRoute(pathname: string): {
   }
   if (clean === '/chatroulette' || clean === '/chatruletka' || clean === '/roulette') {
     return { isEmbedRoute: true, section: 'chatroulette' };
+  }
+  if (clean === '/chat' || clean === '/chats' || clean === '/messages') {
+    return { isEmbedRoute: true, section: 'chat' };
   }
   return { isEmbedRoute: false, section: null };
 }
@@ -239,7 +261,7 @@ export function shouldUseVercelIframeForSection(params: {
   if (isInIframe) return false;
   if (isVercelHost(hostname)) return false;
 
-  if (section === 'chatroulette') {
+  if (section === 'chatroulette' || section === 'chat') {
     return true;
   }
 
@@ -346,10 +368,13 @@ export function buildPostMessageAuthPayload(params: {
   user?: Record<string, any> | null;
   backendOrigin?: string | null;
   section?: HeavyVercelSection;
+  partnerUid?: string | null;
+  partner?: Record<string, any> | null;
 }): AuthBridgePayload {
   const cleanUserId = String(params.userId || params.user?.uid || params.user?.id || '').trim();
   const cleanToken = String(params.token || params.user?.authToken || (cleanUserId ? `alov_session_${cleanUserId}` : '')).trim();
-  const cleanBackend = String(params.backendOrigin || MAIN_RENDER_ORIGIN).trim().replace(/\/+$/, '');
+  const cleanBackend = resolveRealtimeBackendUrl(params.backendOrigin || MAIN_RENDER_ORIGIN);
+  const cleanPartnerUid = String(params.partnerUid || params.partner?.uid || params.partner?.id || '').trim();
   return {
     type: 'ALOV_AUTH_BRIDGE',
     token: cleanToken,
@@ -357,6 +382,8 @@ export function buildPostMessageAuthPayload(params: {
     user: params.user || null,
     backendOrigin: cleanBackend,
     section: params.section,
+    ...(cleanPartnerUid ? { partnerUid: cleanPartnerUid } : {}),
+    ...(params.partner ? { partner: params.partner } : {}),
     issuedAt: Date.now(),
   };
 }
@@ -377,8 +404,10 @@ export function parseIncomingAuthMessage(
   if (!userId && !token) {
     return null;
   }
-  const backendOrigin = String(data.backendOrigin || MAIN_RENDER_ORIGIN).trim().replace(/\/+$/, '');
+  const backendOrigin = resolveRealtimeBackendUrl(data.backendOrigin || MAIN_RENDER_ORIGIN);
   const section = mapTabToVercelSection(data.section || '') || undefined;
+  const partnerUid = String(data.partnerUid || data.partner?.uid || data.partner?.id || '').trim() || undefined;
+  const partner = data.partner && typeof data.partner === 'object' ? data.partner : undefined;
   return {
     type: 'ALOV_AUTH_BRIDGE',
     token,
@@ -386,6 +415,8 @@ export function parseIncomingAuthMessage(
     user: data.user && typeof data.user === 'object' ? data.user : null,
     backendOrigin,
     section,
+    ...(partnerUid ? { partnerUid } : {}),
+    ...(partner ? { partner } : {}),
     issuedAt: typeof data.issuedAt === 'number' ? data.issuedAt : Date.now(),
   };
 }

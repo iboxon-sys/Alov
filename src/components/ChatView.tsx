@@ -1,0 +1,1413 @@
+import React, { useState, useEffect, useRef, useCallback, Suspense, lazy } from 'react';
+import {
+  ArrowLeft,
+  ArrowUpRight,
+  Check,
+  CheckCheck,
+  Clock,
+  Gift,
+  Handshake,
+  MessageCircle,
+  Mic,
+  Plus,
+  Send,
+  Square,
+  Video,
+} from 'lucide-react';
+import { io, Socket } from 'socket.io-client';
+import { getBaseUrl, MAIN_RENDER_ORIGIN } from '../config/api';
+import {
+  extractLocalAuthCredentials,
+  parseIncomingAuthMessage,
+  persistLocalAuthCredentials,
+  resolveRealtimeBackendUrl,
+} from '../utils/microFrontendBridge';
+import { buildCanonicalChatId, mergeChatLists } from '../utils/chatList';
+import { getSafeUserDisplayName, pickPreferredAvatar } from '../utils/telegramProfile';
+import { resolveEffectiveProfileAvatar } from '../utils/faceId';
+import { isUserOnlineStrict, formatLastSeenUz } from '../utils/presence';
+import {
+  MESSAGE_COIN_COST,
+  MESSAGE_DIAMOND_REWARD,
+  DIAMOND_LIMIT_TARGET,
+  DAILY_LIMIT_WINDOW_HOURS,
+  DIAMOND_UNLOCK_HOURS,
+  formatDiamondsDisplay,
+  getDiamondProgressPercent,
+  getPendingDiamondsTotal,
+  getNextUnlockTimestamp,
+  computeCountdownParts,
+} from '../utils/tokenomics';
+import type { ChatMediaKind } from './ChatMediaPicker';
+import { ChatSkeleton } from './Skeleton';
+
+const ChatMediaPicker = lazy(() =>
+  import('./ChatMediaPicker').then((m) => ({ default: m.ChatMediaPicker }))
+);
+const VideoPlayer = lazy(() =>
+  import('./ChatMedia').then((m) => ({ default: m.VideoPlayer }))
+);
+const VoiceMessage = lazy(() =>
+  import('./ChatMedia').then((m) => ({ default: m.VoiceMessage }))
+);
+
+const ALOV_AI_USER = {
+  uid: 'alov_ai_bot',
+  id: 'ALOV-AI',
+  name: 'Alov AI',
+  avatar: '/assets/aistudio/image_e20a1307.webp',
+  bio: 'Sizning samimiy va mehribon virtual suhbatdoshingiz.',
+  status: 'online',
+  isAI: true,
+};
+
+interface ChatViewProps {
+  currentUser: any | null;
+  backendOrigin?: string;
+  initialPartner?: any | null;
+  onOpenAuth?: () => void;
+  onOpenProfile?: (uid: string, snapshot?: any) => void;
+  onStartCall?: (targetUser: any) => void;
+  onOpenGift?: (targetUser: any) => void;
+  onOpenTopUp?: (notice?: string) => void;
+  onNotify?: (msg: string) => void;
+  onChatViewChange?: (view: 'list' | 'conversation') => void;
+}
+
+export const ChatView: React.FC<ChatViewProps> = ({
+  currentUser,
+  backendOrigin,
+  initialPartner,
+  onOpenAuth,
+  onOpenProfile,
+  onStartCall,
+  onOpenGift,
+  onOpenTopUp,
+  onNotify,
+  onChatViewChange,
+}) => {
+  const [bridgeUser, setBridgeUser] = useState<any | null>(currentUser);
+  const [bridgeToken, setBridgeToken] = useState<string>(() => {
+    if (typeof window !== 'undefined' && window.localStorage) {
+      return extractLocalAuthCredentials(window.localStorage).token;
+    }
+    return '';
+  });
+  const [activeBackendOrigin, setActiveBackendOrigin] = useState<string>(() =>
+    resolveRealtimeBackendUrl(backendOrigin || getBaseUrl() || MAIN_RENDER_ORIGIN)
+  );
+
+  const [chatView, setChatView] = useState<'list' | 'conversation'>(
+    initialPartner ? 'conversation' : 'list'
+  );
+  const [selectedChatUser, setSelectedChatUser] = useState<any | null>(initialPartner || null);
+  const [chatsList, setChatsList] = useState<any[]>([]);
+  const [chatMessages, setChatMessages] = useState<Record<string, any[]>>({});
+  const [chatFriendships, setChatFriendships] = useState<Record<string, boolean>>({});
+  const [usersList, setUsersList] = useState<any[]>([]);
+  const [onlineUserIds, setOnlineUserIds] = useState<Set<string>>(() => new Set());
+  const [isLoadingChats, setIsLoadingChats] = useState(true);
+
+  const [inputMessage, setInputMessage] = useState('');
+  const [showChatMediaPicker, setShowChatMediaPicker] = useState(false);
+  const [isUploadingChatMedia, setIsUploadingChatMedia] = useState(false);
+  const [isOtherTyping, setIsOtherTyping] = useState(false);
+  const [isAiTyping, setIsAiTyping] = useState(false);
+  const [isRecording, setIsRecording] = useState(false);
+  const [countdownNow, setCountdownNow] = useState<number>(() => Date.now());
+
+  const socketRef = useRef<Socket | null>(null);
+  const typingTimeoutRef = useRef<any>(null);
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const isRecordingRef = useRef<boolean>(false);
+  const chatMessagesContainerRef = useRef<HTMLDivElement | null>(null);
+  const chatBottomRef = useRef<HTMLDivElement | null>(null);
+
+  const effectiveUser = bridgeUser || currentUser;
+  const activeUserRef = useRef<any>(effectiveUser);
+  const selectedChatUserRef = useRef<any>(selectedChatUser);
+  const usersListRef = useRef<any[]>(usersList);
+  const onOpenTopUpRef = useRef(onOpenTopUp);
+  const onNotifyRef = useRef(onNotify);
+  const onChatViewChangeRef = useRef(onChatViewChange);
+
+  useEffect(() => {
+    onOpenTopUpRef.current = onOpenTopUp;
+  }, [onOpenTopUp]);
+
+  useEffect(() => {
+    onNotifyRef.current = onNotify;
+  }, [onNotify]);
+
+  useEffect(() => {
+    onChatViewChangeRef.current = onChatViewChange;
+  }, [onChatViewChange]);
+
+  useEffect(() => {
+    activeUserRef.current = effectiveUser;
+  }, [effectiveUser]);
+
+  useEffect(() => {
+    selectedChatUserRef.current = selectedChatUser;
+  }, [selectedChatUser]);
+
+  useEffect(() => {
+    usersListRef.current = usersList;
+  }, [usersList]);
+
+  useEffect(() => {
+    if (currentUser) {
+      setBridgeUser((prev: any) => ({ ...(prev || {}), ...currentUser }));
+    }
+  }, [currentUser]);
+
+  useEffect(() => {
+    if (backendOrigin) {
+      setActiveBackendOrigin(resolveRealtimeBackendUrl(backendOrigin));
+    }
+  }, [backendOrigin]);
+
+  useEffect(() => {
+    if (initialPartner) {
+      setSelectedChatUser(initialPartner);
+      setChatView('conversation');
+    }
+  }, [initialPartner]);
+
+  useEffect(() => {
+    onChatViewChangeRef.current?.(chatView);
+    if (typeof window !== 'undefined' && window.self !== window.top) {
+      try {
+        window.parent.postMessage({ type: 'ALOV_EMBED_CHAT_VIEW', view: chatView }, '*');
+      } catch {}
+    }
+  }, [chatView]);
+
+  const apiOrigin = resolveRealtimeBackendUrl(
+    activeBackendOrigin || backendOrigin || getBaseUrl() || MAIN_RENDER_ORIGIN
+  );
+
+  const resolveMediaOrAvatar = useCallback(
+    (rawUrl?: string | null): string => {
+      const clean = pickPreferredAvatar(rawUrl);
+      if (!clean) return '';
+      if (clean.startsWith('/api/')) {
+        return `${apiOrigin}${clean}`;
+      }
+      return clean;
+    },
+    [apiOrigin]
+  );
+
+  const getAuthHeaders = useCallback((): Record<string, string> => {
+    const stored =
+      typeof window !== 'undefined' && window.localStorage
+        ? extractLocalAuthCredentials(window.localStorage)
+        : { token: '', userId: '', user: null };
+    const uid = String(effectiveUser?.uid || effectiveUser?.id || stored.userId || '').trim();
+    const token = String(bridgeToken || effectiveUser?.authToken || stored.token || '').trim();
+    const headers: Record<string, string> = {};
+    if (token) {
+      headers['Authorization'] = `Bearer ${token}`;
+      headers['X-Alov-Token'] = token;
+    }
+    if (uid) {
+      headers['X-User-Id'] = uid;
+    }
+    return headers;
+  }, [bridgeToken, effectiveUser?.authToken, effectiveUser?.id, effectiveUser?.uid]);
+
+  const apiFetchJson = useCallback(
+    async (endpoint: string, options?: RequestInit): Promise<any> => {
+      const cleanEp = endpoint.startsWith('/') ? endpoint : `/${endpoint}`;
+      const url = `${apiOrigin}${cleanEp}`;
+      try {
+        const res = await fetch(url, {
+          ...(options || {}),
+          headers: {
+            ...getAuthHeaders(),
+            ...(options?.headers || {}),
+          },
+        });
+        const text = await res.text();
+        if (text && text.trim()) {
+          try {
+            return JSON.parse(text);
+          } catch {
+            return { success: false, status: res.status };
+          }
+        }
+        return { success: false, status: res.status };
+      } catch (err: any) {
+        return { success: false, error: err?.message || 'Tarmoq xatoligi' };
+      }
+    },
+    [apiOrigin, getAuthHeaders]
+  );
+
+  const notifyParentOrToast = useCallback((message: string) => {
+    if (onNotifyRef.current) {
+      onNotifyRef.current(message);
+    }
+    if (typeof window !== 'undefined' && window.self !== window.top) {
+      try {
+        window.parent.postMessage({ type: 'ALOV_EMBED_TOAST', message }, '*');
+      } catch {}
+    }
+  }, []);
+
+  // Strict postMessage listener for Render -> Vercel auth + active partner sync
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const handleMessage = (event: MessageEvent) => {
+      const parsed = parseIncomingAuthMessage(event, [window.location.origin]);
+      if (!parsed) return;
+
+      const resolvedOrigin = resolveRealtimeBackendUrl(parsed.backendOrigin);
+      setActiveBackendOrigin(resolvedOrigin);
+      if (parsed.token) {
+        setBridgeToken(parsed.token);
+      }
+
+      persistLocalAuthCredentials(window.localStorage, {
+        token: parsed.token,
+        userId: parsed.userId,
+        user: parsed.user,
+      });
+
+      if (parsed.user || parsed.userId) {
+        setBridgeUser((prev: any) => ({
+          ...(prev || {}),
+          ...(parsed.user || {}),
+          ...(parsed.userId ? { uid: parsed.userId } : {}),
+          ...(parsed.token ? { authToken: parsed.token } : {}),
+        }));
+      }
+
+      if (parsed.partner) {
+        setSelectedChatUser(parsed.partner);
+        setChatView('conversation');
+      } else if (parsed.partnerUid) {
+        const matched = usersListRef.current.find(
+          (u) => u.uid === parsed.partnerUid || u.id === parsed.partnerUid
+        );
+        setSelectedChatUser(matched || { uid: parsed.partnerUid, id: parsed.partnerUid, name: 'Foydalanuvchi' });
+        setChatView('conversation');
+      }
+    };
+
+    window.addEventListener('message', handleMessage);
+    if (window.self !== window.top) {
+      try {
+        window.parent.postMessage({ type: 'ALOV_EMBED_READY', section: 'chat' }, '*');
+      } catch {}
+    }
+    return () => window.removeEventListener('message', handleMessage);
+  }, []);
+
+  // Load users list for resolving partner avatars & statuses
+  useEffect(() => {
+    apiFetchJson('/api/users').then((res) => {
+      if (res?.success && Array.isArray(res.users)) {
+        setUsersList(res.users);
+      }
+    });
+  }, [apiFetchJson]);
+
+  // Load chats list directly from Render Backend + localStorage cache
+  useEffect(() => {
+    const myUid = effectiveUser?.uid || effectiveUser?.id;
+    if (!myUid) {
+      setIsLoadingChats(false);
+      return;
+    }
+
+    let cancelled = false;
+    const loadChats = async () => {
+      let localChats: any[] = [];
+      try {
+        const cached = localStorage.getItem('alov_chats_' + myUid);
+        if (cached) localChats = JSON.parse(cached);
+      } catch {}
+
+      const data = await apiFetchJson(`/api/chats/user/${encodeURIComponent(myUid)}`);
+      if (cancelled) return;
+      const serverChats = data?.success && Array.isArray(data.chats) ? data.chats : [];
+
+      setChatsList((prev) => {
+        const merged = mergeChatLists([prev, localChats, serverChats], myUid, {
+          myAliases: [myUid, effectiveUser?.id].filter(Boolean) as string[],
+          usersList: usersListRef.current,
+        });
+        try {
+          localStorage.setItem('alov_chats_' + myUid, JSON.stringify(merged));
+        } catch {}
+        return merged;
+      });
+      setIsLoadingChats(false);
+    };
+
+    loadChats();
+    return () => {
+      cancelled = true;
+    };
+  }, [apiFetchJson, effectiveUser?.id, effectiveUser?.uid]);
+
+  // Connect Socket.io directly to Render Backend
+  useEffect(() => {
+    const stored =
+      typeof window !== 'undefined' && window.localStorage
+        ? extractLocalAuthCredentials(window.localStorage)
+        : { token: '', userId: '', user: null };
+    const myUid = String(effectiveUser?.uid || effectiveUser?.id || stored.userId || '').trim();
+    const token = String(bridgeToken || effectiveUser?.authToken || stored.token || '').trim();
+
+    const socket = io(apiOrigin, {
+      transports: ['websocket', 'polling'],
+      withCredentials: true,
+      reconnection: true,
+      reconnectionAttempts: 20,
+      reconnectionDelay: 1500,
+      timeout: 15000,
+      auth: { token, userId: myUid },
+    });
+    socketRef.current = socket;
+
+    const registerAndJoin = () => {
+      const uidNow = String(activeUserRef.current?.uid || activeUserRef.current?.id || myUid || '').trim();
+      if (uidNow) {
+        socket.emit('register_user', uidNow);
+      }
+      const partner = selectedChatUserRef.current;
+      if (uidNow && partner) {
+        const otherUid = partner.uid || partner.id;
+        if (otherUid) {
+          socket.emit('join_chat', buildCanonicalChatId(uidNow, otherUid));
+        }
+      }
+    };
+
+    socket.on('connect', registerAndJoin);
+
+    socket.on('presence_sync', ({ onlineUserIds: ids }: { onlineUserIds?: string[] }) => {
+      const nextSet = new Set((ids || []).map(String));
+      setOnlineUserIds(nextSet);
+      setUsersList((prev) =>
+        prev.map((u) => {
+          const isOn = Boolean((u.uid && nextSet.has(u.uid)) || (u.id && nextSet.has(u.id)));
+          return u.isOnline === isOn ? u : { ...u, isOnline: isOn, status: isOn ? 'online' : 'offline' };
+        })
+      );
+    });
+
+    socket.on('user_updated', (updatedUser: any) => {
+      if (!updatedUser) return;
+      const uidNow = activeUserRef.current?.uid;
+      if (uidNow && (updatedUser.uid === uidNow || updatedUser.id === uidNow)) {
+        setBridgeUser((prev: any) => ({ ...(prev || {}), ...updatedUser }));
+      }
+      setSelectedChatUser((prev: any) =>
+        prev && (prev.uid === updatedUser.uid || prev.id === updatedUser.id)
+          ? { ...prev, ...updatedUser }
+          : prev
+      );
+      setUsersList((prev) => {
+        const map = new Map<string, any>();
+        prev.forEach((u) => map.set(u.uid || u.id, u));
+        map.set(updatedUser.uid || updatedUser.id, updatedUser);
+        return Array.from(map.values());
+      });
+    });
+
+    const handleIncomingMessage = (payload: any) => {
+      const msg = payload?.message || payload;
+      const chatId = payload?.chatId;
+      const uidNow = activeUserRef.current?.uid || activeUserRef.current?.id;
+      const selUser = selectedChatUserRef.current;
+
+      let partnerId = payload?.senderId === uidNow ? payload?.recipientId : payload?.senderId;
+      if (!partnerId && msg?.senderId) {
+        partnerId = msg.senderId === uidNow ? payload?.recipientId : msg.senderId;
+      }
+      if (!partnerId && selUser) {
+        partnerId = selUser.uid || selUser.id;
+      }
+      if (!partnerId && !chatId) return;
+
+      const newMsg = {
+        ...msg,
+        status: msg.status || (msg.senderId === uidNow ? 'sent' : 'read'),
+        time:
+          msg.time ||
+          new Date(msg.createdAt || Date.now()).toLocaleTimeString([], {
+            hour: '2-digit',
+            minute: '2-digit',
+          }),
+      };
+
+      setChatMessages((prev) => {
+        const keys = Array.from(
+          new Set([chatId, partnerId, payload?.senderId, payload?.recipientId, selUser?.id, selUser?.uid].filter(Boolean))
+        ) as string[];
+        const next = { ...prev };
+        keys.forEach((k) => {
+          const list = prev[k] || [];
+          const idx = list.findIndex((m) => m.id === newMsg.id);
+          if (idx > -1) {
+            const copy = [...list];
+            copy[idx] = { ...copy[idx], ...newMsg };
+            next[k] = copy;
+          } else {
+            next[k] = [...list, newMsg];
+          }
+        });
+        if (chatId && next[chatId]) {
+          try {
+            localStorage.setItem('alov_msgs_' + chatId, JSON.stringify(next[chatId]));
+          } catch {}
+        }
+        return next;
+      });
+
+      if (chatId) {
+        setChatsList((prev) => {
+          const lastMsg =
+            msg.text || (msg.type === 'image' ? 'Rasm 🖼️' : msg.type === 'video' ? 'Video 🎥' : 'Xabar');
+          const partnerInfo =
+            payload?.message?.sender ||
+            (partnerId
+              ? {
+                  uid: partnerId,
+                  id: partnerId,
+                  name: msg.senderName || selUser?.name || 'Foydalanuvchi',
+                  avatar: msg.senderAvatar || selUser?.avatar || '',
+                }
+              : undefined);
+          const incomingChat = {
+            id: chatId,
+            participants: [uidNow, partnerId].filter(Boolean),
+            lastMessage: lastMsg,
+            updatedAt: msg.createdAt || new Date().toISOString(),
+            partner: partnerInfo,
+          };
+          const merged = mergeChatLists([prev, [incomingChat]], uidNow || '', {
+            myAliases: [uidNow, activeUserRef.current?.id].filter(Boolean) as string[],
+            usersList: usersListRef.current,
+          });
+          if (uidNow) {
+            try {
+              localStorage.setItem('alov_chats_' + uidNow, JSON.stringify(merged));
+            } catch {}
+          }
+          return merged;
+        });
+      }
+
+      if (msg.senderId && msg.senderId !== uidNow && selUser && (selUser.id === partnerId || selUser.uid === partnerId)) {
+        socket.emit('mark_read', {
+          chatId,
+          messageIds: [msg.id],
+          senderId: msg.senderId,
+          recipientId: uidNow,
+        });
+      }
+
+      if (msg.senderId === ALOV_AI_USER.uid || msg.senderId === 'user_kamola_006' || msg.senderId === 'ALOV-006') {
+        setIsAiTyping(false);
+      }
+    };
+
+    socket.on('receive_message', handleIncomingMessage);
+    socket.on('chat:message', handleIncomingMessage);
+
+    socket.on('message_ack', ({ chatId, messageId, status }: any) => {
+      setChatMessages((prev) => {
+        const next = { ...prev };
+        Object.keys(next).forEach((k) => {
+          if (next[k]) {
+            next[k] = next[k].map((m) => (m.id === messageId ? { ...m, status: status || 'sent' } : m));
+          }
+        });
+        if (chatId && next[chatId]) {
+          try {
+            localStorage.setItem('alov_msgs_' + chatId, JSON.stringify(next[chatId]));
+          } catch {}
+        }
+        return next;
+      });
+    });
+
+    socket.on('message_read', ({ chatId, messageIds }: any) => {
+      setChatMessages((prev) => {
+        const next = { ...prev };
+        Object.keys(next).forEach((k) => {
+          if (next[k]) {
+            next[k] = next[k].map((m) =>
+              !messageIds || messageIds.includes(m.id) ? { ...m, status: 'read', read: true } : m
+            );
+          }
+        });
+        if (chatId && next[chatId]) {
+          try {
+            localStorage.setItem('alov_msgs_' + chatId, JSON.stringify(next[chatId]));
+          } catch {}
+        }
+        return next;
+      });
+    });
+
+    socket.on('user_typing', ({ uid, isTyping }: any) => {
+      const sel = selectedChatUserRef.current;
+      if (sel && (sel.uid === uid || sel.id === uid)) {
+        setIsOtherTyping(Boolean(isTyping));
+      }
+    });
+
+    socket.on('friendship_updated', ({ chatId, friendship }: any) => {
+      if (chatId) {
+        setChatFriendships((prev) => ({ ...prev, [chatId]: Boolean(friendship?.active) }));
+      }
+    });
+
+    socket.on('insufficient_coins', ({ message }: any) => {
+      const text = message || `Monetalaringiz yetarli emas! Har bir xabar narxi ${MESSAGE_COIN_COST} moneta.`;
+      if (onOpenTopUpRef.current) {
+        onOpenTopUpRef.current(text);
+      } else if (typeof window !== 'undefined' && window.self !== window.top) {
+        try {
+          window.parent.postMessage({ type: 'ALOV_EMBED_OPEN_TOPUP', message: text }, '*');
+        } catch {}
+      } else {
+        notifyParentOrToast(text);
+      }
+    });
+
+    return () => {
+      socket.off('connect', registerAndJoin);
+      socket.off('receive_message', handleIncomingMessage);
+      socket.off('chat:message', handleIncomingMessage);
+      socket.disconnect();
+      socketRef.current = null;
+    };
+  }, [apiOrigin, bridgeToken, effectiveUser?.authToken, effectiveUser?.id, effectiveUser?.uid, notifyParentOrToast]);
+
+  // Join conversation room & fetch message history when selectedChatUser changes
+  useEffect(() => {
+    if (!selectedChatUser || chatView !== 'conversation') return;
+    const myUid = effectiveUser?.uid || effectiveUser?.id;
+    const otherUid = selectedChatUser.uid || selectedChatUser.id;
+    if (!myUid || !otherUid) return;
+
+    const chatId = buildCanonicalChatId(myUid, otherUid);
+    socketRef.current?.emit('join_chat', chatId);
+    socketRef.current?.emit('mark_read', { chatId, senderId: otherUid, recipientId: myUid });
+
+    let localMsgs: any[] = [];
+    try {
+      const cached = localStorage.getItem('alov_msgs_' + chatId);
+      if (cached) localMsgs = JSON.parse(cached);
+    } catch {}
+
+    const sanitizedLocal = localMsgs.map((m) => ({
+      ...m,
+      status: m.status === 'sending' || !m.status ? 'sent' : m.status,
+    }));
+    if (sanitizedLocal.length > 0) {
+      setChatMessages((prev) => ({ ...prev, [chatId]: sanitizedLocal, [otherUid]: sanitizedLocal }));
+    }
+
+    apiFetchJson(`/api/chats/${encodeURIComponent(chatId)}/messages`).then((data) => {
+      if (data?.success) {
+        if (data.friendship !== undefined) {
+          setChatFriendships((prev) => ({ ...prev, [chatId]: Boolean(data.friendship?.active) }));
+        }
+        if (Array.isArray(data.messages)) {
+          const map = new Map<string, any>();
+          [...sanitizedLocal, ...data.messages].forEach((m) => {
+            map.set(m.id, { ...m, status: m.status === 'sending' || !m.status ? 'sent' : m.status });
+          });
+          const merged = Array.from(map.values()).sort(
+            (a, b) => new Date(a.createdAt || 0).getTime() - new Date(b.createdAt || 0).getTime()
+          );
+          setChatMessages((prev) => ({ ...prev, [chatId]: merged, [otherUid]: merged }));
+          try {
+            localStorage.setItem('alov_msgs_' + chatId, JSON.stringify(merged));
+          } catch {}
+        }
+      }
+    });
+  }, [apiFetchJson, chatView, effectiveUser?.id, effectiveUser?.uid, selectedChatUser]);
+
+  // Countdown tick for female diamond unlock timer
+  useEffect(() => {
+    const batches = effectiveUser?.pendingDiamondBatches;
+    if (!Array.isArray(batches) || batches.length === 0) return;
+    const timer = window.setInterval(() => setCountdownNow(Date.now()), 1000);
+    return () => window.clearInterval(timer);
+  }, [effectiveUser?.pendingDiamondBatches]);
+
+  // Auto-scroll messages container
+  useEffect(() => {
+    if (chatView === 'conversation') {
+      requestAnimationFrame(() => {
+        const el = chatMessagesContainerRef.current;
+        if (el) el.scrollTop = el.scrollHeight;
+      });
+    }
+  }, [chatMessages, chatView, selectedChatUser?.id, selectedChatUser?.uid]);
+
+  const handleOpenConversation = (targetUser: any) => {
+    setSelectedChatUser(targetUser);
+    setChatView('conversation');
+    setIsOtherTyping(false);
+
+    const myUid = effectiveUser?.uid || effectiveUser?.id;
+    const otherUid = targetUser?.uid || targetUser?.id;
+    if (myUid && otherUid) {
+      const chatId = buildCanonicalChatId(myUid, otherUid);
+      setChatsList((prev) =>
+        prev.map((c) => (c.id === chatId ? { ...c, unreadCount: { ...(c.unreadCount || {}), [myUid]: 0 } } : c))
+      );
+      apiFetchJson('/api/chats/open', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ myUid, targetUid: otherUid, partnerSnapshot: targetUser }),
+      }).catch(() => {});
+    }
+  };
+
+  const handleToggleFriendship = async () => {
+    const myUid = effectiveUser?.uid || effectiveUser?.id;
+    const otherUid = selectedChatUser?.uid || selectedChatUser?.id;
+    if (!myUid || !otherUid) return;
+    const chatId = buildCanonicalChatId(myUid, otherUid);
+    const nextState = !chatFriendships[chatId];
+    setChatFriendships((prev) => ({ ...prev, [chatId]: nextState }));
+    const data = await apiFetchJson('/api/chats/friendship', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ chatId, uid: myUid, enabled: nextState }),
+    });
+    if (data?.success && data.friendship) {
+      setChatFriendships((prev) => ({ ...prev, [chatId]: Boolean(data.friendship.active) }));
+    } else if (!data?.success) {
+      setChatFriendships((prev) => ({ ...prev, [chatId]: !nextState }));
+    }
+  };
+
+  const handleTyping = () => {
+    const myUid = effectiveUser?.uid || effectiveUser?.id;
+    const otherUid = selectedChatUser?.uid || selectedChatUser?.id;
+    if (!myUid || !otherUid) return;
+    const chatId = buildCanonicalChatId(myUid, otherUid);
+    if (typingTimeoutRef.current) clearTimeout(typingTimeoutRef.current);
+    socketRef.current?.emit('typing', { chatId, uid: myUid, isTyping: true });
+    typingTimeoutRef.current = setTimeout(() => {
+      socketRef.current?.emit('typing', { chatId, uid: myUid, isTyping: false });
+    }, 2000);
+  };
+
+  const handleSendMessage = async (
+    type: 'text' | 'image' | 'video' | 'audio' | 'voice' = 'text',
+    fileUrl?: string,
+    customCaption?: string
+  ) => {
+    if (!selectedChatUser) return;
+    if (type === 'text' && !inputMessage.trim()) return;
+
+    const myUid = effectiveUser?.uid || effectiveUser?.id;
+    if (!myUid) {
+      onOpenAuth?.();
+      return;
+    }
+
+    const text =
+      type === 'text'
+        ? inputMessage.trim()
+        : customCaption?.trim() ||
+          (type === 'image'
+            ? 'Rasm 🖼️'
+            : type === 'video'
+            ? 'Video 🎥'
+            : type === 'voice'
+            ? 'Ovozli xabar 🎤'
+            : 'Audio 🎵');
+
+    if (type === 'text') setInputMessage('');
+
+    const otherUid = selectedChatUser.uid || selectedChatUser.id;
+    const isAIBot = otherUid === ALOV_AI_USER.uid;
+    const chatId = buildCanonicalChatId(myUid, otherUid);
+
+    const msgObj = {
+      id: 'msg_' + Date.now() + Math.random().toString(36).substring(2, 5),
+      senderId: myUid,
+      senderName: effectiveUser?.name || 'Foydalanuvchi',
+      text,
+      type,
+      fileUrl: fileUrl || null,
+      status: 'sending' as 'sending' | 'sent' | 'read',
+      read: false,
+      createdAt: new Date().toISOString(),
+      time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+    };
+
+    if (typingTimeoutRef.current) clearTimeout(typingTimeoutRef.current);
+    socketRef.current?.emit('typing', { chatId, uid: myUid, isTyping: false });
+
+    socketRef.current?.emit(
+      'send_message',
+      { chatId, senderId: myUid, recipientId: otherUid, message: msgObj },
+      (ack: any) => {
+        if (ack && ack.success === false) {
+          setChatMessages((prev) => {
+            const next = { ...prev };
+            Object.keys(next).forEach((k) => {
+              if (next[k]) next[k] = next[k].filter((m) => m.id !== msgObj.id);
+            });
+            try {
+              localStorage.setItem('alov_msgs_' + chatId, JSON.stringify(next[chatId] || []));
+            } catch {}
+            return next;
+          });
+          if (ack.error === 'insufficient_coins') {
+            const notice = ack.message || `Monetalaringiz yetarli emas! Har bir xabar narxi ${MESSAGE_COIN_COST} moneta.`;
+            if (onOpenTopUp) {
+              onOpenTopUp(notice);
+            } else if (typeof window !== 'undefined' && window.self !== window.top) {
+              window.parent.postMessage({ type: 'ALOV_EMBED_OPEN_TOPUP', message: notice }, '*');
+            }
+          } else if (ack.message) {
+            notifyParentOrToast(ack.message);
+          }
+          return;
+        }
+        if (ack && (ack.status === 'sent' || ack.success)) {
+          setChatMessages((prev) => {
+            const next = { ...prev };
+            Object.keys(next).forEach((k) => {
+              if (next[k]) {
+                next[k] = next[k].map((m) => (m.id === msgObj.id ? { ...m, status: 'sent' } : m));
+              }
+            });
+            try {
+              localStorage.setItem('alov_msgs_' + chatId, JSON.stringify(next[chatId] || []));
+            } catch {}
+            return next;
+          });
+        }
+      }
+    );
+
+    setChatMessages((prev) => {
+      const keys = Array.from(new Set([chatId, selectedChatUser.id, selectedChatUser.uid, otherUid].filter(Boolean))) as string[];
+      const next = { ...prev };
+      keys.forEach((k) => {
+        next[k] = [...(prev[k] || []), msgObj];
+      });
+      try {
+        localStorage.setItem('alov_msgs_' + chatId, JSON.stringify(next[chatId]));
+      } catch {}
+      return next;
+    });
+
+    setTimeout(() => {
+      setChatMessages((prev) => {
+        const next = { ...prev };
+        Object.keys(next).forEach((k) => {
+          if (next[k]) {
+            next[k] = next[k].map((m) => (m.id === msgObj.id && m.status === 'sending' ? { ...m, status: 'sent' } : m));
+          }
+        });
+        return next;
+      });
+    }, 300);
+
+    setChatsList((prev) => {
+      const entry = {
+        id: chatId,
+        participants: [myUid, otherUid],
+        lastMessage: text,
+        updatedAt: msgObj.createdAt,
+        partner: selectedChatUser,
+      };
+      const merged = mergeChatLists([prev, [entry]], myUid, {
+        myAliases: [myUid, effectiveUser?.id].filter(Boolean) as string[],
+        usersList: usersListRef.current,
+      });
+      try {
+        localStorage.setItem('alov_chats_' + myUid, JSON.stringify(merged));
+      } catch {}
+      return merged;
+    });
+
+    if (isAIBot) {
+      setIsAiTyping(true);
+    }
+  };
+
+  const handleSendPickedMedia = async (file: File, kind: ChatMediaKind, caption?: string) => {
+    if (!file || !selectedChatUser) return;
+    setIsUploadingChatMedia(true);
+    try {
+      const res = await fetch(`${apiOrigin}/api/media/upload-raw`, {
+        method: 'POST',
+        headers: {
+          ...getAuthHeaders(),
+          'Content-Type': file.type || 'application/octet-stream',
+          'x-file-name': encodeURIComponent(file.name || 'chat_media'),
+        },
+        body: file,
+      });
+      const data = await res.json().catch(() => null);
+      if (res.ok && data?.success && data?.url) {
+        const resolved = data.url.startsWith('/') ? `${apiOrigin}${data.url}` : data.url;
+        await handleSendMessage(kind, resolved, caption);
+        setShowChatMediaPicker(false);
+      } else {
+        const reader = new FileReader();
+        reader.onloadend = async () => {
+          if (typeof reader.result === 'string') {
+            await handleSendMessage(kind, reader.result, caption);
+            setShowChatMediaPicker(false);
+          }
+        };
+        reader.readAsDataURL(file);
+      }
+    } catch (err: any) {
+      notifyParentOrToast(err?.message || 'Media yuklashda xatolik yuz berdi');
+    } finally {
+      setIsUploadingChatMedia(false);
+    }
+  };
+
+  const startRecording = async () => {
+    if (isRecordingRef.current) return;
+    isRecordingRef.current = true;
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      if (!isRecordingRef.current) {
+        stream.getTracks().forEach((t) => t.stop());
+        return;
+      }
+      const recorder = new MediaRecorder(stream);
+      const chunks: Blob[] = [];
+
+      recorder.ondataavailable = (e) => {
+        if (e.data.size > 0) chunks.push(e.data);
+      };
+
+      recorder.onstop = async () => {
+        const blob = new Blob(chunks, { type: 'audio/webm' });
+        stream.getTracks().forEach((t) => t.stop());
+        if (blob.size < 200) return;
+
+        try {
+          const uploadRes = await fetch(`${apiOrigin}/api/media/upload-raw`, {
+            method: 'POST',
+            headers: {
+              ...getAuthHeaders(),
+              'Content-Type': 'audio/webm',
+              'x-file-name': encodeURIComponent(`voice_${Date.now()}.webm`),
+            },
+            body: blob,
+          });
+          const data = await uploadRes.json().catch(() => null);
+          if (uploadRes.ok && data?.success && data?.url) {
+            const resolved = data.url.startsWith('/') ? `${apiOrigin}${data.url}` : data.url;
+            await handleSendMessage('voice', resolved);
+            return;
+          }
+        } catch {}
+
+        const reader = new FileReader();
+        reader.onloadend = () => {
+          if (typeof reader.result === 'string') {
+            handleSendMessage('voice', reader.result);
+          }
+        };
+        reader.readAsDataURL(blob);
+      };
+
+      recorder.start();
+      mediaRecorderRef.current = recorder;
+      setIsRecording(true);
+    } catch {
+      isRecordingRef.current = false;
+      notifyParentOrToast("Mikrofonga ruxsat berilmadi");
+    }
+  };
+
+  const stopRecording = () => {
+    isRecordingRef.current = false;
+    if (mediaRecorderRef.current) {
+      try {
+        if (mediaRecorderRef.current.state !== 'inactive') {
+          mediaRecorderRef.current.stop();
+        }
+      } catch {}
+      mediaRecorderRef.current = null;
+    }
+    setIsRecording(false);
+  };
+
+  const triggerOpenProfile = (uid: string, snapshot?: any) => {
+    if (onOpenProfile) {
+      onOpenProfile(uid, snapshot);
+    }
+    if (typeof window !== 'undefined' && window.self !== window.top) {
+      try {
+        window.parent.postMessage({ type: 'ALOV_EMBED_OPEN_PROFILE', uid, snapshot }, '*');
+      } catch {}
+    }
+  };
+
+  const triggerOpenGift = (user: any) => {
+    if (onOpenGift) {
+      onOpenGift(user);
+    }
+    if (typeof window !== 'undefined' && window.self !== window.top) {
+      try {
+        window.parent.postMessage({ type: 'ALOV_EMBED_OPEN_GIFT', user }, '*');
+      } catch {}
+    }
+  };
+
+  const triggerStartCall = (user: any) => {
+    if (onStartCall) {
+      onStartCall(user);
+    }
+    if (typeof window !== 'undefined' && window.self !== window.top) {
+      try {
+        window.parent.postMessage({ type: 'ALOV_EMBED_START_CALL', user }, '*');
+      } catch {}
+    }
+  };
+
+  if (chatView === 'list') {
+    return (
+      <div
+        data-testid="chat-view-list"
+        className="h-full w-full flex flex-col bg-[#09090D] text-zinc-100 p-3 sm:p-4 overflow-hidden"
+      >
+        <div className="bg-[#11131C] rounded-[24px] border border-white/[0.08] overflow-hidden flex flex-col h-full min-h-0">
+          <div className="p-4 border-b border-white/[0.08] flex items-center justify-between shrink-0">
+            <h2 className="font-editorial text-2xl font-bold text-white">Xabarlar</h2>
+            <span className="text-xs font-semibold text-zinc-400 tabular-nums" data-testid="chats-count-badge">
+              {chatsList.length} faol suhbat
+            </span>
+          </div>
+          <div className="flex-1 min-h-0 divide-y divide-white/[0.06] overflow-y-auto pb-20" data-testid="chats-list-scroll-area">
+            {isLoadingChats ? (
+              <>
+                <ChatSkeleton />
+                <ChatSkeleton />
+                <ChatSkeleton />
+              </>
+            ) : chatsList.length === 0 ? (
+              <div className="p-10 text-center space-y-3">
+                <div className="w-16 h-16 bg-white/[0.05] border border-white/[0.08] rounded-full flex items-center justify-center mx-auto">
+                  <MessageCircle className="w-8 h-8 text-zinc-500" />
+                </div>
+                <p className="text-xs text-zinc-400 font-medium">
+                  Hozircha xabarlar yo'q. Nomzodlar bilan suhbatni boshlang!
+                </p>
+              </div>
+            ) : (
+              chatsList.map((chat, idx) => {
+                const myUid = effectiveUser?.uid || effectiveUser?.id;
+                const otherUid =
+                  chat.participants?.find((p: string) => p !== myUid) || chat.partner?.uid || chat.partner?.id;
+                const otherUser =
+                  usersList.find((u) => u.uid === otherUid || u.id === otherUid) ||
+                  (otherUid === ALOV_AI_USER.uid ? ALOV_AI_USER : null) ||
+                  chat.partner || { uid: otherUid, name: 'Foydalanuvchi' };
+                const unread = chat.unreadCount?.[myUid || ''] || 0;
+                const chatAvatar = resolveMediaOrAvatar(resolveEffectiveProfileAvatar(otherUser));
+
+                return (
+                  <button
+                    type="button"
+                    key={chat.id ? `${chat.id}_${idx}` : `chat_${idx}`}
+                    onClick={() => handleOpenConversation(otherUser)}
+                    className={`w-full text-left p-4 flex items-center space-x-3 cursor-pointer hover:bg-white/[0.04] transition-colors relative ${
+                      chat.isAI ? 'bg-rose-500/[0.06]' : ''
+                    }`}
+                  >
+                    <div className="relative shrink-0">
+                      {chatAvatar ? (
+                        <img
+                          src={chatAvatar}
+                          alt={otherUser?.name || ''}
+                          className="w-12 h-12 rounded-full object-cover border border-white/15"
+                        />
+                      ) : (
+                        <div className="w-12 h-12 rounded-full bg-rose-500/20 text-rose-300 font-bold text-base flex items-center justify-center border border-rose-500/30">
+                          {getSafeUserDisplayName(otherUser, 'F').charAt(0).toUpperCase()}
+                        </div>
+                      )}
+                      {isUserOnlineStrict(otherUser, onlineUserIds) && (
+                        <span className="absolute bottom-0 right-0 w-3 h-3 bg-emerald-500 border-2 border-[#11131C] rounded-full" />
+                      )}
+                    </div>
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-center justify-between gap-2">
+                        <div className="flex items-center space-x-1.5 min-w-0">
+                          <h3 className="font-bold text-sm text-white truncate">
+                            {otherUser?.name || 'Foydalanuvchi'}
+                          </h3>
+                          {chat.isAI && <span className="text-[10px] font-bold text-rose-400 shrink-0">· AI</span>}
+                        </div>
+                        <span className="text-[10.5px] text-zinc-500 tabular-nums shrink-0">
+                          {chat.updatedAt
+                            ? new Date(chat.updatedAt).toLocaleTimeString([], {
+                                hour: '2-digit',
+                                minute: '2-digit',
+                              })
+                            : ''}
+                        </span>
+                      </div>
+                      <div className="flex items-center justify-between mt-0.5">
+                        <p className={`text-xs truncate flex-1 pr-2 ${unread > 0 ? 'text-white font-semibold' : 'text-zinc-400'}`}>
+                          {chat.isAI && isAiTyping ? (
+                            <span className="text-emerald-400 font-semibold">yozmoqda...</span>
+                          ) : (
+                            chat.lastMessage
+                          )}
+                        </p>
+                        {unread > 0 && (
+                          <span className="bg-rose-600 text-white text-[10px] font-bold min-w-[18px] h-[18px] rounded-full flex items-center justify-center px-1 tabular-nums">
+                            {unread}
+                          </span>
+                        )}
+                      </div>
+                    </div>
+                  </button>
+                );
+              })
+            )}
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  const myUid = effectiveUser?.uid || effectiveUser?.id;
+  const otherUid = selectedChatUser?.uid || selectedChatUser?.id;
+  const activeChatId = myUid && otherUid ? buildCanonicalChatId(myUid, otherUid) : '';
+  const isFriendActive = Boolean(activeChatId && chatFriendships[activeChatId]);
+  const isAIBotChat = otherUid === ALOV_AI_USER.uid || otherUid === 'user_kamola_006' || otherUid === 'ALOV-006';
+  const partnerOnline = isUserOnlineStrict(selectedChatUser, onlineUserIds);
+  const partnerAvatar = resolveMediaOrAvatar(resolveEffectiveProfileAvatar(selectedChatUser));
+
+  const msgs =
+    (activeChatId && chatMessages[activeChatId]) ||
+    (otherUid && chatMessages[otherUid]) ||
+    [];
+  const sortedMessages = [...msgs].sort(
+    (a, b) => new Date(a.createdAt || 0).getTime() - new Date(b.createdAt || 0).getTime()
+  );
+
+  const progressVal = Number(effectiveUser?.diamondProgress || 0);
+  const progressPct = getDiamondProgressPercent(progressVal);
+  const pendingBatches = Array.isArray(effectiveUser?.pendingDiamondBatches)
+    ? effectiveUser.pendingDiamondBatches
+    : [];
+  const pendingTotal = getPendingDiamondsTotal(pendingBatches);
+  const nextUnlockAt = getNextUnlockTimestamp(pendingBatches);
+  const countdown = computeCountdownParts(nextUnlockAt, countdownNow);
+
+  return (
+    <div
+      data-testid="chat-view-conversation"
+      className="h-full w-full bg-[#09090D] flex flex-col overflow-hidden text-zinc-100"
+    >
+      <div className="shrink-0 z-20 px-3 py-2.5 border-b border-white/[0.08] flex items-center justify-between bg-[#11131C]">
+        <div className="flex items-center space-x-2 min-w-0">
+          <button
+            type="button"
+            aria-label="Suhbatlar ro'yxatiga qaytish"
+            onClick={() => setChatView('list')}
+            className="p-2 rounded-full hover:bg-white/[0.08] text-zinc-200 transition active:scale-90 shrink-0 cursor-pointer"
+          >
+            <ArrowLeft className="w-5 h-5" />
+          </button>
+          <button
+            type="button"
+            onClick={() => otherUid && triggerOpenProfile(otherUid, selectedChatUser)}
+            className="flex items-center space-x-2.5 min-w-0 text-left hover:opacity-85 transition cursor-pointer"
+            title="Profilni ko'rish"
+          >
+            <div className="relative shrink-0">
+              {partnerAvatar ? (
+                <img
+                  src={partnerAvatar}
+                  alt={selectedChatUser?.name || ''}
+                  className="w-9 h-9 rounded-full object-cover border border-white/15"
+                />
+              ) : (
+                <div className="w-9 h-9 rounded-full bg-rose-500/20 text-rose-300 font-bold text-sm flex items-center justify-center border border-rose-500/30">
+                  {getSafeUserDisplayName(selectedChatUser, 'F').charAt(0).toUpperCase()}
+                </div>
+              )}
+              {partnerOnline && (
+                <span className="absolute bottom-0 right-0 w-2.5 h-2.5 bg-emerald-500 border-2 border-[#11131C] rounded-full" />
+              )}
+            </div>
+            <div className="min-w-0">
+              <h3 className="font-sans font-bold text-sm text-white leading-none truncate">
+                {selectedChatUser?.name || 'Foydalanuvchi'}
+              </h3>
+              <p className={`text-[10.5px] mt-1 ${partnerOnline ? 'text-emerald-400 font-semibold' : 'text-zinc-400'}`}>
+                {partnerOnline ? 'tarmoqda' : formatLastSeenUz(selectedChatUser?.lastSeen, false)}
+              </p>
+            </div>
+          </button>
+        </div>
+
+        <div className="flex items-center space-x-1">
+          {effectiveUser?.gender === 'female' && !isAIBotChat && (
+            <button
+              type="button"
+              onClick={handleToggleFriendship}
+              className={`px-2.5 py-1.5 rounded-full text-[10px] font-bold flex items-center space-x-1 transition active:scale-95 whitespace-nowrap shrink-0 cursor-pointer ${
+                isFriendActive
+                  ? 'bg-emerald-600 text-white'
+                  : 'bg-rose-500/15 hover:bg-rose-500/25 text-rose-300 border border-rose-500/30'
+              }`}
+            >
+              <Handshake className="w-3.5 h-3.5" />
+              <span>{isFriendActive ? "Do'stlashilgan" : "Do'stlashish"}</span>
+            </button>
+          )}
+          <button
+            type="button"
+            onClick={() => selectedChatUser && triggerOpenGift(selectedChatUser)}
+            title="Sovg'a yuborish"
+            aria-label="Sovg'a yuborish"
+            className="p-2 rounded-full hover:bg-amber-500/15 text-amber-400 transition active:scale-90 cursor-pointer"
+          >
+            <Gift className="w-5 h-5" />
+          </button>
+          <button
+            type="button"
+            onClick={() => selectedChatUser && triggerStartCall(selectedChatUser)}
+            title="Video qo'ng'iroq"
+            aria-label="Video qo'ng'iroq"
+            className="p-2 rounded-full hover:bg-rose-500/15 text-rose-400 transition active:scale-90 cursor-pointer"
+          >
+            <Video className="w-5 h-5" />
+          </button>
+        </div>
+      </div>
+
+      {isFriendActive && !isAIBotChat ? (
+        <div className="bg-emerald-500/15 border-b border-emerald-500/25 text-emerald-200 px-3.5 py-1.5 text-[10.5px] font-semibold flex items-center justify-between shrink-0">
+          <span>Do'stlashish faol — Yigitdan moneta yechilmaydi</span>
+          <span className="text-emerald-300 font-bold whitespace-nowrap">Bepul chat</span>
+        </div>
+      ) : effectiveUser?.gender === 'female' ? (
+        <div className="bg-cyan-500/10 border-b border-cyan-500/20 text-cyan-200 px-3.5 py-1.5 text-[10.5px] font-semibold flex items-center justify-between shrink-0">
+          <span>💎 Har bir javobingiz uchun +{MESSAGE_DIAMOND_REWARD} Almaz limitga qo'shiladi</span>
+          <span className="font-mono text-cyan-300 font-bold whitespace-nowrap tabular-nums">
+            Wallet: {formatDiamondsDisplay(effectiveUser?.diamonds)}
+          </span>
+        </div>
+      ) : !isAIBotChat ? (
+        <div className="bg-amber-500/10 border-b border-amber-500/20 text-amber-200 px-3.5 py-1.5 text-[10.5px] font-semibold flex items-center justify-between shrink-0">
+          <span>🪙 Har bir xabar narxi: {MESSAGE_COIN_COST} Moneta</span>
+          <span className="font-mono text-amber-300 font-bold whitespace-nowrap tabular-nums">
+            Balans: {effectiveUser?.coins ?? 100}
+          </span>
+        </div>
+      ) : null}
+
+      <div
+        ref={chatMessagesContainerRef}
+        className="flex-1 min-h-0 px-3.5 py-3 overflow-y-auto overscroll-y-contain space-y-2.5 bg-[#09090D]"
+      >
+        {sortedMessages.map((msg, idx) => {
+          const isMe = msg.senderId === 'me' || (myUid && (msg.senderId === myUid || msg.userId === myUid));
+          const resolvedUrl = msg.fileUrl?.startsWith('/api/') ? `${apiOrigin}${msg.fileUrl}` : msg.fileUrl || '';
+
+          return (
+            <div
+              key={msg.id ? `${msg.id}_${idx}` : `msg_${idx}`}
+              className={`flex ${isMe ? 'justify-end' : 'justify-start'}`}
+            >
+              <div
+                className={`max-w-[85%] rounded-[18px] px-4 py-2.5 relative ${
+                  isMe
+                    ? 'bg-gradient-to-br from-[#E11D48] to-[#BE123C] text-white rounded-tr-none shadow-md shadow-rose-950/30'
+                    : 'bg-[#151824] text-zinc-100 border border-white/[0.08] rounded-tl-none'
+                }`}
+              >
+                {msg.type === 'gift' ? (
+                  <div className="flex items-center space-x-2.5 py-1">
+                    <span className="text-3xl shrink-0">{msg.giftIcon || msg.giftInfo?.giftIcon || '🎁'}</span>
+                    <div>
+                      <p className="font-bold text-xs">{msg.giftName || msg.giftInfo?.giftName || "Sovg'a"} yuborildi!</p>
+                      <p className="text-[10px] opacity-90 mt-0.5">🪙 {msg.coinPrice || msg.giftInfo?.coinPrice || 10} moneta</p>
+                    </div>
+                  </div>
+                ) : msg.type === 'meet' ? (
+                  <a href={msg.meetUrl} target="_blank" rel="noreferrer" className="underline font-bold flex items-center space-x-2 py-1">
+                    <Video className="w-4 h-4" />
+                    <span>Google Meet Qo'shilish</span>
+                    <ArrowUpRight className="w-3.5 h-3.5" />
+                  </a>
+                ) : msg.type === 'image' ? (
+                  <img src={resolvedUrl} alt="" className="rounded-lg max-h-60 object-cover" />
+                ) : msg.type === 'video' ? (
+                  <Suspense fallback={null}>
+                    <VideoPlayer url={resolvedUrl} />
+                  </Suspense>
+                ) : msg.type === 'voice' || msg.type === 'audio' ? (
+                  <Suspense fallback={null}>
+                    <VoiceMessage url={resolvedUrl} senderId={isMe ? 'me' : msg.senderId} />
+                  </Suspense>
+                ) : (
+                  <p className="text-[13px] leading-relaxed whitespace-pre-wrap break-words">{msg.text}</p>
+                )}
+
+                <div className="flex items-center justify-end space-x-1 mt-1">
+                  <span className={`text-[9.5px] tabular-nums ${isMe ? 'text-rose-100/80' : 'text-zinc-500'}`}>
+                    {msg.time}
+                  </span>
+                  {isMe && (
+                    <span className="flex items-center ml-1 shrink-0">
+                      {msg.status === 'sending' ? (
+                        <Clock className="w-3 h-3 text-rose-200/90 animate-pulse" />
+                      ) : msg.status === 'read' || msg.read ? (
+                        <CheckCheck className="w-3.5 h-3.5 text-cyan-200" />
+                      ) : (
+                        <Check className="w-3.5 h-3.5 text-rose-200" />
+                      )}
+                    </span>
+                  )}
+                </div>
+              </div>
+            </div>
+          );
+        })}
+        <div ref={chatBottomRef} />
+
+        {(isOtherTyping || (otherUid === ALOV_AI_USER.uid && isAiTyping)) && (
+          <div className="flex justify-start">
+            <div className="bg-[#151824] border border-white/[0.08] text-zinc-400 rounded-[18px] rounded-tl-none px-4 py-2 flex items-center space-x-2">
+              <span className="text-[11px] font-semibold">
+                {otherUid === ALOV_AI_USER.uid ? 'Alov AI yozmoqda...' : 'yozmoqda...'}
+              </span>
+            </div>
+          </div>
+        )}
+      </div>
+
+      {effectiveUser?.gender === 'female' && (
+        <div className="bg-[#11131C] border-t border-white/[0.08] px-3.5 pt-2 pb-1.5 shrink-0 space-y-1">
+          <div className="flex items-center justify-between text-[10.5px] font-bold">
+            <span className="text-zinc-300 flex items-center gap-1">
+              <span>💎 Kunlik limit ({DAILY_LIMIT_WINDOW_HOURS} soat):</span>
+              <span className="text-cyan-300 tabular-nums">
+                {formatDiamondsDisplay(progressVal)} / {DIAMOND_LIMIT_TARGET}
+              </span>
+            </span>
+            <span className="text-emerald-400 tabular-nums">{progressPct}%</span>
+          </div>
+          <div className="w-full h-1.5 bg-white/[0.08] rounded-full overflow-hidden">
+            <div
+              className="h-full w-full origin-left bg-gradient-to-r from-cyan-500 to-emerald-500 transition-transform duration-500 rounded-full"
+              style={{ transform: `scaleX(${Math.max(0, Math.min(1, progressPct / 100))})` }}
+            />
+          </div>
+          {pendingTotal > 0 && (
+            <div className="flex items-center justify-between text-[10px] font-semibold text-amber-200 bg-amber-500/10 px-2.5 py-1 rounded-lg border border-amber-400/20">
+              <span className="flex items-center gap-1">
+                <Clock className="w-3 h-3 shrink-0 text-amber-400" />
+                <span>
+                  {formatDiamondsDisplay(pendingTotal)} 💎 {DIAMOND_UNLOCK_HOURS} soatda hamyonga tushadi
+                </span>
+              </span>
+              <span className="font-mono font-bold text-amber-300 tabular-nums">{countdown.formatted}</span>
+            </div>
+          )}
+        </div>
+      )}
+
+      <div className="shrink-0 z-20 px-3 pt-2 pb-2.5 bg-[#11131C] border-t border-white/[0.08] flex flex-col">
+        <Suspense fallback={null}>
+          <ChatMediaPicker
+            isOpen={showChatMediaPicker}
+            onToggleOpen={() => setShowChatMediaPicker((prev) => !prev)}
+            onSendMedia={handleSendPickedMedia}
+            isUploading={isUploadingChatMedia}
+          />
+        </Suspense>
+        <div className="flex items-end space-x-2 w-full">
+          <button
+            type="button"
+            onClick={() => setShowChatMediaPicker((prev) => !prev)}
+            aria-label="Media yuklash"
+            data-testid="toggle-chat-media-picker"
+            className={`p-2.5 rounded-full transition active:scale-90 cursor-pointer shrink-0 ${
+              showChatMediaPicker
+                ? 'bg-rose-500/20 text-rose-400'
+                : 'text-zinc-400 hover:bg-white/[0.06] hover:text-zinc-200'
+            }`}
+          >
+            <Plus className={`w-5 h-5 transition-transform ${showChatMediaPicker ? 'rotate-45' : ''}`} />
+          </button>
+          <div className="flex-1 relative">
+            <textarea
+              placeholder="Xabar yozing..."
+              rows={1}
+              value={inputMessage}
+              onFocus={() => {
+                setTimeout(() => {
+                  const el = chatMessagesContainerRef.current;
+                  if (el) el.scrollTop = el.scrollHeight;
+                }, 120);
+              }}
+              onChange={(e) => {
+                setInputMessage(e.target.value);
+                handleTyping();
+              }}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' && !e.shiftKey) {
+                  e.preventDefault();
+                  handleSendMessage();
+                }
+              }}
+              className="w-full px-4 py-2.5 rounded-[20px] bg-[#181B29] border border-white/[0.08] text-[13px] text-white placeholder:text-zinc-500 focus:outline-none focus:border-rose-500 resize-none max-h-32"
+            />
+          </div>
+          {inputMessage.trim() ? (
+            <button
+              type="button"
+              aria-label="Xabarni yuborish"
+              onClick={() => handleSendMessage()}
+              className="bg-[#E11D48] text-white p-3 rounded-full shadow-lg hover:bg-[#BE123C] transition-all active:scale-95 flex items-center justify-center cursor-pointer"
+            >
+              <Send className="w-4.5 h-4.5" />
+            </button>
+          ) : (
+            <button
+              type="button"
+              aria-label={isRecording ? "Ovozli xabarni to'xtatish" : 'Ovozli xabar yozish'}
+              onMouseDown={startRecording}
+              onMouseUp={stopRecording}
+              onMouseLeave={() => { if (isRecordingRef.current) stopRecording(); }}
+              onTouchStart={startRecording}
+              onTouchEnd={stopRecording}
+              className={`p-3 rounded-full transition-all active:scale-95 flex items-center justify-center cursor-pointer ${
+                isRecording ? 'bg-red-600 text-white animate-pulse' : 'bg-white/[0.07] text-zinc-300 hover:bg-white/[0.12]'
+              }`}
+            >
+              {isRecording ? <Square className="w-5 h-5" /> : <Mic className="w-5 h-5" />}
+            </button>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+};

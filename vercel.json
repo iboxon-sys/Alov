@@ -4,6 +4,7 @@
     { "source": "/postlar", "destination": "/index.html" },
     { "source": "/chatroulette", "destination": "/index.html" },
     { "source": "/chatruletka", "destination": "/index.html" },
+    { "source": "/chat", "destination": "/index.html" },
     { "source": "/((?!assets/|api/).*)", "destination": "/index.html" }
   ],
   "headers": [

@@ -13,7 +13,7 @@ import {
 } from 'lucide-react';
 import { io, Socket } from 'socket.io-client';
 import { MAIN_RENDER_ORIGIN, getBaseUrl, resolveApiMediaUrl } from '../config/api';
-import { extractLocalAuthCredentials } from '../utils/microFrontendBridge';
+import { extractLocalAuthCredentials, resolveRealtimeBackendUrl } from '../utils/microFrontendBridge';
 
 interface ChatRouletteViewProps {
   currentUser: any | null;
@@ -200,7 +200,7 @@ export const ChatRouletteView: React.FC<ChatRouletteViewProps> = ({
     [cleanupPeer]
   );
 
-  const signalingUrl = (backendOrigin && backendOrigin.trim()) || getBaseUrl() || MAIN_RENDER_ORIGIN;
+  const signalingUrl = resolveRealtimeBackendUrl(backendOrigin || getBaseUrl() || MAIN_RENDER_ORIGIN);
   const authCreds =
     typeof window !== 'undefined' && window.localStorage
       ? extractLocalAuthCredentials(window.localStorage)

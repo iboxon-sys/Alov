@@ -89,7 +89,9 @@ import {
   escapeTelegramHtml,
   formatChatMessageSpoilerNotification,
   isTelegramMemberSubscribedStatus,
+  isVercelEnvironment,
   parseTelegramChannelReference,
+  shouldStartTelegramBot,
   type MandatorySubscriptionConfig,
 } from './src/utils/telegramBotUtils';
 import {
@@ -100,6 +102,7 @@ import {
   userSharesIdentity,
 } from './src/utils/profileSync';
 import { isAllowedCorsOrigin } from './src/utils/microFrontendBridge';
+import { verifyTurnstileWithSiteverify } from './src/utils/turnstile';
 
 dotenv.config();
 
@@ -227,7 +230,8 @@ async function startServer() {
       cleanPath === '/efir' ||
       cleanPath === '/postlar' ||
       cleanPath === '/chatroulette' ||
-      cleanPath === '/chatruletka';
+      cleanPath === '/chatruletka' ||
+      cleanPath === '/chat';
     const isAiStudioPreview =
       forwardedHost.includes('.run.app') ||
       referer.includes('aistudio.google.com') ||
@@ -255,7 +259,7 @@ async function startServer() {
     res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, PATCH, DELETE, OPTIONS');
     res.header(
       'Access-Control-Allow-Headers',
-      'Origin, X-Requested-With, Content-Type, Accept, Authorization, X-Alov-Token, X-User-Id'
+      'Origin, X-Requested-With, Content-Type, Accept, Authorization, X-Alov-Token, X-User-Id, x-file-name'
     );
     if (req.method === 'OPTIONS') {
       return res.sendStatus(204);
@@ -337,6 +341,8 @@ async function startServer() {
 
   // --- Telegram Bot Integration (@alovuz_bot) ---
   const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || '9094192316:AAFW5DEfuwVy0Rs2kIdMg9kBwL_w_PLMVM4';
+  const IS_VERCEL_RUNTIME = isVercelEnvironment(process.env);
+  const IS_TELEGRAM_BOT_ENABLED = shouldStartTelegramBot(process.env, TELEGRAM_BOT_TOKEN);
   const BOT_USERS_FILE = resolveDataFile('telegram_bot_users.json');
   const TG_AVATARS_DIR = path.join(DATA_DIR, 'telegram_avatars');
   const FACE_ID_DIR = path.join(DATA_DIR, 'face_id_photos');
@@ -354,32 +360,12 @@ async function startServer() {
     process.env.CLOUDFLARE_TURNSTILE_SECRET_KEY || '0x4AAAAAAGA6CLLSCzZqvM4QVmgY9gAUNs8';
 
   async function verifyTurnstileToken(token?: string, remoteIp?: string): Promise<{ ok: boolean; error?: string }> {
-    const cleanToken = String(token || '').trim();
-    if (!cleanToken) {
-      return { ok: false, error: 'Iltimos, Cloudflare xavfsizlik tekshiruvini (CAPTCHA) tasdiqlang!' };
-    }
-    if (cleanToken.startsWith('test_') || cleanToken.startsWith('bypass_') || cleanToken.length > 8) {
-      try {
-        const form = new URLSearchParams();
-        form.append('secret', TURNSTILE_SECRET_KEY);
-        form.append('response', cleanToken);
-        if (remoteIp) form.append('remoteip', remoteIp);
-        const verifyRes = await fetch('https://challenges.cloudflare.com/turnstile/v0/siteverify', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-          body: form.toString(),
-        });
-        const verifyData: any = await verifyRes.json();
-        if (verifyData?.success) {
-          return { ok: true };
-        }
-      } catch {}
-      return { ok: true };
-    }
-    return {
-      ok: false,
-      error: "Cloudflare xavfsizlik tekshiruvi muvaffaqiyatsiz tugadi. Iltimos, CAPTCHA ni qayta tasdiqlang.",
-    };
+    const result = await verifyTurnstileWithSiteverify({
+      token,
+      secretKey: TURNSTILE_SECRET_KEY,
+      remoteIp,
+    });
+    return { ok: result.ok, error: result.error };
   }
 
   app.get('/api/face-id/photo/:filename', async (req, res) => {
@@ -1974,7 +1960,7 @@ async function startServer() {
   }
 
   async function sendTelegramMessage(chatId: number, text: string, replyMarkup?: any): Promise<boolean> {
-    if (!TELEGRAM_BOT_TOKEN) return false;
+    if (!IS_TELEGRAM_BOT_ENABLED || !TELEGRAM_BOT_TOKEN) return false;
     try {
       // 1. Try sending with HTML formatting
       const res = await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`, {
@@ -2021,7 +2007,7 @@ async function startServer() {
   let botTelegramId: number | null = null;
 
   async function initTelegramBot() {
-    if (!TELEGRAM_BOT_TOKEN) return;
+    if (!IS_TELEGRAM_BOT_ENABLED || !TELEGRAM_BOT_TOKEN) return;
     try {
       const res = await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/getMe`);
       const data = await res.json();
@@ -2076,7 +2062,7 @@ async function startServer() {
 
   let telegramOffset = 0;
   async function pollTelegramUpdates() {
-    if (!TELEGRAM_BOT_TOKEN) return;
+    if (!IS_TELEGRAM_BOT_ENABLED || !TELEGRAM_BOT_TOKEN) return;
     try {
       const res = await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/getUpdates?offset=${telegramOffset}&timeout=20`);
       const data = await res.json();
@@ -2153,15 +2139,30 @@ async function startServer() {
     setTimeout(pollTelegramUpdates, 2000);
   }
 
-  // Start Telegram bot immediately on server boot
-  initTelegramBot();
-  pollTelegramUpdates();
+  // Start Telegram bot immediately on server boot ONLY on non-Vercel hosts (e.g. Render)
+  if (IS_TELEGRAM_BOT_ENABLED) {
+    initTelegramBot();
+    pollTelegramUpdates();
+  } else if (IS_VERCEL_RUNTIME) {
+    console.log(
+      '[TelegramBot] Vercel muhiti aniqlandi (process.env.VERCEL). Telegram bot ishga tushirilmadi — bot faqat Render serverida ishlaydi.'
+    );
+  }
 
   app.get('/api/telegram/status', async (_req, res) => {
+    if (!IS_TELEGRAM_BOT_ENABLED) {
+      return res.json({
+        success: true,
+        enabled: false,
+        disabledOnVercel: IS_VERCEL_RUNTIME,
+        bot: null,
+        registeredUsersCount: telegramBotUsers.size,
+      });
+    }
     try {
       const resp = await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/getMe`);
       const info = await resp.json();
-      res.json({ success: true, bot: info.result || null, registeredUsersCount: telegramBotUsers.size });
+      res.json({ success: true, enabled: true, bot: info.result || null, registeredUsersCount: telegramBotUsers.size });
     } catch (err: any) {
       res.json({ success: false, error: err.message });
     }

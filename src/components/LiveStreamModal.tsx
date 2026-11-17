@@ -17,6 +17,7 @@ import {
   Crown,
 } from 'lucide-react';
 import { getApiUrl, getBaseUrl } from '../config/api';
+import { resolveRealtimeBackendUrl } from '../utils/microFrontendBridge';
 import { io, Socket } from 'socket.io-client';
 import {
   createLiveStream,
@@ -50,6 +51,7 @@ interface LiveStreamModalProps {
     name: string;
     avatar?: string;
   };
+  backendOrigin?: string;
   onClose: () => void;
 }
 
@@ -98,6 +100,7 @@ export const LiveStreamModal: React.FC<LiveStreamModalProps> = ({
   streamId: initialStreamId,
   hostUser,
   currentUser,
+  backendOrigin,
   onClose,
 }) => {
   // Broadcaster states
@@ -329,7 +332,7 @@ export const LiveStreamModal: React.FC<LiveStreamModalProps> = ({
       }
 
       localStreamRef.current = stream;
-      const newStreamId = await createLiveStream(currentUserRef.current, streamTitle);
+      const newStreamId = await createLiveStream(currentUserRef.current, streamTitle, backendOrigin);
       setActiveStreamId(newStreamId);
       setIsLiveActive(true);
     } catch (err: any) {
@@ -411,7 +414,7 @@ export const LiveStreamModal: React.FC<LiveStreamModalProps> = ({
         streamId: activeStreamId,
         hostUid: currentUserRef.current.uid,
       });
-      await stopLiveStream(activeStreamId, currentUserRef.current.uid);
+      await stopLiveStream(activeStreamId, currentUserRef.current.uid, backendOrigin);
     }
     if (broadcasterSignalingRef.current) {
       broadcasterSignalingRef.current.destroy();
@@ -449,11 +452,13 @@ export const LiveStreamModal: React.FC<LiveStreamModalProps> = ({
     if (mode === 'broadcaster' && !isLiveActive) return;
 
     const userSnapshot = currentUserRef.current;
-    const socket = io(getBaseUrl(), {
+    const signalingOrigin = resolveRealtimeBackendUrl(backendOrigin || getBaseUrl());
+    const socket = io(signalingOrigin, {
       reconnection: true,
       reconnectionAttempts: 15,
       reconnectionDelay: 1500,
       timeout: 15000,
+      withCredentials: true,
       transports: ['websocket', 'polling'],
     });
     liveSocketRef.current = socket;
@@ -544,7 +549,7 @@ export const LiveStreamModal: React.FC<LiveStreamModalProps> = ({
             hostUid: currentUserRef.current.uid,
           });
           navigator.sendBeacon?.(
-            getApiUrl('/api/live-streams/stop'),
+            `${signalingOrigin}/api/live-streams/stop`,
             new Blob([payload], { type: 'application/json' })
           );
         } catch {}

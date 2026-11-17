@@ -386,7 +386,7 @@ async function startServer() {
     fs.mkdirSync(MEDIA_UPLOADS_DIR, { recursive: true });
   }
   const TURNSTILE_SECRET_KEY =
-    process.env.CLOUDFLARE_TURNSTILE_SECRET_KEY || '0x4AAAAAAGA6CLLSCzZqvM4QVmgY9gAUNs8';
+    process.env.CLOUDFLARE_TURNSTILE_SECRET_KEY || '0x4AAAAAAGA6COe2BzgYYGwPbm4oyf0Ysq8';
 
   async function verifyTurnstileToken(token?: string, remoteIp?: string): Promise<{ ok: boolean; error?: string }> {
     const result = await verifyTurnstileWithSiteverify({

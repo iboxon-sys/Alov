@@ -505,9 +505,6 @@ export interface VersionCacheReconciliationResult {
 
 const STALE_SNAPSHOT_PREFIXES = [
   'alov_user_',
-  'alov_chats_',
-  'alov_msgs_',
-  'alov_posts_',
 ];
 
 export function collectStaleCacheKeys(storage: StorageLike): string[] {

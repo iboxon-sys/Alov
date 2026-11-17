@@ -283,8 +283,8 @@ describe('Profile persistence, identity deduplication & DB propagation', () => {
     assert.equal(storage.getItem('alov_app_version'), '1.1.2');
     assert.equal(storage.getItem('alov_current_user'), null);
     assert.equal(storage.getItem('alov_user_tg_777'), null);
-    assert.equal(storage.getItem('alov_chats_tg_777'), null);
-    assert.equal(storage.getItem('alov_posts_feed'), null);
+    assert.equal(storage.getItem('alov_chats_tg_777'), '[{"id":"c1"}]');
+    assert.equal(storage.getItem('alov_posts_feed'), '[{"id":"p1"}]');
     assert.equal(storage.getItem('alov_user_id'), 'tg_777');
     assert.equal(storage.getItem('alov_auth_token'), 'alov_session_tg_777');
     assert.equal(storage.getItem('alov_tg_chat_salikh'), '777');

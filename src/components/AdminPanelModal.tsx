@@ -22,6 +22,9 @@ import {
   BellRing,
   Link2,
   AlertTriangle,
+  FileText,
+  Heart,
+  MessageCircle,
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { formatDiamondsDisplay, getPendingDiamondsTotal } from '../utils/tokenomics';
@@ -32,6 +35,12 @@ import {
   DEFAULT_MANDATORY_SUBSCRIPTION_CONFIG,
   type MandatorySubscriptionConfig,
 } from '../utils/telegramBotUtils';
+import {
+  filterPostsForAdminModeration,
+  formatPostTimeUz,
+  resolvePostAuthorGender,
+  type PostItem,
+} from '../utils/posts';
 
 interface AdminPanelModalProps {
   currentUser: any;
@@ -39,6 +48,7 @@ interface AdminPanelModalProps {
   socket?: any;
   onClose: () => void;
   onUserUpdated?: (user: any) => void;
+  onPostDeleted?: (postId: string) => void;
   onOpenUserProfile?: (uid: string, snapshot?: any) => void;
 }
 
@@ -55,18 +65,22 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
   socket,
   onClose,
   onUserUpdated,
+  onPostDeleted,
   onOpenUserProfile,
 }) => {
-  const [activeSubTab, setActiveSubTab] = useState<'requests' | 'users' | 'transactions' | 'telegram'>('requests');
+  const [activeSubTab, setActiveSubTab] = useState<'requests' | 'posts' | 'users' | 'transactions' | 'telegram'>('requests');
   const [requestTypeFilter, setRequestTypeFilter] = useState<'all' | 'coins' | 'withdrawals'>('all');
   const [onlyPending, setOnlyPending] = useState(false);
   const [userSegment, setUserSegment] = useState<'all' | 'verified' | 'banned' | 'admins'>('all');
+  const [postGenderFilter, setPostGenderFilter] = useState<'all' | 'female' | 'male'>('all');
+  const [postSearchQuery, setPostSearchQuery] = useState('');
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
   const [searchQuery, setSearchQuery] = useState('');
   const [stats, setStats] = useState<any>({});
   const [users, setUsers] = useState<any[]>([]);
+  const [posts, setPosts] = useState<PostItem[]>([]);
   const [withdrawals, setWithdrawals] = useState<any[]>([]);
   const [coinRequests, setCoinRequests] = useState<CoinPurchaseRequest[]>([]);
   const [transactions, setTransactions] = useState<any[]>([]);
@@ -102,6 +116,7 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
       } else {
         setStats(data.stats || {});
         setUsers(Array.isArray(data.users) ? data.users : []);
+        setPosts(Array.isArray(data.posts) ? data.posts : []);
         setWithdrawals(Array.isArray(data.withdrawals) ? data.withdrawals : []);
         setCoinRequests(Array.isArray(data.coinRequests) ? data.coinRequests : []);
         setTransactions(Array.isArray(data.transactions) ? data.transactions : []);
@@ -137,15 +152,33 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
     const handleWithdrawalUpdated = (w: any) => {
       setWithdrawals((prev) => prev.map((item) => (item.id === w.id ? w : item)));
     };
+    const handlePostCreated = (post: PostItem) => {
+      if (!post?.id) return;
+      setPosts((prev) => (prev.some((p) => p.id === post.id) ? prev : [post, ...prev]));
+    };
+    const handlePostUpdated = (post: PostItem) => {
+      if (!post?.id) return;
+      setPosts((prev) => prev.map((p) => (p.id === post.id ? post : p)));
+    };
+    const handlePostDeleted = ({ postId }: { postId?: string }) => {
+      if (!postId) return;
+      setPosts((prev) => prev.filter((p) => p.id !== postId));
+    };
     socket.on('coin_request_created', handleCoinReqCreated);
     socket.on('coin_request_updated', handleCoinReqUpdated);
     socket.on('withdrawal_created', handleWithdrawalCreated);
     socket.on('withdrawal_updated', handleWithdrawalUpdated);
+    socket.on('post_created', handlePostCreated);
+    socket.on('post_updated', handlePostUpdated);
+    socket.on('post_deleted', handlePostDeleted);
     return () => {
       socket.off('coin_request_created', handleCoinReqCreated);
       socket.off('coin_request_updated', handleCoinReqUpdated);
       socket.off('withdrawal_created', handleWithdrawalCreated);
       socket.off('withdrawal_updated', handleWithdrawalUpdated);
+      socket.off('post_created', handlePostCreated);
+      socket.off('post_updated', handlePostUpdated);
+      socket.off('post_deleted', handlePostDeleted);
     };
   }, [socket]);
 
@@ -227,6 +260,32 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
             : 'Moneta xaridi arizasi rad etildi'
         );
         await fetchOverview();
+      }
+    } catch (e: any) {
+      setError(e?.message || 'Tarmoq xatoligi');
+    } finally {
+      setBusyId(null);
+    }
+  };
+
+  const handleDeletePostAsAdmin = async (postId: string) => {
+    if (!adminUid || !postId) return;
+    setBusyId(postId);
+    setError('');
+    setNotice('');
+    try {
+      const res = await fetch(`${apiBaseUrl}/api/posts/${encodeURIComponent(postId)}?uid=${encodeURIComponent(adminUid)}`, {
+        method: 'DELETE',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ uid: adminUid }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data?.success) {
+        setError(data?.error || "Postni o'chirishda xatolik yuz berdi");
+      } else {
+        setPosts((prev) => prev.filter((p) => p.id !== postId));
+        if (onPostDeleted) onPostDeleted(postId);
+        setNotice("Post tizimdan butunlay o'chirildi");
       }
     } catch (e: any) {
       setError(e?.message || 'Tarmoq xatoligi');
@@ -398,6 +457,17 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
     });
   }, [users, searchQuery, userSegment]);
 
+  const filteredPosts = useMemo(() => {
+    return filterPostsForAdminModeration(posts, {
+      genderFilter: postGenderFilter,
+      query: postSearchQuery,
+      resolveAuthorGender: (p) => {
+        const linkedAuthor = usersByUid.get(p.authorUid) || (p.authorId ? usersByUid.get(p.authorId) : undefined);
+        return resolvePostAuthorGender(p, linkedAuthor);
+      },
+    });
+  }, [posts, postGenderFilter, postSearchQuery, usersByUid]);
+
   const pendingCoinCount = coinRequests.filter((r) => r.status === 'pending').length;
   const pendingWithdrawalsCount = withdrawals.filter((w) => w.status === 'pending').length;
   const totalPendingCount = pendingCoinCount + pendingWithdrawalsCount;
@@ -544,6 +614,7 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
           <div className="flex flex-wrap sm:flex-nowrap items-center gap-1 bg-[#090A0F] p-1 rounded-xl border border-white/[0.07] w-full sm:w-auto overflow-x-auto">
             {[
               { id: 'requests' as const, label: 'Arizalar', icon: Inbox, count: coinRequests.length + withdrawals.length, highlight: totalPendingCount > 0 },
+              { id: 'posts' as const, label: 'Postlar', icon: FileText, count: posts.length, highlight: false },
               { id: 'users' as const, label: 'Foydalanuvchilar', icon: Users, count: users.length, highlight: false },
               { id: 'transactions' as const, label: 'Tarix', icon: Activity, count: transactions.length, highlight: false },
               { id: 'telegram' as const, label: 'Bot & Obuna', icon: Send, count: subConfig.enabled && subConfig.botIsAdmin ? 'ON' : 'OFF', highlight: subConfig.enabled && subConfig.botIsAdmin },
@@ -618,6 +689,30 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
               >
                 Faqat kutilayotgan
               </button>
+            </div>
+          )}
+
+          {activeSubTab === 'posts' && (
+            <div className="flex items-center gap-1 bg-[#090A0F] p-1 rounded-xl border border-white/[0.07] text-[11px] font-semibold">
+              {[
+                { id: 'all', label: 'Barchasi' },
+                { id: 'female', label: 'Qizlar' },
+                { id: 'male', label: 'Yigitlar' },
+              ].map((seg) => (
+                <button
+                  key={seg.id}
+                  type="button"
+                  data-testid={`admin-posts-gender-${seg.id}`}
+                  onClick={() => setPostGenderFilter(seg.id as any)}
+                  className={`px-2.5 py-1 rounded-lg transition cursor-pointer ${
+                    postGenderFilter === seg.id
+                      ? 'bg-white/15 text-white'
+                      : 'text-zinc-400 hover:text-zinc-200'
+                  }`}
+                >
+                  {seg.label}
+                </button>
+              ))}
             </div>
           )}
 
@@ -944,6 +1039,158 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
                                 </button>
                               </div>
                             )}
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </motion.div>
+            )}
+
+            {activeSubTab === 'posts' && (
+              <motion.div
+                key="admin-posts-view"
+                initial={{ opacity: 0, y: 8 }}
+                animate={{ opacity: 1, y: 0 }}
+                exit={{ opacity: 0, y: -6 }}
+                transition={{ duration: 0.18 }}
+                className="space-y-3"
+                data-testid="admin-posts-panel"
+              >
+                <div className="relative">
+                  <Search className="w-4 h-4 text-zinc-400 absolute left-3.5 top-1/2 -translate-y-1/2" />
+                  <input
+                    type="text"
+                    value={postSearchQuery}
+                    onChange={(e) => setPostSearchQuery(e.target.value)}
+                    placeholder="Post matni, muallif ismi yoki @username bo'yicha qidirish..."
+                    data-testid="admin-posts-search-input"
+                    className="w-full pl-10 pr-4 py-3 rounded-2xl bg-[#12141E] border border-white/10 text-xs font-medium text-white placeholder:text-zinc-500 outline-none focus:border-rose-500"
+                  />
+                </div>
+
+                {filteredPosts.length === 0 ? (
+                  <div className="bg-[#12141E] rounded-2xl p-10 text-center border border-white/10 space-y-2">
+                    <FileText className="w-8 h-8 text-zinc-500 mx-auto" />
+                    <p className="text-sm font-semibold text-zinc-300">Postlar topilmadi</p>
+                    <p className="text-xs text-zinc-500">
+                      Qizlar va yigitlar tomonidan joylangan barcha postlar moderatsiya uchun shu yerda ko&apos;rinadi.
+                    </p>
+                  </div>
+                ) : (
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                    {filteredPosts.map((p) => {
+                      const linkedAuthor = usersByUid.get(p.authorUid) || (p.authorId ? usersByUid.get(p.authorId) : undefined);
+                      const authorAvatar = resolveApiMediaUrl(
+                        resolveEffectiveProfileAvatar(linkedAuthor) || p.authorAvatar
+                      );
+                      const authorGender = resolvePostAuthorGender(p, linkedAuthor);
+                      const mediaSrc = p.mediaUrl ? resolveApiMediaUrl(p.mediaUrl) : '';
+
+                      return (
+                        <div
+                          key={p.id}
+                          data-testid={`admin-post-card-${p.id}`}
+                          className="bg-[#12141E] rounded-2xl p-4 border border-white/10 flex flex-col justify-between gap-3"
+                        >
+                          <div className="space-y-3">
+                            <div className="flex items-start justify-between gap-3">
+                              <button
+                                type="button"
+                                onClick={() => handleJumpToProfile(p.authorUid, linkedAuthor)}
+                                className="flex items-center gap-2.5 min-w-0 text-left group cursor-pointer"
+                              >
+                                <div className="w-10 h-10 rounded-full overflow-hidden border border-white/15 bg-[#1B1E2B] shrink-0 flex items-center justify-center">
+                                  {authorAvatar ? (
+                                    <img src={authorAvatar} alt={p.authorName} className="w-full h-full object-cover" />
+                                  ) : (
+                                    <span className="font-black text-sm text-rose-400">
+                                      {(p.authorName || 'F').charAt(0).toUpperCase()}
+                                    </span>
+                                  )}
+                                </div>
+                                <div className="min-w-0">
+                                  <div className="flex items-center flex-wrap gap-1.5">
+                                    <span className="font-bold text-sm text-white group-hover:text-rose-400 transition truncate">
+                                      {linkedAuthor?.name || p.authorName}
+                                    </span>
+                                    {authorGender && (
+                                      <span
+                                        className={`px-1.5 py-0.5 rounded text-[9px] font-bold border ${
+                                          authorGender === 'female'
+                                            ? 'bg-pink-500/15 text-pink-300 border-pink-500/30'
+                                            : 'bg-sky-500/15 text-sky-300 border-sky-500/30'
+                                        }`}
+                                      >
+                                        {authorGender === 'female' ? 'Qiz' : 'Yigit'}
+                                      </span>
+                                    )}
+                                  </div>
+                                  <p className="text-[11px] text-zinc-400 truncate">
+                                    {p.authorUsername ? `@${p.authorUsername.replace(/^@/, '')}` : p.authorUid} · {formatPostTimeUz(p.createdAt)} · {p.type}
+                                  </p>
+                                </div>
+                              </button>
+
+                              <button
+                                type="button"
+                                disabled={busyId === p.id}
+                                onClick={() => handleDeletePostAsAdmin(p.id)}
+                                data-testid={`admin-delete-post-${p.id}`}
+                                className="px-3 py-1.5 rounded-xl bg-rose-600/90 hover:bg-rose-600 text-white text-[11px] font-bold transition flex items-center gap-1.5 shrink-0 cursor-pointer disabled:opacity-50"
+                              >
+                                <Trash2 className="w-3.5 h-3.5" />
+                                <span>{busyId === p.id ? "O'chirilmoqda..." : "O'chirish"}</span>
+                              </button>
+                            </div>
+
+                            {p.caption && (
+                              <p className="text-xs text-zinc-200 leading-relaxed whitespace-pre-line line-clamp-4 bg-[#0B0C12] p-3 rounded-xl border border-white/[0.06]">
+                                {p.caption}
+                              </p>
+                            )}
+
+                            {p.type === 'photo' && mediaSrc && (
+                              <img
+                                src={mediaSrc}
+                                alt={p.caption || p.authorName}
+                                className="w-full h-44 object-cover rounded-xl border border-white/10 bg-[#0A0C12]"
+                              />
+                            )}
+
+                            {p.type === 'video' && (mediaSrc || p.embedUrl) && (
+                              <div className="rounded-xl overflow-hidden border border-white/10 bg-black">
+                                {mediaSrc ? (
+                                  <video src={mediaSrc} controls preload="metadata" className="w-full max-h-44 object-contain" />
+                                ) : (
+                                  <p className="p-3 text-[11px] text-zinc-300 truncate">Embed video: {p.embedUrl}</p>
+                                )}
+                              </div>
+                            )}
+
+                            {p.type === 'music' && mediaSrc && (
+                              <div className="bg-[#0B0C12] p-2.5 rounded-xl border border-white/[0.06] space-y-1.5">
+                                <p className="text-[11px] font-semibold text-amber-300 truncate">
+                                  🎵 {p.audioTitle || 'Musiqa'}{p.audioArtist ? ` — ${p.audioArtist}` : ''}
+                                </p>
+                                <audio src={mediaSrc} controls className="w-full h-8" />
+                              </div>
+                            )}
+                          </div>
+
+                          <div className="flex items-center justify-between pt-2 border-t border-white/[0.06] text-[11px] text-zinc-400">
+                            <div className="flex items-center gap-3">
+                              <span className="inline-flex items-center gap-1">
+                                <Heart className="w-3.5 h-3.5 text-rose-400" />
+                                {Array.isArray(p.likes) ? p.likes.length : 0}
+                              </span>
+                              <span className="inline-flex items-center gap-1">
+                                <MessageCircle className="w-3.5 h-3.5 text-zinc-400" />
+                                {Array.isArray(p.comments) ? p.comments.length : 0}
+                              </span>
+                            </div>
+                            <span className="font-mono text-[10px] text-zinc-500">{p.id}</span>
                           </div>
                         </div>
                       );

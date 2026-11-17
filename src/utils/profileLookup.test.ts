@@ -6,6 +6,7 @@ import {
   getInitialAuthDraftState,
   telegramInputMatchesBotRecord,
   canPersistUserProfile,
+  isSyntheticDemoProfile,
   pruneIncompleteProfiles,
   formatAuthErrorMessage,
   resolveTelegramMiniAppBootAction,
@@ -156,6 +157,44 @@ describe('Profile lookup & auth isolation helpers', () => {
     assert.equal(resolvePostFaceIdStep('telegram'), 'profile_setup');
     assert.equal(resolvePostFaceIdStep('google'), 'google_setup');
     assert.equal(resolvePostFaceIdStep('email'), 'google_setup');
+  });
+
+  it('rejects synthetic demo/test profiles while keeping real completed profiles and admin', () => {
+    const demoHost = {
+      uid: 'test_host_live_01',
+      id: 'test_host_live_01',
+      name: 'Madina Live',
+      gender: 'female',
+      isProfileCompleted: true,
+      faceId: { verified: true },
+    };
+    const demoFlagged = {
+      uid: 'tg_999000',
+      name: 'Demo Account',
+      gender: 'male',
+      isDemo: true,
+      isProfileCompleted: true,
+      faceId: { verified: true },
+    };
+    const realGirl = {
+      uid: 'tg_real_girl_1',
+      name: 'Madina',
+      gender: 'female',
+      isProfileCompleted: true,
+      faceId: { verified: true },
+    };
+    const admin = { uid: 'tg_salikh_07', telegram: '@Salikh_07' };
+
+    assert.equal(isSyntheticDemoProfile(demoHost), true);
+    assert.equal(isSyntheticDemoProfile(demoFlagged), true);
+    assert.equal(isSyntheticDemoProfile(realGirl), false);
+    assert.equal(isSyntheticDemoProfile(admin), false);
+    assert.equal(canPersistUserProfile(demoHost), false);
+    assert.equal(canPersistUserProfile(demoFlagged), false);
+    assert.deepEqual(
+      pruneIncompleteProfiles([admin, demoHost, demoFlagged, realGirl]).map((u) => u.uid),
+      ['tg_salikh_07', 'tg_real_girl_1']
+    );
   });
 });
 

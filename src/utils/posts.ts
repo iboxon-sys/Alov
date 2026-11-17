@@ -1,3 +1,5 @@
+import { isAdminTelegramUser } from './tokenomics';
+
 export type PostMediaType = 'photo' | 'video' | 'music' | 'text';
 
 export interface PostComment {
@@ -114,13 +116,76 @@ export function formatPostTimeUz(isoDate: string, nowMs: number = Date.now()): s
   return new Date(ts).toLocaleDateString('uz-UZ', { day: '2-digit', month: 'short' });
 }
 
+export function resolvePostAuthorGender(
+  post: Pick<PostItem, 'authorGender'> | null | undefined,
+  authorFallback?: { gender?: string } | null
+): 'male' | 'female' | '' {
+  const raw = post?.authorGender || authorFallback?.gender || '';
+  return raw === 'male' || raw === 'female' ? raw : '';
+}
+
 export function isPostVisibleToViewer(
   post: Pick<PostItem, 'authorUid' | 'authorGender'> | null | undefined,
-  _viewer?: { uid?: string; id?: string; gender?: string } | null,
+  viewer?: {
+    uid?: string;
+    id?: string;
+    gender?: string;
+    role?: string | null;
+    isAdmin?: boolean | null;
+    telegram?: string | null;
+    username?: string | null;
+  } | null,
   _authorGenderFallback?: string
 ): boolean {
   if (!post || !String(post.authorUid || '').trim()) return false;
+  if (isAdminTelegramUser(viewer)) return true;
   return true;
+}
+
+export function canUserDeletePost(
+  post: Pick<PostItem, 'authorUid' | 'authorId'> | null | undefined,
+  currentUser: {
+    uid?: string;
+    id?: string;
+    role?: string | null;
+    isAdmin?: boolean | null;
+    telegram?: string | null;
+    username?: string | null;
+  } | null | undefined
+): boolean {
+  if (!post || !currentUser) return false;
+  if (isAdminTelegramUser(currentUser)) return true;
+  if (currentUser.id === 'ALOV-ADMIN') return true;
+  if (currentUser.uid && post.authorUid && currentUser.uid === post.authorUid) return true;
+  if (currentUser.id && post.authorId && currentUser.id === post.authorId) return true;
+  return false;
+}
+
+export function filterPostsForAdminModeration(
+  posts: PostItem[],
+  options: {
+    genderFilter?: 'all' | 'female' | 'male';
+    query?: string;
+    resolveAuthorGender?: (post: PostItem) => 'male' | 'female' | '';
+  } = {}
+): PostItem[] {
+  const genderFilter = options.genderFilter || 'all';
+  const q = String(options.query || '').trim().toLowerCase();
+
+  return (Array.isArray(posts) ? posts : []).filter((p) => {
+    const g = options.resolveAuthorGender
+      ? options.resolveAuthorGender(p)
+      : resolvePostAuthorGender(p);
+    if (genderFilter !== 'all' && g !== genderFilter) return false;
+    if (!q) return true;
+    return (
+      String(p.authorName || '').toLowerCase().includes(q) ||
+      String(p.authorUsername || '').toLowerCase().includes(q) ||
+      String(p.caption || '').toLowerCase().includes(q) ||
+      String(p.audioTitle || '').toLowerCase().includes(q) ||
+      String(p.id || '').toLowerCase().includes(q)
+    );
+  });
 }
 
 export function normalizePostRecord(raw: any): PostItem | null {

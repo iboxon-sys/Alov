@@ -16,7 +16,8 @@
     'www.googletagmanager.com',
     'cdn.jsdelivr.net',
     'alov.uz',
-    'alov.onrender.com'
+    'alov.onrender.com',
+    'alov-mu.vercel.app'
   ];
   function isAllowedScriptUrl(rawUrl) {
     try {

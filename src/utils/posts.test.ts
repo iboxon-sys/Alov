@@ -7,6 +7,8 @@ import {
   computeAuthorTotalLikes,
   formatPostTimeUz,
   isPostVisibleToViewer,
+  canUserDeletePost,
+  filterPostsForAdminModeration,
   normalizePostRecord,
   mergePostsLists,
   isPostCommentsOpen,
@@ -84,6 +86,7 @@ describe('Posts pure helpers', () => {
   it('shows valid posts to everyone across genders, missing gender, and guest sessions', () => {
     const maleViewer = { uid: 'm1', gender: 'male' };
     const femaleViewer = { uid: 'f1', gender: 'female' };
+    const adminViewer = { uid: 'tg_salikh_07', telegram: '@Salikh_07', gender: 'male' };
 
     const ownMalePost = { authorUid: 'm1', authorGender: 'male' as const };
     const otherMalePost = { authorUid: 'm2', authorGender: 'male' as const };
@@ -96,8 +99,60 @@ describe('Posts pure helpers', () => {
     assert.equal(isPostVisibleToViewer(missingGenderPost, maleViewer), true);
     assert.equal(isPostVisibleToViewer(femalePost, femaleViewer), true);
     assert.equal(isPostVisibleToViewer(otherMalePost, femaleViewer), true);
+    assert.equal(isPostVisibleToViewer(otherMalePost, adminViewer), true);
+    assert.equal(isPostVisibleToViewer(femalePost, adminViewer), true);
+    assert.equal(isPostVisibleToViewer(missingGenderPost, adminViewer), true);
     assert.equal(isPostVisibleToViewer(missingGenderPost, null), true);
     assert.equal(isPostVisibleToViewer({ authorUid: '' }, maleViewer), false);
+  });
+
+  it('allows admin (@Salikh_07 or role admin) to delete any user post while non-admins can delete only own posts', () => {
+    const femalePost = { authorUid: 'u_female_1', authorId: 'id_f1' };
+    const malePost = { authorUid: 'u_male_1', authorId: 'id_m1' };
+
+    const adminByHandle = { uid: 'tg_salikh_07', telegram: '@Salikh_07' };
+    const adminByRole = { uid: 'u_mod_1', role: 'admin' };
+    const regularUser = { uid: 'u_female_1', id: 'id_f1', role: 'user' };
+
+    assert.equal(canUserDeletePost(femalePost, adminByHandle), true);
+    assert.equal(canUserDeletePost(malePost, adminByHandle), true);
+    assert.equal(canUserDeletePost(femalePost, adminByRole), true);
+    assert.equal(canUserDeletePost(malePost, adminByRole), true);
+    assert.equal(canUserDeletePost(femalePost, regularUser), true);
+    assert.equal(canUserDeletePost(malePost, regularUser), false);
+    assert.equal(canUserDeletePost(femalePost, null), false);
+  });
+
+  it('filters posts for admin moderation by all/female/male and search query', () => {
+    const posts: PostItem[] = [
+      {
+        id: 'pf1',
+        authorUid: 'u_f1',
+        authorName: 'Laylo',
+        authorGender: 'female',
+        type: 'photo',
+        caption: 'Chiroyli kun',
+        likes: [],
+        comments: [],
+        createdAt: '2026-11-16T10:00:00Z',
+      },
+      {
+        id: 'pm1',
+        authorUid: 'u_m1',
+        authorName: 'Sardor',
+        authorGender: 'male',
+        type: 'text',
+        caption: 'Salom hammaga',
+        likes: [],
+        comments: [],
+        createdAt: '2026-11-16T11:00:00Z',
+      },
+    ];
+
+    assert.equal(filterPostsForAdminModeration(posts, { genderFilter: 'all' }).length, 2);
+    assert.deepEqual(filterPostsForAdminModeration(posts, { genderFilter: 'female' }).map((p) => p.id), ['pf1']);
+    assert.deepEqual(filterPostsForAdminModeration(posts, { genderFilter: 'male' }).map((p) => p.id), ['pm1']);
+    assert.deepEqual(filterPostsForAdminModeration(posts, { query: 'sardor' }).map((p) => p.id), ['pm1']);
   });
 
   it('normalizes, deduplicates, and sorts merged posts newest-first', () => {

@@ -10,7 +10,7 @@ import {
   ChevronRight, X, ArrowUpRight, ShieldCheck, Globe, LogIn, LogOut, CheckCircle2, Edit3, ArrowLeft, VideoOff,
   ZoomIn, ZoomOut, Move, Crop, AlertTriangle, RefreshCw, Navigation, Shield, Lock, EyeOff, Car, Upload,
   Clock, Check, CheckCheck, Gift, Coins, Wallet, CreditCard, Handshake, Crown, ScanFace,
-  Image as ImageIcon, Camera, Newspaper, SlidersHorizontal
+  Image as ImageIcon, Camera, Newspaper, SlidersHorizontal, Shuffle
 } from 'lucide-react';
 import { motion, AnimatePresence, MotionConfig } from 'framer-motion';
 import { clsx, type ClassValue } from 'clsx';
@@ -26,7 +26,7 @@ import {
   signInWithPopup, signInWithRedirect, getRedirectResult, signOut, onAuthStateChanged, 
   setPersistence, browserLocalPersistence, signInWithEmailAndPassword, createUserWithEmailAndPassword, updateProfile, User
 } from './firebase';
-import { getApiUrl, getBaseUrl, safeFetchJson } from './config/api';
+import { getApiUrl, getBaseUrl, safeFetchJson, setCustomRenderUrl } from './config/api';
 import { io, Socket } from 'socket.io-client';
 import {
   buildTelegramDisplayName,
@@ -84,6 +84,18 @@ import {
   evaluateMandatorySubscriptionAccess,
   type MandatorySubscriptionConfig,
 } from './utils/telegramBotUtils';
+import {
+  MAIN_RENDER_ORIGIN,
+  VERCEL_HEAVY_ORIGIN,
+  isDevPreviewHost,
+  isVercelHost,
+  mapTabToVercelSection,
+  parseIncomingAuthMessage,
+  parseVercelEmbedRoute,
+  persistLocalAuthCredentials,
+  shouldRedirectVercelStandaloneToMain,
+  shouldUseVercelIframeForSection,
+} from './utils/microFrontendBridge';
 
 const LiveStreamModal = lazy(() =>
   import('./components/LiveStreamModal').then((m) => ({ default: m.LiveStreamModal }))
@@ -123,6 +135,12 @@ const PrivacyPolicyInline = lazy(() =>
 );
 const TurnstileWidget = lazy(() =>
   import('./components/TurnstileWidget').then((m) => ({ default: m.TurnstileWidget }))
+);
+const VercelMicroFrontendFrame = lazy(() =>
+  import('./components/VercelMicroFrontendFrame').then((m) => ({ default: m.VercelMicroFrontendFrame }))
+);
+const ChatRouletteView = lazy(() =>
+  import('./components/ChatRouletteView').then((m) => ({ default: m.ChatRouletteView }))
 );
 const MandatorySubscriptionGate = lazy(() =>
   import('./components/MandatorySubscriptionGate').then((m) => ({ default: m.MandatorySubscriptionGate }))
@@ -313,6 +331,7 @@ function computeHaversineKm(lat1: number, lng1: number, lat2: number, lng2: numb
 
 export default function App() {
   const [activeTab, setActiveTab] = useState<string>('landing');
+  const [bridgeBackendOrigin, setBridgeBackendOrigin] = useState<string>('');
 
   // Firebase Auth State
   const [firebaseUser, setFirebaseUser] = useState<User | null>(null);
@@ -691,14 +710,17 @@ export default function App() {
       }));
     });
 
-    socket.on('stream_stopped', ({ hostUid }: { hostUid: string }) => {
+    const handleGlobalStreamEnd = ({ hostUid }: { hostUid?: string }) => {
+      if (!hostUid) return;
       setUsersList(prev => prev.map(u => {
-        if (u.uid === hostUid) {
+        if (u.uid === hostUid || u.id === hostUid) {
           return { ...u, isLive: false, liveStreamId: null, liveTitle: null };
         }
         return u;
       }));
-    });
+    };
+    socket.on('stream_stopped', handleGlobalStreamEnd);
+    socket.on('stream_ended', handleGlobalStreamEnd);
 
     socket.on('post_created', (post: PostItem) => {
       if (!post?.id) return;
@@ -1123,16 +1145,19 @@ export default function App() {
           })
             .then(r => r.json())
             .then(res => {
-              if (res && res.success && res.exists && res.user) {
-                setCurrentUser(res.user);
-                try {
-                  localStorage.setItem('alov_current_user', JSON.stringify(res.user));
-                  localStorage.setItem('alov_user_' + res.user.uid, JSON.stringify(res.user));
-                } catch (e) {}
+      if (res && res.success && res.exists && res.user) {
+                const syncedUser = res.token ? { ...res.user, authToken: res.token } : res.user;
+                setCurrentUser(syncedUser);
+                persistLocalAuthCredentials(localStorage, {
+                  token: res.token,
+                  userId: syncedUser.uid,
+                  user: syncedUser,
+                });
               } else if (res && res.success && res.exists === false) {
                 try {
                   localStorage.removeItem('alov_current_user');
                   localStorage.removeItem('alov_user_' + parsed.uid);
+                  persistLocalAuthCredentials(localStorage, null);
                 } catch (e) {}
                 setCurrentUser(null);
                 setActiveTab('landing');
@@ -1143,6 +1168,109 @@ export default function App() {
       }
     } catch (e) {}
   }, []);
+
+  // Vercel Direct-Access Guard + Parent <-> Iframe Auth Bridge (alov.onrender.com <-> alov-mu.vercel.app)
+  const embedRouteInfo = React.useMemo(() => {
+    if (typeof window === 'undefined') return { isEmbedRoute: false, section: null };
+    return parseVercelEmbedRoute(window.location.pathname);
+  }, []);
+
+  const isInIframe = typeof window !== 'undefined' ? window.self !== window.top : false;
+
+  const standaloneRedirectUrl = React.useMemo(() => {
+    if (typeof window === 'undefined') return null;
+    return shouldRedirectVercelStandaloneToMain({
+      hostname: window.location.hostname,
+      isInIframe: window.self !== window.top,
+      search: window.location.search,
+    });
+  }, []);
+
+  useEffect(() => {
+    if (standaloneRedirectUrl && typeof window !== 'undefined') {
+      window.location.replace(standaloneRedirectUrl);
+    }
+  }, [standaloneRedirectUrl]);
+
+  useEffect(() => {
+    if (!currentUser?.uid) return;
+    persistLocalAuthCredentials(localStorage, {
+      token: currentUser.authToken || localStorage.getItem('alov_auth_token') || `alov_session_${currentUser.uid}`,
+      userId: currentUser.uid,
+      user: currentUser,
+    });
+  }, [currentUser]);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const isRunningOnVercel = isVercelHost(window.location.hostname);
+    if (!isInIframe && !embedRouteInfo.isEmbedRoute && !isRunningOnVercel) {
+      return;
+    }
+
+    const handleParentBridgeMessage = async (event: MessageEvent) => {
+      const parsed = parseIncomingAuthMessage(event, [window.location.origin]);
+      if (!parsed) return;
+
+      if (parsed.backendOrigin && !isVercelHost(parsed.backendOrigin)) {
+        setBridgeBackendOrigin(parsed.backendOrigin);
+        setCustomRenderUrl(parsed.backendOrigin);
+      }
+
+      persistLocalAuthCredentials(localStorage, {
+        token: parsed.token,
+        userId: parsed.userId,
+        user: parsed.user,
+      });
+
+      if (parsed.user) {
+        setCurrentUser({ ...parsed.user, authToken: parsed.token });
+        setIsAuthChecking(false);
+      }
+
+      if (parsed.userId || parsed.token) {
+        try {
+          const bridgeRes = await safeFetchJson(getApiUrl('/api/auth/bridge-session'), {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              token: parsed.token,
+              userId: parsed.userId,
+            }),
+          });
+          if (bridgeRes?.success && bridgeRes.user) {
+            const hydrated = { ...bridgeRes.user, authToken: bridgeRes.token || parsed.token };
+            setCurrentUser(hydrated);
+            persistLocalAuthCredentials(localStorage, {
+              token: hydrated.authToken,
+              userId: hydrated.uid,
+              user: hydrated,
+            });
+            setIsAuthChecking(false);
+          }
+        } catch {}
+      }
+
+      if (parsed.section === 'efir') setActiveTab('reels');
+      else if (parsed.section === 'postlar') setActiveTab('posts');
+      else if (parsed.section === 'chatroulette') setActiveTab('chatruletka');
+    };
+
+    window.addEventListener('message', handleParentBridgeMessage);
+
+    if (isInIframe) {
+      try {
+        window.parent.postMessage(
+          { type: 'ALOV_EMBED_READY', section: embedRouteInfo.section },
+          '*'
+        );
+      } catch {}
+    }
+
+    return () => {
+      window.removeEventListener('message', handleParentBridgeMessage);
+    };
+  }, [embedRouteInfo.isEmbedRoute, embedRouteInfo.section, isInIframe]);
 
   // Telegram WebApp Auto-login & Integration (never auto-opens Auth or Face ID on boot for new visitors)
   useEffect(() => {
@@ -2617,16 +2745,19 @@ export default function App() {
       });
 
       if (serverLoginRes && serverLoginRes.success && serverLoginRes.user) {
-        const userData = serverLoginRes.user;
+        const userData = serverLoginRes.token
+          ? { ...serverLoginRes.user, authToken: serverLoginRes.token }
+          : serverLoginRes.user;
         if (!canPersistUserProfile(userData)) {
           setErrorMsg("Ro'yxatdan o'tish oxirigacha yakunlanmagan. Iltimos, Face ID va profil anketasini yakunlang!");
           return;
         }
         setCurrentUser(userData);
-        try {
-          localStorage.setItem('alov_current_user', JSON.stringify(userData));
-          localStorage.setItem('alov_user_' + userData.uid, JSON.stringify(userData));
-        } catch(e) {}
+        persistLocalAuthCredentials(localStorage, {
+          token: serverLoginRes.token || userData.authToken,
+          userId: userData.uid,
+          user: userData,
+        });
         setShowAuthModal(false);
         setActiveTab('discover');
         return;
@@ -3329,6 +3460,7 @@ export default function App() {
     try {
       localStorage.removeItem('alov_current_user');
       localStorage.removeItem('alov_last_tg_chat');
+      persistLocalAuthCredentials(localStorage, null);
       if (activeUid) {
         localStorage.removeItem('alov_user_' + activeUid);
       }
@@ -3907,11 +4039,12 @@ export default function App() {
   };
 
   const targetGender = currentUser?.gender === 'male' ? 'female' : 'male';
+  const viewerIsAdmin = isAdminTelegramUser(currentUser);
   const filteredCandidates = usersList.filter(u => {
     if (!currentUser) return false;
     if (currentUser.uid && (u.uid === currentUser.uid || u.id === currentUser.uid)) return false;
     if (currentUser.id && (u.id === currentUser.id || u.uid === currentUser.id)) return false;
-    if (u.gender !== targetGender) return false;
+    if (!viewerIsAdmin && u.gender !== targetGender) return false;
     if (filterRegion !== 'Barchasi' && u.region !== filterRegion) return false;
     if (filterDistrict !== 'Barchasi' && u.district !== filterDistrict) return false;
     if (searchQuery.trim() && !u.name.toLowerCase().includes(searchQuery.toLowerCase()) && !u.bio.toLowerCase().includes(searchQuery.toLowerCase())) {
@@ -4055,7 +4188,46 @@ export default function App() {
         </div>
       </header>
 
-      {/* Scrollable Inner Viewport or Fixed-Height Reels / Map / Chat Container */}
+      {/* Scrollable Inner Viewport or Fixed-Height Reels / Map / Chat / Micro-Frontend Container */}
+      {(() => {
+        const activeVercelSection = mapTabToVercelSection(activeTab);
+        const searchStr = typeof window !== 'undefined' ? window.location.search : '';
+        const hostName = typeof window !== 'undefined' ? window.location.hostname : '';
+        const useVercelIframe = shouldUseVercelIframeForSection({
+          hostname: hostName,
+          section: activeVercelSection,
+          isInIframe,
+          search: searchStr,
+          envEnabled: (import.meta as any).env?.VITE_ENABLE_VERCEL_MICROFRONTEND,
+        });
+        let vercelTargetOrigin = VERCEL_HEAVY_ORIGIN;
+        if (typeof window !== 'undefined' && isDevPreviewHost(hostName)) {
+          try {
+            const sp = new URLSearchParams(searchStr);
+            const overrideOrigin = sp.get('vercelOrigin');
+            if (overrideOrigin && overrideOrigin.startsWith('http')) {
+              vercelTargetOrigin = overrideOrigin.replace(/\/+$/, '');
+            }
+          } catch {}
+        }
+
+        if (useVercelIframe && activeVercelSection) {
+          return (
+            <div className="flex-1 min-h-0 relative z-10 overflow-hidden flex flex-col p-0">
+              <Suspense fallback={<div className="flex-1 flex items-center justify-center text-xs text-zinc-400">Yuklanmoqda...</div>}>
+                <VercelMicroFrontendFrame
+                  section={activeVercelSection}
+                  currentUser={currentUser}
+                  targetOrigin={vercelTargetOrigin}
+                  onNavigateTab={(tab) => setActiveTab(tab)}
+                  onNotify={showToast}
+                />
+              </Suspense>
+            </div>
+          );
+        }
+
+        return (
       <div className={`flex-1 min-h-0 relative z-10 ${(activeTab === 'reels' || activeTab === 'map' || (activeTab === 'chats' && chatView === 'conversation')) ? 'overflow-hidden flex flex-col p-0' : 'overflow-y-auto overscroll-y-contain p-3 sm:p-5 space-y-4 pb-24'}`}>
         {/* --- LANDING TAB --- */}
         {activeTab === 'landing' && <LandingPage onLogin={() => openAuthModalClean('login')} />}
@@ -4302,6 +4474,8 @@ export default function App() {
                   </Suspense>
                 </div>
               )}
+
+              {/* Chatruletka renders exclusively via Vercel Micro-Frontend (/chatroulette) */}
 
               {/* --- CHATS TAB --- */}
               {activeTab === 'chats' && (
@@ -5262,17 +5436,23 @@ export default function App() {
                       allow="autoplay; encrypted-media"
                       allowFullScreen
                     />
-                  ) : (
+                  ) : currentReelUser.videoUrl ? (
                     <video src={currentReelUser.videoUrl} className="absolute inset-0 w-full h-full object-cover" autoPlay loop muted playsInline />
+                  ) : (
+                    <img
+                      src={currentReelUser.avatar || '/assets/aistudio/image_e20a1307.webp'}
+                      alt={currentReelUser.name}
+                      className="absolute inset-0 w-full h-full object-cover blur-sm scale-105 opacity-70"
+                    />
                   )}
-                  <div className="absolute inset-0 bg-gradient-to-b from-black/60 via-transparent to-black/80 pointer-events-none" />
+                  <div className="absolute inset-0 bg-gradient-to-b from-black/70 via-black/25 to-black/85 pointer-events-none" />
 
                   <div className="relative z-10 p-4 flex items-center justify-between text-white pt-6">
                     <div className="flex items-center space-x-3">
                       <button onClick={() => setActiveTab('discover')} className="p-2 rounded-full bg-black/40 backdrop-blur-md cursor-pointer"><X className="w-5 h-5" /></button>
 
                       <div className="flex items-center space-x-2 bg-black/40 backdrop-blur-md px-3 py-1.5 rounded-full">
-                        <img src={currentReelUser.avatar} className="w-7 h-7 rounded-full object-cover" />
+                        <img src={currentReelUser.avatar || '/assets/aistudio/image_e20a1307.webp'} className="w-7 h-7 rounded-full object-cover border border-rose-500" />
                         <div>
                           <div className="font-bold text-xs">{currentReelUser.name}</div>
                         </div>
@@ -5286,78 +5466,58 @@ export default function App() {
                     </div>
 
                     <div className="flex items-center space-x-2 bg-black/40 backdrop-blur-md px-3 py-1 rounded-full text-[10px] font-bold">
-                      <span className="text-red-500 animate-pulse">●</span> {activeUsersCount || 1}
+                      <span className="text-red-500 animate-pulse">●</span> LIVE
                     </div>
                   </div>
 
-                  <div className="absolute right-3 top-1/2 -translate-y-1/2 flex flex-col space-y-4 z-20">
-                    <button className="flex flex-col items-center space-y-1 group cursor-pointer">
-                      <div className="p-3 rounded-full bg-black/40 backdrop-blur-md hover:bg-black/60 transition">
-                        <Heart className="w-6 h-6 text-white group-hover:text-rose-500" />
-                      </div>
-                      <span className="text-[10px] font-bold text-white">4.2K</span>
-                    </button>
-                    <button className="flex flex-col items-center space-y-1 group cursor-pointer">
-                      <div className="p-3 rounded-full bg-black/40 backdrop-blur-md hover:bg-black/60 transition">
-                        <Flame className="w-6 h-6 text-white group-hover:text-orange-500" />
-                      </div>
-                      <span className="text-[10px] font-bold text-white">Sovg'a</span>
-                    </button>
-                    <button className="flex flex-col items-center space-y-1 group cursor-pointer">
-                      <div className="p-3 rounded-full bg-black/40 backdrop-blur-md hover:bg-black/60 transition">
-                        <ArrowUpRight className="w-6 h-6 text-white group-hover:text-blue-400" />
-                      </div>
-                      <span className="text-[10px] font-bold text-white">Ulashish</span>
+                  {/* Center Call-To-Action to enter real-time WebRTC Live Room */}
+                  <div className="relative z-20 my-auto mx-auto flex flex-col items-center text-center px-6 space-y-3.5">
+                    <img
+                      src={currentReelUser.avatar || '/assets/aistudio/image_e20a1307.webp'}
+                      alt={currentReelUser.name}
+                      className="w-24 h-24 rounded-full object-cover border-2 border-rose-500 shadow-2xl shadow-rose-900/40"
+                    />
+                    <div>
+                      <p className="text-base font-bold text-white">{currentReelUser.liveTitle || 'Jonli Efir 🔥'}</p>
+                      <p className="text-xs text-zinc-300 mt-0.5">{currentReelUser.name} hozir jonli efirda</p>
+                      {currentReelUser.bio && (
+                        <p className="text-[11px] text-zinc-400 mt-1 max-w-xs line-clamp-2">{currentReelUser.bio}</p>
+                      )}
+                    </div>
+                    <button
+                      onClick={() => {
+                        setActiveLiveHostUser(currentReelUser);
+                        setActiveLiveStreamId(currentReelUser.liveStreamId || ('stream_' + (currentReelUser.uid || currentReelUser.id)));
+                        setLiveModalMode('viewer');
+                        setShowLiveModal(true);
+                      }}
+                      className="px-7 py-3 rounded-full bg-gradient-to-r from-rose-600 to-red-600 hover:from-rose-500 hover:to-red-500 text-white font-bold text-xs shadow-xl shadow-rose-950/50 flex items-center gap-2 transition active:scale-95 cursor-pointer"
+                    >
+                      <Radio className="w-4 h-4 animate-pulse" />
+                      <span>Jonli Efirga Kirish</span>
                     </button>
                   </div>
 
-                  <div className="relative z-10 p-4 space-y-2.5 text-white pb-2">
-                    <p className="text-xs text-zinc-100 font-medium leading-relaxed">{currentReelUser.bio}</p>
-
-                    <div className="space-y-1.5 max-h-[150px] overflow-y-auto pb-2" onWheel={(e) => e.stopPropagation()}>
-                      {comments.map((c, idx) => (
-                        <div key={c.id ? `${c.id}_${idx}` : `comment_${idx}`} className="text-white text-xs flex items-center space-x-1.5">
-                          <span className="font-bold text-rose-300">{c.name}:</span>
-                          <span className="text-zinc-100">{c.text}</span>
-                        </div>
-                      ))}
-                      <div ref={commentsEndRef} />
-                    </div>
-
-                    <div className="flex items-center space-x-2 pt-1">
-                      <input
-                        type="text"
-                        placeholder="Efirga xabar yozing..."
-                        value={reelCommentInput}
-                        onChange={(e) => setReelCommentInput(e.target.value)}
-                        onKeyDown={(e) => {
-                          if (e.key === 'Enter' && reelCommentInput.trim()) {
-                            const newComment = { id: 'c-' + Date.now(), name: currentUser?.name || 'Siz', text: reelCommentInput };
-                            setReelComments(prev => ({
-                              ...prev,
-                              [currentReelUser.id]: [...(prev[currentReelUser.id] || []), newComment]
-                            }));
-                            setReelCommentInput('');
-                          }
-                        }}
-                        className="flex-1 px-4 py-2.5 rounded-full bg-black/60 text-white placeholder-white/50 border border-white/20 text-xs focus:outline-none focus:border-rose-500"
-                      />
-                      <button
-                        onClick={() => {
-                          if (reelCommentInput.trim()) {
-                            const newComment = { id: 'c-' + Date.now(), name: currentUser?.name || 'Siz', text: reelCommentInput };
-                            setReelComments(prev => ({
-                              ...prev,
-                              [currentReelUser.id]: [...(prev[currentReelUser.id] || []), newComment]
-                            }));
-                            setReelCommentInput('');
-                          }
-                        }}
-                        className="bg-[#E11D48] text-white p-2.5 rounded-full shadow-md shrink-0 hover:bg-[#BE123C] transition-all cursor-pointer"
-                      >
-                        <Send className="w-3.5 h-3.5" />
-                      </button>
-                    </div>
+                  <div className="relative z-20 p-4 pb-6 flex items-center justify-between gap-3">
+                    <span className="text-[11px] text-zinc-300">
+                      {activeLiveUsers.length > 1
+                        ? `${(currentReelIndex % activeLiveUsers.length) + 1} / ${activeLiveUsers.length} faol efir`
+                        : 'Jonli video va chat xonasiga ulaning'}
+                    </span>
+                    <button
+                      onClick={() => {
+                        if (!firebaseUser && !currentUser) {
+                          openAuthModalClean('login');
+                          return;
+                        }
+                        setLiveModalMode('broadcaster');
+                        setShowLiveModal(true);
+                      }}
+                      className="px-4 py-2 rounded-full bg-white/15 hover:bg-white/25 backdrop-blur-md border border-white/15 text-white font-bold text-[11px] flex items-center gap-1.5 transition active:scale-95 cursor-pointer"
+                    >
+                      <Radio className="w-3.5 h-3.5 text-rose-400" />
+                      <span>Efirni Boshlash</span>
+                    </button>
                   </div>
                 </div>
               );
@@ -5610,16 +5770,19 @@ export default function App() {
           </div>
         )}
       </div>
+        );
+      })()}
 
       {/* Sticky Bottom Navigation Dock with Animated Active Pill */}
       {activeTab !== 'reels' && !(activeTab === 'chats' && chatView === 'conversation') && (
-        <div className="sticky bottom-0 left-0 right-0 z-50 shrink-0 pointer-events-none pb-2.5 pt-1 px-2 sm:px-4">
-          <nav className="pointer-events-auto max-w-lg mx-auto bg-[#11131C]/92 backdrop-blur-2xl border border-white/[0.1] rounded-2xl sm:rounded-full px-1.5 py-1.5 flex items-center justify-around shadow-[0_16px_42px_rgba(0,0,0,0.65)]">
+        <div className="sticky bottom-0 left-0 right-0 z-50 shrink-0 pointer-events-none pb-2.5 pt-1 px-1.5 sm:px-4">
+          <nav className="pointer-events-auto max-w-2xl mx-auto bg-[#11131C]/92 backdrop-blur-2xl border border-white/[0.1] rounded-2xl sm:rounded-full px-1 py-1.5 flex items-center justify-around shadow-[0_16px_42px_rgba(0,0,0,0.65)]">
             {[
               { id: 'discover', label: 'Nomzodlar', icon: Users, onClick: () => setActiveTab('discover') },
               { id: 'posts', label: 'Postlar', icon: Newspaper, onClick: () => setActiveTab('posts') },
               { id: 'map', label: 'Xarita', icon: MapPin, onClick: () => setActiveTab('map') },
               { id: 'reels', label: 'Efirlar', icon: Video, onClick: () => setActiveTab('reels') },
+              { id: 'chatruletka', label: 'Ruletka', icon: Shuffle, onClick: () => setActiveTab('chatruletka') },
               { id: 'chats', label: 'Chatlar', icon: MessageCircle, onClick: () => { setChatView('list'); setActiveTab('chats'); } },
               { id: 'profile', label: 'Profil', icon: UserIcon, onClick: () => setActiveTab('profile') },
             ].map((tab) => {
@@ -5630,7 +5793,7 @@ export default function App() {
                   key={tab.id}
                   onClick={tab.onClick}
                   data-testid={`tab-${tab.id}`}
-                  className={`relative flex flex-col items-center justify-center px-2.5 sm:px-3.5 py-1.5 rounded-xl sm:rounded-full transition-colors duration-150 cursor-pointer min-w-0 ${
+                  className={`relative flex flex-col items-center justify-center px-1.5 sm:px-3 py-1.5 rounded-xl sm:rounded-full transition-colors duration-150 cursor-pointer min-w-0 flex-1 ${
                     isActive ? 'text-white font-bold' : 'text-zinc-400 hover:text-zinc-200'
                   }`}
                 >
@@ -5642,7 +5805,7 @@ export default function App() {
                     />
                   )}
                   <Icon className={`relative z-10 w-4 h-4 sm:w-4.5 sm:h-4.5 transition-transform duration-150 ${isActive ? 'text-rose-400 scale-105' : ''}`} />
-                  <span className="relative z-10 text-[9.5px] sm:text-[10px] truncate mt-0.5">{tab.label}</span>
+                  <span className="relative z-10 text-[9px] sm:text-[10px] truncate mt-0.5">{tab.label}</span>
                 </button>
               );
             })}
@@ -5651,6 +5814,15 @@ export default function App() {
       )}
     </div>
   );
+
+  if (standaloneRedirectUrl) {
+    return (
+      <div className="min-h-screen bg-[#09090D] flex flex-col items-center justify-center px-6 text-center text-zinc-300">
+        <div className="w-12 h-12 rounded-full border-4 border-rose-500/20 border-t-rose-500 animate-spin mb-4" />
+        <p className="text-sm font-medium">Asosiy saytga yo'naltirilmoqda...</p>
+      </div>
+    );
+  }
 
   if (isAuthChecking) {
     return (
@@ -5697,8 +5869,121 @@ export default function App() {
     <MotionConfig reducedMotion="user">
     <div className="min-h-screen bg-[#09090D] text-[#F4F4F6] font-sans selection:bg-rose-600 selection:text-white">
 
-      {/* Landing Page — only enter app after full DB registration sets currentUser */}
-      {!currentUser || activeTab === 'landing' ? (
+      {/* Vercel Micro-Frontend Embed View (/efir, /postlar, /chatruletka inside seamless iframe) */}
+      {embedRouteInfo.isEmbedRoute && embedRouteInfo.section ? (
+        <div
+          data-testid={`embed-section-root-${embedRouteInfo.section}`}
+          className="h-[100dvh] w-full bg-[#09090D] flex flex-col overflow-hidden"
+        >
+          {embedRouteInfo.section === 'postlar' && (
+            <div className="flex-1 overflow-y-auto p-3 sm:p-5 space-y-4">
+              <Suspense fallback={<div className="py-12 text-center text-xs text-zinc-400">Postlar yuklanmoqda...</div>}>
+                <PostsFeed
+                  posts={postsList}
+                  currentUser={currentUser}
+                  usersList={usersList}
+                  onlineUserIds={onlineUserIds}
+                  allowCompose={true}
+                  onPostCreated={(post) =>
+                    setPostsList((prev) => (prev.some((p) => p.id === post.id) ? prev : [post, ...prev]))
+                  }
+                  onPostUpdated={(post) =>
+                    setPostsList((prev) => prev.map((p) => (p.id === post.id ? post : p)))
+                  }
+                  onPostDeleted={(postId) =>
+                    setPostsList((prev) => prev.filter((p) => p.id !== postId))
+                  }
+                  onOpenProfile={openUserProfileByUid}
+                  onOpenAuth={() => openAuthModalClean('login')}
+                  onNotify={showToast}
+                />
+              </Suspense>
+            </div>
+          )}
+
+          {embedRouteInfo.section === 'chatroulette' && (
+            <div className="flex-1 min-h-0 p-2 sm:p-4 flex flex-col">
+              <Suspense fallback={<div className="py-12 text-center text-xs text-zinc-400">Chatruletka yuklanmoqda...</div>}>
+                <ChatRouletteView
+                  currentUser={currentUser}
+                  backendOrigin={bridgeBackendOrigin}
+                  onOpenAuth={() => openAuthModalClean('login')}
+                  onOpenProfile={openUserProfileByUid}
+                  onNotify={showToast}
+                />
+              </Suspense>
+            </div>
+          )}
+
+          {embedRouteInfo.section === 'efir' && (
+            <div className="relative flex-1 bg-black flex flex-col justify-center items-center overflow-hidden">
+              <button
+                type="button"
+                data-testid="embed-efir-close-btn"
+                aria-label="Efirlardan chiqish"
+                onClick={() => {
+                  try {
+                    window.parent.postMessage({ type: 'ALOV_EMBED_NAVIGATE', tab: 'discover' }, '*');
+                  } catch {}
+                }}
+                className="absolute top-4 left-4 z-20 p-2.5 rounded-full bg-white/10 hover:bg-white/20 backdrop-blur-md text-white transition cursor-pointer"
+              >
+                <X className="w-5 h-5" />
+              </button>
+              {(() => {
+                const activeLiveUsers = usersList.filter((u) => u.isLive === true);
+                const firstLive = activeLiveUsers[0];
+                return (
+                  <div className="w-full h-full flex flex-col items-center justify-center p-6 text-center space-y-4">
+                    <div className="w-16 h-16 rounded-full bg-rose-600/20 border border-rose-500/40 flex items-center justify-center animate-pulse">
+                      <Radio className="w-8 h-8 text-rose-500" />
+                    </div>
+                    <h2 className="text-xl font-editorial font-bold text-white">
+                      {firstLive ? `${firstLive.name} jonli efirda` : 'Jonli Efir (Live)'}
+                    </h2>
+                    <p className="text-xs text-zinc-400 max-w-xs">
+                      {firstLive
+                        ? firstLive.liveTitle || 'Jonli Efirga kirish uchun tugmani bosing'
+                        : "Kamerangizni yoqib jonli efir boshlang yoki faol efirlarni tomosha qiling."}
+                    </p>
+                    <div className="flex flex-wrap items-center justify-center gap-2.5">
+                      {firstLive && (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setActiveLiveHostUser(firstLive);
+                            setActiveLiveStreamId(firstLive.liveStreamId || ('stream_' + (firstLive.uid || firstLive.id)));
+                            setLiveModalMode('viewer');
+                            setShowLiveModal(true);
+                          }}
+                          className="px-6 py-3 rounded-full bg-white/15 hover:bg-white/25 text-white font-bold text-xs cursor-pointer"
+                        >
+                          Jonli Efirga Kirish
+                        </button>
+                      )}
+                      <button
+                        type="button"
+                        data-testid="embed-start-live-btn"
+                        onClick={() => {
+                          if (!currentUser?.uid) {
+                            openAuthModalClean('login');
+                            return;
+                          }
+                          setLiveModalMode('broadcaster');
+                          setShowLiveModal(true);
+                        }}
+                        className="px-6 py-3 rounded-full bg-gradient-to-r from-[#E11D48] to-[#BE123C] text-white font-bold text-xs shadow-lg cursor-pointer"
+                      >
+                        Efirni Boshlash
+                      </button>
+                    </div>
+                  </div>
+                );
+              })()}
+            </div>
+          )}
+        </div>
+      ) : !currentUser || activeTab === 'landing' ? (
         <LandingPage onLogin={() => openAuthModalClean('login')} />
       ) : (
         <div className="min-h-screen bg-[#09090D] flex flex-col items-center justify-center p-0 md:p-4 overflow-hidden relative">
@@ -8139,6 +8424,7 @@ export default function App() {
             apiBaseUrl={getBaseUrl()}
             socket={socketRef.current}
             onClose={() => setShowAdminPanel(false)}
+            onPostDeleted={(postId) => setPostsList((prev) => prev.filter((p) => p.id !== postId))}
             onOpenUserProfile={(uid, snapshot) => {
               const { isSelf } = resolveExactUserByUid(uid, usersList, currentUser, snapshot);
               if (isSelf) {

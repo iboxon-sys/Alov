@@ -23,7 +23,17 @@ import {
   Loader2,
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { PostItem, PostMediaType, formatPostTimeUz, isPostVisibleToViewer, isPostCommentsOpen, validateNewPostDraft } from '../utils/posts';
+import {
+  PostItem,
+  PostMediaType,
+  formatPostTimeUz,
+  isPostVisibleToViewer,
+  canUserDeletePost,
+  resolvePostAuthorGender,
+  isPostCommentsOpen,
+  validateNewPostDraft,
+} from '../utils/posts';
+import { isAdminTelegramUser } from '../utils/tokenomics';
 import { isUserOnlineStrict } from '../utils/presence';
 import {
   parseMediaLink,
@@ -220,6 +230,7 @@ export const PostsFeed: React.FC<PostsFeedProps> = ({
   onNotify,
 }) => {
   const [filterType, setFilterType] = useState<'all' | PostMediaType>('all');
+  const [adminGenderFilter, setAdminGenderFilter] = useState<'all' | 'female' | 'male'>('all');
   const [showComposeModal, setShowComposeModal] = useState(false);
 
   // Composer Form State
@@ -249,6 +260,8 @@ export const PostsFeed: React.FC<PostsFeedProps> = ({
   const videoInputRef = useRef<HTMLInputElement | null>(null);
   const audioInputRef = useRef<HTMLInputElement | null>(null);
 
+  const viewerIsAdmin = isAdminTelegramUser(currentUser);
+
   const visiblePosts = posts.filter((p) => {
     const postAuthor =
       usersList.find((u) => u.uid === p.authorUid || (p.authorId && u.id === p.authorId)) ||
@@ -256,6 +269,10 @@ export const PostsFeed: React.FC<PostsFeedProps> = ({
     if (!isPostVisibleToViewer(p, currentUser, postAuthor?.gender)) return false;
     if (authorUid && p.authorUid !== authorUid) return false;
     if (!authorUid && filterType !== 'all' && p.type !== filterType) return false;
+    if (viewerIsAdmin && !authorUid && adminGenderFilter !== 'all') {
+      const resolvedGender = resolvePostAuthorGender(p, postAuthor);
+      if (resolvedGender !== adminGenderFilter) return false;
+    }
     return true;
   });
 
@@ -553,13 +570,19 @@ export const PostsFeed: React.FC<PostsFeedProps> = ({
     try {
       const res = await fetch(getApiUrl(`/api/posts/${encodeURIComponent(postId)}?uid=${encodeURIComponent(currentUser.uid)}`), {
         method: 'DELETE',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ uid: currentUser.uid }),
       });
-      const data = await res.json();
+      const data = await res.json().catch(() => ({}));
       if (res.ok && data?.success) {
         onPostDeleted(postId);
         if (onNotify) onNotify("Post o'chirildi");
+      } else {
+        if (onNotify) onNotify(data?.error || "Postni o'chirib bo'lmadi");
       }
-    } catch {}
+    } catch {
+      if (onNotify) onNotify("Postni o'chirishda tarmoq xatoligi");
+    }
   };
 
   return (
@@ -1099,27 +1122,53 @@ export const PostsFeed: React.FC<PostsFeedProps> = ({
 
       {/* Filter Tabs for Global Feed */}
       {!authorUid && (
-        <div className="flex items-center gap-1.5 overflow-x-auto pb-1 scrollbar-none">
-          {[
-            { key: 'all' as const, label: 'Barchasi' },
-            { key: 'photo' as const, label: 'Rasmlar' },
-            { key: 'video' as const, label: 'Videolar' },
-            { key: 'music' as const, label: 'Musiqalar' },
-            { key: 'text' as const, label: 'Matnlar' },
-          ].map((tab) => (
-            <button
-              key={tab.key}
-              type="button"
-              onClick={() => setFilterType(tab.key)}
-              className={`px-3.5 py-1.5 rounded-xl text-xs font-bold transition-all shrink-0 border cursor-pointer ${
-                filterType === tab.key
-                  ? 'bg-[#E11D48] text-white border-[#E11D48] shadow-sm'
-                  : 'bg-[#141620] text-zinc-400 border-white/[0.08] hover:text-white hover:border-white/20'
-              }`}
-            >
-              {tab.label}
-            </button>
-          ))}
+        <div className="flex flex-wrap items-center justify-between gap-2 pb-1">
+          <div className="flex items-center gap-1.5 overflow-x-auto scrollbar-none">
+            {[
+              { key: 'all' as const, label: 'Barchasi' },
+              { key: 'photo' as const, label: 'Rasmlar' },
+              { key: 'video' as const, label: 'Videolar' },
+              { key: 'music' as const, label: 'Musiqalar' },
+              { key: 'text' as const, label: 'Matnlar' },
+            ].map((tab) => (
+              <button
+                key={tab.key}
+                type="button"
+                onClick={() => setFilterType(tab.key)}
+                className={`px-3.5 py-1.5 rounded-xl text-xs font-bold transition-all shrink-0 border cursor-pointer ${
+                  filterType === tab.key
+                    ? 'bg-[#E11D48] text-white border-[#E11D48] shadow-sm'
+                    : 'bg-[#141620] text-zinc-400 border-white/[0.08] hover:text-white hover:border-white/20'
+                }`}
+              >
+                {tab.label}
+              </button>
+            ))}
+          </div>
+
+          {viewerIsAdmin && (
+            <div className="flex items-center gap-1 bg-[#141620] p-1 rounded-xl border border-white/[0.08]" data-testid="feed-admin-gender-filter">
+              {[
+                { key: 'all' as const, label: 'Hamma' },
+                { key: 'female' as const, label: 'Qizlar' },
+                { key: 'male' as const, label: 'Yigitlar' },
+              ].map((gTab) => (
+                <button
+                  key={gTab.key}
+                  type="button"
+                  data-testid={`feed-gender-filter-${gTab.key}`}
+                  onClick={() => setAdminGenderFilter(gTab.key)}
+                  className={`px-2.5 py-1 rounded-lg text-[11px] font-bold transition cursor-pointer ${
+                    adminGenderFilter === gTab.key
+                      ? 'bg-amber-500/20 text-amber-200 border border-amber-400/30'
+                      : 'text-zinc-400 hover:text-white'
+                  }`}
+                >
+                  {gTab.label}
+                </button>
+              ))}
+            </div>
+          )}
         </div>
       )}
 
@@ -1170,13 +1219,9 @@ export const PostsFeed: React.FC<PostsFeedProps> = ({
             const comments = Array.isArray(post.comments) ? post.comments : [];
             const isCommentsOpen = isPostCommentsOpen(expandedComments, post.id);
 
-            const canDelete = Boolean(
-              currentUser &&
-                (currentUser.uid === post.authorUid ||
-                  currentUser.role === 'admin' ||
-                  currentUser.isAdmin ||
-                  currentUser.id === 'ALOV-ADMIN')
-            );
+            const canDelete = canUserDeletePost(post, currentUser);
+            const authorGender = resolvePostAuthorGender(post, liveAuthor);
+            const isAdminModeratorDelete = viewerIsAdmin && currentUser?.uid !== post.authorUid;
 
             const resolvedEmbedUrl =
               post.embedUrl ||
@@ -1244,6 +1289,17 @@ export const PostsFeed: React.FC<PostsFeedProps> = ({
                           {authorName}
                         </span>
                         {authorVerified && <ShieldCheck className="w-3.5 h-3.5 text-emerald-400 shrink-0" />}
+                        {viewerIsAdmin && authorGender && (
+                          <span
+                            className={`px-1.5 py-0.5 rounded-md text-[9.5px] font-bold border ${
+                              authorGender === 'female'
+                                ? 'bg-pink-500/15 text-pink-300 border-pink-500/30'
+                                : 'bg-sky-500/15 text-sky-300 border-sky-500/30'
+                            }`}
+                          >
+                            {authorGender === 'female' ? 'Qiz' : 'Yigit'}
+                          </span>
+                        )}
                         {authorUsername && (
                           <span className="text-[11px] font-semibold text-zinc-400 font-mono">
                             {formatUsernameDisplay(authorUsername)}
@@ -1272,9 +1328,15 @@ export const PostsFeed: React.FC<PostsFeedProps> = ({
                       onClick={() => handleDeletePost(post.id)}
                       aria-label="Postni o'chirish"
                       data-testid={`delete-post-btn-${post.id}`}
-                      className="p-2 rounded-xl text-zinc-400 hover:text-rose-400 hover:bg-rose-500/10 transition-colors cursor-pointer"
+                      title={isAdminModeratorDelete ? "Admin sifatida postni o'chirish" : "Postni o'chirish"}
+                      className={
+                        isAdminModeratorDelete
+                          ? 'px-2.5 py-1.5 rounded-xl bg-rose-500/15 hover:bg-rose-600 text-rose-300 hover:text-white border border-rose-500/30 text-[11px] font-bold transition flex items-center gap-1 shrink-0 cursor-pointer'
+                          : 'p-2 rounded-xl text-zinc-400 hover:text-rose-400 hover:bg-rose-500/10 transition-colors cursor-pointer'
+                      }
                     >
-                      <Trash2 className="w-4 h-4" />
+                      <Trash2 className="w-3.5 h-3.5" />
+                      {isAdminModeratorDelete && <span>O&apos;chirish</span>}
                     </button>
                   )}
                 </div>

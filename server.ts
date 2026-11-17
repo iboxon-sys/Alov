@@ -3,6 +3,7 @@ import { fileURLToPath } from 'url';
 import path from 'path';
 import http from 'http';
 import fs from 'fs';
+import crypto from 'crypto';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
 import { Server as SocketIOServer } from 'socket.io';
@@ -65,6 +66,13 @@ import {
   type PostItem,
   type PostComment
 } from './src/utils/posts';
+import {
+  getStreamRoomName,
+  getLegacyStreamRoomName,
+  normalizeStreamChatMessage,
+  resolveStreamTargetSocketId,
+  type StreamRoomState,
+} from './src/utils/liveStream';
 import { formatPhoneNumberPretty } from './src/utils/phone';
 import {
   buildCoinPurchaseRequest,
@@ -91,6 +99,7 @@ import {
   propagateProfileUpdateAcrossStores,
   userSharesIdentity,
 } from './src/utils/profileSync';
+import { isAllowedCorsOrigin } from './src/utils/microFrontendBridge';
 
 dotenv.config();
 
@@ -149,9 +158,23 @@ async function startServer() {
           fontSrc: ["'self'", 'https://fonts.gstatic.com', 'data:'],
           imgSrc: ["'self'", 'data:', 'blob:', 'https:', 'http:'],
           mediaSrc: ["'self'", 'data:', 'blob:', 'https:', 'http:'],
-          connectSrc: ["'self'", 'ws:', 'wss:', 'https:', 'http:', 'blob:', 'https://challenges.cloudflare.com'],
+          connectSrc: [
+            "'self'",
+            'ws:',
+            'wss:',
+            'https:',
+            'http:',
+            'blob:',
+            'https://challenges.cloudflare.com',
+            'https://alov-mu.vercel.app',
+            'wss://alov-mu.vercel.app',
+            'https://alov.onrender.com',
+            'wss://alov.onrender.com',
+          ],
           frameSrc: [
             "'self'",
+            'https://alov-mu.vercel.app',
+            'https://*.vercel.app',
             'https://www.youtube.com',
             'https://www.youtube-nocookie.com',
             'https://www.tiktok.com',
@@ -170,6 +193,12 @@ async function startServer() {
           ],
           frameAncestors: [
             "'self'",
+            'https://alov.onrender.com',
+            'https://*.onrender.com',
+            'https://alov.uz',
+            'https://www.alov.uz',
+            'https://alov-mu.vercel.app',
+            'https://*.vercel.app',
             'https://aistudio.google.com',
             'https://*.google.com',
             'https://*.googleusercontent.com',
@@ -189,27 +218,47 @@ async function startServer() {
     })
   );
 
-  // Enforce X-Frame-Options: SAMEORIGIN on production domains while keeping AI Studio preview iframe functional
+  // Enforce X-Frame-Options: SAMEORIGIN on standard pages while allowing AI Studio preview and Vercel micro-frontend embed routes
   app.use((req, res, next) => {
     const forwardedHost = String(req.headers['x-forwarded-host'] || req.headers.host || '');
     const referer = String(req.headers.referer || '');
+    const cleanPath = String(req.path || '').toLowerCase();
+    const isEmbedRoute =
+      cleanPath === '/efir' ||
+      cleanPath === '/postlar' ||
+      cleanPath === '/chatroulette' ||
+      cleanPath === '/chatruletka';
     const isAiStudioPreview =
       forwardedHost.includes('.run.app') ||
       referer.includes('aistudio.google.com') ||
-      referer.includes('googleusercontent.com');
-    if (!isAiStudioPreview) {
+      referer.includes('googleusercontent.com') ||
+      referer.includes('alov.onrender.com') ||
+      referer.includes('alov-mu.vercel.app');
+    if (!isAiStudioPreview && !isEmbedRoute) {
       res.setHeader('X-Frame-Options', 'SAMEORIGIN');
     }
+    res.setHeader('Permissions-Policy', 'camera=*, microphone=*, display-capture=*, geolocation=*');
     next();
   });
 
-  // Dynamic CORS & Cross-Origin support for Render and local deployments
+  // Dynamic CORS & Cross-Origin support for Vercel micro-frontend (https://alov-mu.vercel.app), Render, and local deployments
   app.use((req, res, next) => {
-    res.header('Access-Control-Allow-Origin', '*');
-    res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
-    res.header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept, Authorization');
+    const requestOrigin = typeof req.headers.origin === 'string' ? req.headers.origin : '';
+    const extraCors = (process.env.ALLOWED_ORIGINS || '').split(',').map((s) => s.trim()).filter(Boolean);
+    if (requestOrigin && isAllowedCorsOrigin(requestOrigin, extraCors)) {
+      res.header('Access-Control-Allow-Origin', requestOrigin);
+      res.header('Vary', 'Origin');
+      res.header('Access-Control-Allow-Credentials', 'true');
+    } else if (!requestOrigin) {
+      res.header('Access-Control-Allow-Origin', '*');
+    }
+    res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, PATCH, DELETE, OPTIONS');
+    res.header(
+      'Access-Control-Allow-Headers',
+      'Origin, X-Requested-With, Content-Type, Accept, Authorization, X-Alov-Token, X-User-Id'
+    );
     if (req.method === 'OPTIONS') {
-      return res.sendStatus(200);
+      return res.sendStatus(204);
     }
     next();
   });
@@ -2589,11 +2638,60 @@ async function startServer() {
       res.json({
         success: true,
         message: 'Muvaffaqiyatli kirdingiz',
-        token: `JWT_LOGIN_${matchedUser.uid}_${Date.now()}`,
+        token: createAuthBridgeToken(matchedUser.uid),
         user: matchedUser
       });
     } catch (err: any) {
       res.status(500).json({ success: false, error: err.message });
+    }
+  });
+
+  const BRIDGE_TOKEN_SECRET = process.env.SESSION_SECRET || 'alov_render_vercel_bridge_secret_v1';
+  function createAuthBridgeToken(uid: string): string {
+    const cleanUid = String(uid || '').trim();
+    const sig = crypto
+      .createHmac('sha256', BRIDGE_TOKEN_SECRET)
+      .update(cleanUid)
+      .digest('hex')
+      .slice(0, 32);
+    return `alov_bt_${cleanUid}_${sig}`;
+  }
+
+  // Render <-> Vercel Micro-Frontend Session Bridge Endpoint
+  app.post('/api/auth/bridge-session', (req, res) => {
+    try {
+      const authHeader = String(req.headers.authorization || '').replace(/^Bearer\s+/i, '').trim();
+      const rawToken = String(req.body?.token || req.headers['x-alov-token'] || authHeader || '').trim();
+      const rawUserId = String(req.body?.userId || req.body?.uid || req.headers['x-user-id'] || '').trim();
+
+      let targetUid = rawUserId;
+      if (!targetUid && rawToken.startsWith('alov_bt_')) {
+        const body = rawToken.slice('alov_bt_'.length);
+        const lastIdx = body.lastIndexOf('_');
+        if (lastIdx > 0) targetUid = body.slice(0, lastIdx);
+      } else if (!targetUid && rawToken.startsWith('alov_session_')) {
+        targetUid = rawToken.slice('alov_session_'.length);
+      }
+
+      if (!targetUid) {
+        return res.status(400).json({ success: false, error: 'userId yoki token talab qilinadi' });
+      }
+
+      const found = findUserByUidOrId(targetUid);
+      if (!found) {
+        return res.status(404).json({ success: false, error: 'Foydalanuvchi topilmadi' });
+      }
+
+      normalizeAndReleaseUser(found);
+      const canonicalUid = found.uid || targetUid;
+      return res.json({
+        success: true,
+        token: createAuthBridgeToken(canonicalUid),
+        userId: canonicalUid,
+        user: found,
+      });
+    } catch (err: any) {
+      return res.status(500).json({ success: false, error: err?.message || 'Bridge session xatoligi' });
     }
   });
 
@@ -2936,6 +3034,7 @@ Suhbatlashish qoidalaringiz:
   }
 
   function loadUsersFromDisk() {
+    let prunedOnLoad = false;
     try {
       if (fs.existsSync(USERS_DB_FILE)) {
         const raw = fs.readFileSync(USERS_DB_FILE, 'utf-8');
@@ -2945,6 +3044,7 @@ Suhbatlashish qoidalaringiz:
             if (u && u.uid) {
               normalizeAndReleaseUser(u);
               if (!canPersistUserProfile(u)) {
+                prunedOnLoad = true;
                 continue;
               }
               const tgHandle = normalizeTelegramHandle(u.telegram);
@@ -2982,6 +3082,10 @@ Suhbatlashish qoidalaringiz:
       }
     } catch (e) {
       console.warn("Could not load users_db.json:", e);
+    }
+
+    if (prunedOnLoad) {
+      saveUsersToDisk();
     }
 
     // Always ensure the sole platform admin (@Salikh_07) exists after a clean DB reset
@@ -3306,8 +3410,15 @@ Suhbatlashish qoidalaringiz:
   const server = http.createServer(app);
   const io = new SocketIOServer(server, {
     cors: {
-      origin: '*',
-      methods: ['GET', 'POST']
+      origin: (origin, callback) => {
+        const extraCors = (process.env.ALLOWED_ORIGINS || '').split(',').map((s) => s.trim()).filter(Boolean);
+        if (!origin || isAllowedCorsOrigin(origin, extraCors)) {
+          return callback(null, true);
+        }
+        return callback(new Error(`Origin ${origin} not allowed by Socket.io CORS`));
+      },
+      methods: ['GET', 'POST'],
+      credentials: true,
     }
   });
 
@@ -3345,6 +3456,68 @@ Suhbatlashish qoidalaringiz:
   // Real-time Presence Registry & Viewer Counters
   const presenceRegistry = new PresenceRegistry();
   const streamViewersMap: Record<string, Set<string>> = {};
+  const streamRoomsMap: Record<string, StreamRoomState> = {};
+  const rouletteQueue: Array<{
+    socketId: string;
+    uid: string;
+    name: string;
+    avatar: string;
+    gender: string;
+  }> = [];
+  const roulettePairs = new Map<string, string>();
+
+  const getOrCreateStreamRoom = (streamId: string): StreamRoomState => {
+    if (!streamRoomsMap[streamId]) {
+      streamRoomsMap[streamId] = {
+        hostSocketId: null,
+        hostUid: liveStreamsStore[streamId]?.hostUid || null,
+        participants: new Set<string>(),
+      };
+    }
+    if (!streamViewersMap[streamId]) {
+      streamViewersMap[streamId] = streamRoomsMap[streamId].participants;
+    }
+    return streamRoomsMap[streamId];
+  };
+
+  const broadcastStreamViewerCount = (streamId: string) => {
+    const room = streamRoomsMap[streamId];
+    const count = room ? room.participants.size : (streamViewersMap[streamId]?.size || 0);
+    if (liveStreamsStore[streamId]) {
+      liveStreamsStore[streamId].viewerCount = count;
+    }
+    const payload = { streamId, count };
+    const canonicalRoom = getStreamRoomName(streamId);
+    const legacyRoom = getLegacyStreamRoomName(streamId);
+    io.to(canonicalRoom).emit('viewer_count_update', payload);
+    io.to(canonicalRoom).emit('live_stream_viewer_count', payload);
+    io.to(legacyRoom).emit('live_stream_viewer_count', payload);
+  };
+
+  const finalizeStreamEnded = (streamId: string, hostUid?: string) => {
+    if (streamId && liveStreamsStore[streamId]) {
+      liveStreamsStore[streamId].status = 'ended';
+    }
+    const resolvedHostUid = hostUid || liveStreamsStore[streamId]?.hostUid || streamRoomsMap[streamId]?.hostUid;
+    if (resolvedHostUid) {
+      const hostUser = usersStore.get(resolvedHostUid);
+      if (hostUser) {
+        const updatedHost = { ...hostUser, isLive: false, liveStreamId: null, liveTitle: null };
+        usersStore.set(resolvedHostUid, updatedHost);
+        io.emit('user_updated', updatedHost);
+      }
+    }
+    if (streamId) {
+      const canonicalRoom = getStreamRoomName(streamId);
+      const legacyRoom = getLegacyStreamRoomName(streamId);
+      const endPayload = { streamId, hostUid: resolvedHostUid || null };
+      io.to(canonicalRoom).emit('stream_ended', endPayload);
+      io.to(canonicalRoom).emit('stream_stopped', endPayload);
+      io.to(legacyRoom).emit('stream_ended', endPayload);
+      io.to(legacyRoom).emit('stream_stopped', endPayload);
+    }
+    io.emit('stream_stopped', { streamId, hostUid: resolvedHostUid || null });
+  };
 
   const broadcastActiveUsersCount = () => {
     const onlineUserIds = presenceRegistry.getOnlineUserIds();
@@ -3741,7 +3914,13 @@ Suhbatlashish qoidalaringiz:
       }
 
       await dedupeAndPropagateUserProfile(mergedUser, existing, user.uid !== targetUid ? [user.uid] : []);
-      res.json({ success: true, exists: true, isNewUser: false, user: mergedUser });
+      res.json({
+        success: true,
+        exists: true,
+        isNewUser: false,
+        token: createAuthBridgeToken(mergedUser.uid),
+        user: mergedUser,
+      });
     } catch (err: any) {
       res.status(500).json({ error: err.message });
     }
@@ -4797,13 +4976,22 @@ Suhbatlashish qoidalaringiz:
   app.delete('/api/posts/:postId', async (req, res) => {
     try {
       const { postId } = req.params;
-      const requesterUid = String(req.body?.uid || req.query.uid || '');
+      const requesterUid = String(req.body?.uid || req.query.uid || '').trim();
       const idx = postsStore.findIndex((p) => p.id === postId);
       if (idx === -1) return res.status(404).json({ success: false, error: 'Post topilmadi' });
 
       const target = postsStore[idx];
-      if (target.authorUid !== requesterUid && !getVerifiedAdmin(requesterUid)) {
-        return res.status(403).json({ success: false, error: 'Postni o\'chirish huquqi yo\'q' });
+      const requesterUser = requesterUid ? findUserByUidOrId(requesterUid) : undefined;
+      const verifiedAdmin = getVerifiedAdmin(requesterUid);
+      const isOwner = Boolean(
+        requesterUid &&
+          (target.authorUid === requesterUid ||
+            (target.authorId && target.authorId === requesterUid) ||
+            (requesterUser && target.authorUid === requesterUser.uid))
+      );
+
+      if (!isOwner && !verifiedAdmin) {
+        return res.status(403).json({ success: false, error: "Postni o'chirish huquqi yo'q" });
       }
       postsStore.splice(idx, 1);
       savePostsToDisk();
@@ -4829,8 +5017,20 @@ Suhbatlashish qoidalaringiz:
 
   // --- Admin Endpoints (@Salikh_07 / role: admin) ---
   function getVerifiedAdmin(adminUid: string) {
-    if (!adminUid) return null;
-    const adminUser = usersStore.get(adminUid);
+    const clean = String(adminUid || '').trim();
+    if (!clean) return null;
+    let adminUser = findUserByUidOrId(clean);
+    if (!adminUser && clean.startsWith('tg_')) {
+      const chatIdNum = Number(clean.slice(3));
+      if (Number.isFinite(chatIdNum) && chatIdNum > 0) {
+        for (const u of usersStore.values()) {
+          if (Number(u.telegramChatId) === chatIdNum && isAdminTelegramUser(u)) {
+            adminUser = u;
+            break;
+          }
+        }
+      }
+    }
     if (!adminUser || !isAdminTelegramUser(adminUser)) return null;
     return adminUser;
   }
@@ -4854,6 +5054,10 @@ Suhbatlashish qoidalaringiz:
       return u;
     });
 
+    const posts = [...postsStore]
+      .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
+      .map(enrichPost);
+
     res.json({
       success: true,
       stats: {
@@ -4862,10 +5066,12 @@ Suhbatlashish qoidalaringiz:
         totalCoins,
         totalDiamonds,
         pendingDiamonds,
+        totalPosts: posts.length,
         pendingWithdrawalsCount: withdrawalsStore.filter((w) => w.status === 'pending').length,
         pendingCoinRequestsCount: coinRequestsStore.filter((r) => r.status === 'pending').length,
       },
       users,
+      posts,
       withdrawals: withdrawalsStore,
       coinRequests: coinRequestsStore,
       transactions: transactionsStore.slice(0, 120),
@@ -5477,18 +5683,7 @@ Suhbatlashish qoidalaringiz:
   app.post('/api/live-streams/stop', (req, res) => {
     try {
       const { streamId, hostUid } = req.body;
-      if (streamId && liveStreamsStore[streamId]) {
-        liveStreamsStore[streamId].status = 'ended';
-      }
-      if (hostUid) {
-        const hostUser = usersStore.get(hostUid);
-        if (hostUser) {
-          const updatedHost = { ...hostUser, isLive: false, liveStreamId: null, liveTitle: null };
-          usersStore.set(hostUid, updatedHost);
-          io.emit('user_updated', updatedHost);
-        }
-      }
-      io.emit('stream_stopped', { streamId, hostUid });
+      finalizeStreamEnded(streamId, hostUid);
       res.json({ success: true });
     } catch (err: any) {
       res.status(500).json({ error: err.message });
@@ -6138,76 +6333,210 @@ Suhbatlashish qoidalaringiz:
       socket.to(chatId).emit('user_typing', { uid, isTyping });
     });
 
-    // --- ISOLATED LIVE STREAM CHAT & WEBRTC SIGNALING ---
-    socket.on('join_live_stream', ({ streamId, user }) => {
+    // --- ISOLATED LIVE STREAM ROOM, CHAT, REACTIONS & WEBRTC SIGNALING ---
+    const handleJoinStream = (payload: any = {}) => {
+      const streamId = String(payload.streamId || '').trim();
       if (!streamId) return;
-      socket.join(`live_stream_${streamId}`);
 
-      if (!streamViewersMap[streamId]) {
-        streamViewersMap[streamId] = new Set();
+      const user = payload.user || {};
+      const canonicalRoom = getStreamRoomName(streamId);
+      const legacyRoom = getLegacyStreamRoomName(streamId);
+
+      socket.join(canonicalRoom);
+      socket.join(legacyRoom);
+
+      const room = getOrCreateStreamRoom(streamId);
+      room.participants.add(socket.id);
+
+      const streamHostUid = liveStreamsStore[streamId]?.hostUid || room.hostUid || null;
+      const isHost = Boolean(
+        payload.isHost === true ||
+          payload.role === 'host' ||
+          user?.role === 'host' ||
+          (streamHostUid && user?.uid && String(user.uid) === String(streamHostUid))
+      );
+
+      if (isHost) {
+        room.hostSocketId = socket.id;
+        if (user?.uid) {
+          room.hostUid = String(user.uid);
+        }
       }
-      streamViewersMap[streamId].add(socket.id);
 
       presenceRegistry.setStream(socket.id, streamId);
 
-      const viewerCount = streamViewersMap[streamId].size;
-      io.to(`live_stream_${streamId}`).emit('live_stream_viewer_count', { streamId, count: viewerCount });
+      // Broadcast real-time viewer count update to stream_${streamId}
+      broadcastStreamViewerCount(streamId);
 
-      // Send stored chat history to newly joined viewer
+      // Send stored chat history to newly joined participant
       const history = liveStreamChatStore[streamId] || [];
+      socket.emit('stream_chat_history', history);
       socket.emit('live_stream_chat_history', history);
 
-      socket.to(`live_stream_${streamId}`).emit('viewer_joined_stream', {
-        socketId: socket.id,
-        user
-      });
-    });
+      if (isHost) {
+        socket.to(canonicalRoom).emit('host_ready', {
+          streamId,
+          hostSocketId: socket.id,
+          hostUid: room.hostUid,
+        });
+      } else {
+        socket.to(canonicalRoom).emit('viewer_joined_stream', {
+          streamId,
+          socketId: socket.id,
+          user,
+        });
+      }
+    };
 
-    socket.on('send_live_chat_message', ({ streamId, message }) => {
-      if (!streamId || !message) return;
+    const handleLeaveStream = (payload: any = {}) => {
+      const streamId = String(payload.streamId || '').trim();
+      if (!streamId) return;
+
+      const room = streamRoomsMap[streamId];
+      if (room) {
+        room.participants.delete(socket.id);
+        if (room.hostSocketId === socket.id) {
+          room.hostSocketId = null;
+        }
+      }
+      if (streamViewersMap[streamId]) {
+        streamViewersMap[streamId].delete(socket.id);
+      }
+
+      socket.leave(getStreamRoomName(streamId));
+      socket.leave(getLegacyStreamRoomName(streamId));
+      broadcastStreamViewerCount(streamId);
+    };
+
+    const handleStreamMessage = (payload: any = {}) => {
+      const streamId = String(payload.streamId || '').trim();
+      if (!streamId) return;
+
+      const rawMessage = payload.message && typeof payload.message === 'object' ? payload.message : payload;
+      const room = streamRoomsMap[streamId];
+      const hostUid = liveStreamsStore[streamId]?.hostUid || room?.hostUid || null;
+      const normalized = normalizeStreamChatMessage(
+        {
+          ...rawMessage,
+          isHost: Boolean(
+            rawMessage?.isHost ||
+              (room?.hostSocketId && room.hostSocketId === socket.id) ||
+              (hostUid && rawMessage?.senderUid === hostUid)
+          ),
+        },
+        hostUid,
+        streamId
+      );
+      if (!normalized) return;
 
       if (!liveStreamChatStore[streamId]) {
         liveStreamChatStore[streamId] = [];
       }
-      liveStreamChatStore[streamId].push(message);
-      if (liveStreamChatStore[streamId].length > 100) {
-        liveStreamChatStore[streamId].shift();
+      if (!liveStreamChatStore[streamId].some((m: any) => m.id === normalized.id)) {
+        liveStreamChatStore[streamId].push(normalized);
+        if (liveStreamChatStore[streamId].length > 100) {
+          liveStreamChatStore[streamId].shift();
+        }
       }
 
-      // Broadcast chat message strictly to this stream room only
-      io.to(`live_stream_${streamId}`).emit('receive_live_chat_message', message);
+      const canonicalRoom = getStreamRoomName(streamId);
+      io.to(canonicalRoom).emit('receive_stream_message', normalized);
+      io.to(canonicalRoom).emit('receive_live_chat_message', normalized);
+    };
+
+    socket.on('join_stream', handleJoinStream);
+    socket.on('join_live_stream', handleJoinStream);
+
+    socket.on('leave_stream', handleLeaveStream);
+    socket.on('leave_live_stream', handleLeaveStream);
+
+    socket.on('send_stream_message', handleStreamMessage);
+    socket.on('send_live_chat_message', handleStreamMessage);
+
+    socket.on('send_stream_like', ({ streamId, variant, senderUid }: any = {}) => {
+      const cleanId = String(streamId || '').trim();
+      if (!cleanId) return;
+      io.to(getStreamRoomName(cleanId)).emit('receive_stream_like', {
+        streamId: cleanId,
+        id: `like_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+        variant: variant === 'flame' ? 'flame' : 'heart',
+        senderUid: senderUid || presenceRegistry.getSocketInfo(socket.id)?.uid || null,
+      });
     });
 
-    socket.on('leave_live_stream', ({ streamId }) => {
-      if (streamId && streamViewersMap[streamId]) {
-        streamViewersMap[streamId].delete(socket.id);
-        const count = streamViewersMap[streamId].size;
-        io.to(`live_stream_${streamId}`).emit('live_stream_viewer_count', { streamId, count });
-      }
-      socket.leave(`live_stream_${streamId}`);
+    socket.on('end_stream', ({ streamId, hostUid }: any = {}) => {
+      const cleanId = String(streamId || '').trim();
+      if (!cleanId) return;
+      finalizeStreamEnded(cleanId, hostUid);
     });
 
-    socket.on('live_stream_offer', ({ streamId, targetSocketId, offer, sender }) => {
-      io.to(targetSocketId).emit('live_stream_offer', {
+    socket.on('offer', ({ streamId, targetSocketId, offer, sender }: any = {}) => {
+      const cleanId = String(streamId || '').trim();
+      const target = cleanId
+        ? resolveStreamTargetSocketId(streamRoomsMap[cleanId], targetSocketId)
+        : targetSocketId;
+      if (!target || !offer) return;
+      io.to(target).emit('offer', {
+        streamId: cleanId,
         senderSocketId: socket.id,
         offer,
-        sender
+        sender,
       });
     });
 
-    socket.on('live_stream_answer', ({ streamId, targetSocketId, answer, sender }) => {
-      io.to(targetSocketId).emit('live_stream_answer', {
+    socket.on('answer', ({ streamId, targetSocketId, answer, sender }: any = {}) => {
+      const cleanId = String(streamId || '').trim();
+      const target = cleanId
+        ? resolveStreamTargetSocketId(streamRoomsMap[cleanId], targetSocketId)
+        : targetSocketId;
+      if (!target || !answer) return;
+      io.to(target).emit('answer', {
+        streamId: cleanId,
         senderSocketId: socket.id,
         answer,
-        sender
+        sender,
       });
     });
 
-    socket.on('live_stream_ice_candidate', ({ streamId, targetSocketId, candidate, sender }) => {
-      io.to(targetSocketId).emit('live_stream_ice_candidate', {
+    socket.on('live_stream_offer', ({ streamId, targetSocketId, offer, sender }: any = {}) => {
+      const cleanId = String(streamId || '').trim();
+      const target = cleanId
+        ? resolveStreamTargetSocketId(streamRoomsMap[cleanId], targetSocketId)
+        : targetSocketId;
+      if (!target || !offer) return;
+      io.to(target).emit('live_stream_offer', {
+        streamId: cleanId,
+        senderSocketId: socket.id,
+        offer,
+        sender,
+      });
+    });
+
+    socket.on('live_stream_answer', ({ streamId, targetSocketId, answer, sender }: any = {}) => {
+      const cleanId = String(streamId || '').trim();
+      const target = cleanId
+        ? resolveStreamTargetSocketId(streamRoomsMap[cleanId], targetSocketId)
+        : targetSocketId;
+      if (!target || !answer) return;
+      io.to(target).emit('live_stream_answer', {
+        streamId: cleanId,
+        senderSocketId: socket.id,
+        answer,
+        sender,
+      });
+    });
+
+    socket.on('live_stream_ice_candidate', ({ streamId, targetSocketId, candidate, sender }: any = {}) => {
+      const cleanId = String(streamId || '').trim();
+      const target = cleanId
+        ? resolveStreamTargetSocketId(streamRoomsMap[cleanId], targetSocketId)
+        : targetSocketId;
+      if (!target || !candidate) return;
+      io.to(target).emit('live_stream_ice_candidate', {
+        streamId: cleanId,
         senderSocketId: socket.id,
         candidate,
-        sender
+        sender,
       });
     });
 
@@ -6296,7 +6625,19 @@ Suhbatlashish qoidalaringiz:
       }
     });
 
-    socket.on('ice-candidate', ({ targetSocketId, targetUid, candidate }) => {
+    socket.on('ice-candidate', ({ streamId, targetSocketId, targetUid, candidate, sender }: any = {}) => {
+      if (streamId) {
+        const cleanId = String(streamId).trim();
+        const target = resolveStreamTargetSocketId(streamRoomsMap[cleanId], targetSocketId);
+        if (!target || !candidate) return;
+        io.to(target).emit('ice-candidate', {
+          streamId: cleanId,
+          senderSocketId: socket.id,
+          candidate,
+          sender,
+        });
+        return;
+      }
       const payload = {
         candidate,
         senderSocketId: socket.id
@@ -6331,9 +6672,92 @@ Suhbatlashish qoidalaringiz:
       }
     });
 
+    // --- CHAT-ROULETTE (CHATRULETKA) MATCHMAKING & WEBRTC SIGNALING ---
+    const leaveRouletteForSocket = (sockId: string, notifyPartner = true) => {
+      for (let i = rouletteQueue.length - 1; i >= 0; i -= 1) {
+        if (rouletteQueue[i].socketId === sockId) {
+          rouletteQueue.splice(i, 1);
+        }
+      }
+      const partnerSockId = roulettePairs.get(sockId);
+      if (partnerSockId) {
+        roulettePairs.delete(sockId);
+        roulettePairs.delete(partnerSockId);
+        if (notifyPartner) {
+          io.to(partnerSockId).emit('roulette_partner_left', { partnerSocketId: sockId });
+        }
+      }
+    };
+
+    const joinRouletteForSocket = (payload: any = {}) => {
+      leaveRouletteForSocket(socket.id, true);
+      const myInfo = {
+        socketId: socket.id,
+        uid: String(payload.uid || presenceRegistry.getSocketInfo(socket.id)?.uid || socket.id),
+        name: String(payload.name || 'Alov Foydalanuvchisi'),
+        avatar: String(payload.avatar || ''),
+        gender: String(payload.gender || ''),
+      };
+
+      const matchIdx = rouletteQueue.findIndex(
+        (candidate) => candidate.socketId !== socket.id && candidate.uid !== myInfo.uid
+      );
+
+      if (matchIdx >= 0) {
+        const partner = rouletteQueue.splice(matchIdx, 1)[0];
+        roulettePairs.set(socket.id, partner.socketId);
+        roulettePairs.set(partner.socketId, socket.id);
+
+        io.to(socket.id).emit('roulette_matched', {
+          partner,
+          partnerSocketId: partner.socketId,
+          initiator: true,
+        });
+        io.to(partner.socketId).emit('roulette_matched', {
+          partner: myInfo,
+          partnerSocketId: socket.id,
+          initiator: false,
+        });
+      } else {
+        rouletteQueue.push(myInfo);
+        socket.emit('roulette_waiting', { position: rouletteQueue.length });
+      }
+    };
+
+    socket.on('join_roulette', joinRouletteForSocket);
+    socket.on('roulette_next', joinRouletteForSocket);
+    socket.on('leave_roulette', () => {
+      leaveRouletteForSocket(socket.id, true);
+    });
+
+    socket.on('roulette_offer', ({ targetSocketId, offer }: any = {}) => {
+      if (!targetSocketId || !offer) return;
+      io.to(targetSocketId).emit('roulette_offer', {
+        senderSocketId: socket.id,
+        offer,
+      });
+    });
+
+    socket.on('roulette_answer', ({ targetSocketId, answer }: any = {}) => {
+      if (!targetSocketId || !answer) return;
+      io.to(targetSocketId).emit('roulette_answer', {
+        senderSocketId: socket.id,
+        answer,
+      });
+    });
+
+    socket.on('roulette_ice_candidate', ({ targetSocketId, candidate }: any = {}) => {
+      if (!targetSocketId || !candidate) return;
+      io.to(targetSocketId).emit('roulette_ice_candidate', {
+        senderSocketId: socket.id,
+        candidate,
+      });
+    });
+
 
     socket.on('disconnect', () => {
       console.log('Client disconnected:', socket.id);
+      leaveRouletteForSocket(socket.id, true);
       const disconnectRes = presenceRegistry.disconnectSocket(socket.id);
       const uid = disconnectRes.uid;
 
@@ -6350,13 +6774,19 @@ Suhbatlashish qoidalaringiz:
         }
       }
 
-      if (disconnectRes.streamId && streamViewersMap[disconnectRes.streamId]) {
-        streamViewersMap[disconnectRes.streamId].delete(socket.id);
-        const count = streamViewersMap[disconnectRes.streamId].size;
-        io.to(`live_stream_${disconnectRes.streamId}`).emit('live_stream_viewer_count', { 
-          streamId: disconnectRes.streamId, 
-          count 
-        });
+      if (disconnectRes.streamId) {
+        const sid = disconnectRes.streamId;
+        const room = streamRoomsMap[sid];
+        if (room) {
+          room.participants.delete(socket.id);
+          if (room.hostSocketId === socket.id) {
+            room.hostSocketId = null;
+          }
+        }
+        if (streamViewersMap[sid]) {
+          streamViewersMap[sid].delete(socket.id);
+        }
+        broadcastStreamViewerCount(sid);
       }
 
       broadcastActiveUsersCount();

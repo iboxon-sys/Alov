@@ -139,10 +139,32 @@ export function telegramInputMatchesBotRecord(
   return false;
 }
 
+const SYNTHETIC_PROFILE_PREFIX_RE = /^(test|demo|mock|seed|fake)_/i;
+const KNOWN_TEST_HANDLES = new Set([
+  'madina_live_01',
+  'aziz_viewer_02',
+  'madina_perm_01',
+]);
+
+export function isSyntheticDemoProfile(user: any): boolean {
+  if (!user || typeof user !== 'object') return false;
+  if (isAdminTelegramUser(user)) return false;
+  if (user.isDemo === true || user.isMock === true || user.isTest === true) return true;
+  const uid = String(user.uid || '').trim();
+  const id = String(user.id || '').trim();
+  if (SYNTHETIC_PROFILE_PREFIX_RE.test(uid) || SYNTHETIC_PROFILE_PREFIX_RE.test(id)) {
+    return true;
+  }
+  const username = String(user.username || '').trim().toLowerCase().replace(/^@/, '');
+  if (username && KNOWN_TEST_HANDLES.has(username)) return true;
+  return false;
+}
+
 export function canPersistUserProfile(user: any): boolean {
   if (!user || typeof user !== 'object') return false;
   if (!user.uid && !user.id) return false;
   if (isAdminTelegramUser(user)) return true;
+  if (isSyntheticDemoProfile(user)) return false;
   if (user.isProfileCompleted !== true) return false;
   if (user.faceId?.verified !== true) return false;
   if (user.gender !== 'male' && user.gender !== 'female') return false;

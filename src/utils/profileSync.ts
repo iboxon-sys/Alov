@@ -318,3 +318,331 @@ export function propagateProfileUpdateAcrossStores(
 
   return result;
 }
+
+const STRING_LIST_FIELDS = ['photos', 'gallery', 'media', 'interests'] as const;
+
+export function deduplicateStringList(items: unknown): string[] {
+  if (!Array.isArray(items)) return [];
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const item of items) {
+    const clean = typeof item === 'string' ? item.trim() : '';
+    if (!clean || seen.has(clean)) continue;
+    seen.add(clean);
+    out.push(clean);
+  }
+  return out;
+}
+
+export function sanitizeUserProfileCollections<T extends Record<string, any>>(user: T): T {
+  if (!user || typeof user !== 'object') return user;
+  const next: Record<string, any> = { ...user };
+  for (const field of STRING_LIST_FIELDS) {
+    if (Array.isArray(next[field])) {
+      next[field] = deduplicateStringList(next[field]);
+    }
+  }
+  return next as T;
+}
+
+export function extractUserMediaUrls(user: any): string[] {
+  if (!user || typeof user !== 'object') return [];
+  const urls: string[] = [];
+  const push = (val: unknown) => {
+    const clean = typeof val === 'string' ? val.trim() : '';
+    if (clean) urls.push(clean);
+  };
+  push(user.avatar);
+  push(user.banner);
+  push(user.videoUrl);
+  push(user.faceId?.capturedPhotoUrl);
+  for (const field of ['photos', 'gallery', 'media'] as const) {
+    if (Array.isArray(user[field])) {
+      for (const item of user[field]) {
+        push(item);
+      }
+    }
+  }
+  return deduplicateStringList(urls);
+}
+
+export function collectReplacedUserMediaUrls(previousUser: any, nextUser: any): string[] {
+  if (!previousUser || typeof previousUser !== 'object') return [];
+  const prevUrls = extractUserMediaUrls(previousUser);
+  const nextSet = new Set(extractUserMediaUrls(nextUser));
+  return prevUrls.filter((url) => url.startsWith('/api/media/') && !nextSet.has(url));
+}
+
+export function deduplicateUsersList<T extends Record<string, any>>(
+  users: T[]
+): { users: T[]; removedUids: string[] } {
+  if (!Array.isArray(users) || users.length === 0) {
+    return { users: [], removedUids: [] };
+  }
+
+  const groups: T[][] = [];
+  for (const candidate of users) {
+    if (!candidate || typeof candidate !== 'object' || !candidate.uid) continue;
+    let matchedGroup: T[] | null = null;
+    for (const group of groups) {
+      if (group.some((member) => userSharesIdentity(member, candidate))) {
+        matchedGroup = group;
+        break;
+      }
+    }
+    if (matchedGroup) {
+      matchedGroup.push(candidate);
+    } else {
+      groups.push([candidate]);
+    }
+  }
+
+  const canonicalUsers: T[] = [];
+  const removedUids: string[] = [];
+
+  for (const group of groups) {
+    const winner = pickNewestCanonicalUser(group) as T | null;
+    if (!winner) continue;
+    canonicalUsers.push(sanitizeUserProfileCollections(winner));
+    for (const member of group) {
+      if (member.uid && member.uid !== winner.uid) {
+        removedUids.push(String(member.uid));
+      }
+    }
+  }
+
+  return { users: canonicalUsers, removedUids };
+}
+
+export function upsertUniqueUserInList<T extends Record<string, any>>(
+  users: T[],
+  updatedUser: T | null | undefined
+): T[] {
+  if (!updatedUser || typeof updatedUser !== 'object') return Array.isArray(users) ? users : [];
+  const cleanUpdated = sanitizeUserProfileCollections(updatedUser);
+  const nextUid = String(cleanUpdated.uid || '').trim();
+  const nextId = String(cleanUpdated.id || '').trim();
+  if (!nextUid && !nextId) return Array.isArray(users) ? users : [];
+
+  const list = Array.isArray(users) ? users : [];
+  let inserted = false;
+  const result: T[] = [];
+
+  for (const item of list) {
+    if (!item || typeof item !== 'object') continue;
+    const sameUid = Boolean(nextUid && String(item.uid || '').trim() === nextUid);
+    const sameId = Boolean(nextId && String(item.id || '').trim() === nextId);
+    const sharedIdentity = userSharesIdentity(item, cleanUpdated);
+    if (sameUid || sameId || sharedIdentity) {
+      if (!inserted) {
+        result.push(cleanUpdated);
+        inserted = true;
+      }
+      continue;
+    }
+    result.push(item);
+  }
+
+  if (!inserted) {
+    result.push(cleanUpdated);
+  }
+
+  return result;
+}
+
+export function buildUpdatedUserSnapshot(existing: any, updates: any): any {
+  const base = existing && typeof existing === 'object' ? { ...existing } : {};
+  const incoming = updates && typeof updates === 'object' ? updates : {};
+  const next: Record<string, any> = { ...base };
+
+  for (const [key, val] of Object.entries(incoming)) {
+    if (val === undefined) continue;
+    if (val === null && ['username', 'banner', 'videoUrl', 'bio', 'phone', 'telegram', 'instagram', 'neighborhood', 'avatar'].includes(key)) {
+      next[key] = '';
+      continue;
+    }
+    if (STRING_LIST_FIELDS.includes(key as any) && Array.isArray(val)) {
+      next[key] = deduplicateStringList(val);
+      continue;
+    }
+    next[key] = val;
+  }
+
+  // Never keep stale legacy telegramUsername / first_name / last_name shadows out of sync
+  delete next.telegramUsername;
+
+  return sanitizeUserProfileCollections(next);
+}
+
+export function mergeAuthoritativeUserState(
+  prevUser: any | null | undefined,
+  serverUser: any | null | undefined
+): any | null {
+  if (!serverUser || typeof serverUser !== 'object') return prevUser || null;
+  const clean = sanitizeUserProfileCollections({ ...serverUser });
+  if (!clean.authToken && prevUser?.authToken) {
+    clean.authToken = prevUser.authToken;
+  }
+  return clean;
+}
+
+export interface StorageLike {
+  length: number;
+  key(index: number): string | null;
+  getItem(key: string): string | null;
+  setItem(key: string, value: string): void;
+  removeItem(key: string): void;
+}
+
+export interface VersionCacheReconciliationResult {
+  previousVersion: string;
+  currentVersion: string;
+  versionChanged: boolean;
+  clearedKeys: string[];
+  preservedUserId: string;
+  preservedToken: string;
+}
+
+const STALE_SNAPSHOT_PREFIXES = [
+  'alov_user_',
+  'alov_chats_',
+  'alov_msgs_',
+  'alov_posts_',
+];
+
+export function collectStaleCacheKeys(storage: StorageLike): string[] {
+  const keysToRemove: string[] = [];
+  for (let i = 0; i < storage.length; i += 1) {
+    const k = storage.key(i);
+    if (!k) continue;
+    if (
+      k === 'alov_current_user' ||
+      STALE_SNAPSHOT_PREFIXES.some((prefix) => k.startsWith(prefix))
+    ) {
+      keysToRemove.push(k);
+    }
+  }
+  return keysToRemove;
+}
+
+/**
+ * Compares stored `alov_app_version` with the running `currentVersion` BEFORE overwriting it.
+ * Whenever the version changes (or was never stamped alongside an old snapshot), removes stale
+ * cached profile/chat/feed snapshots while preserving active auth session credentials
+ * (`alov_user_id`, `alov_auth_token`, `alov_tg_chat_*`) so the client immediately re-hydrates
+ * fresh authoritative data from the server without restoring stale pre-update cache.
+ */
+export function reconcileAppVersionCache(
+  storage: StorageLike | null | undefined,
+  currentVersion: string
+): VersionCacheReconciliationResult {
+  const cleanCurrentVersion = String(currentVersion || '').trim();
+  if (!storage) {
+    return {
+      previousVersion: '',
+      currentVersion: cleanCurrentVersion,
+      versionChanged: false,
+      clearedKeys: [],
+      preservedUserId: '',
+      preservedToken: '',
+    };
+  }
+
+  let previousVersion = '';
+  let preservedUserId = '';
+  let preservedToken = '';
+
+  try {
+    previousVersion = String(storage.getItem('alov_app_version') || '').trim();
+    preservedUserId = String(
+      storage.getItem('alov_user_id') || storage.getItem('userId') || ''
+    ).trim();
+    preservedToken = String(
+      storage.getItem('alov_auth_token') ||
+        storage.getItem('token') ||
+        storage.getItem('authToken') ||
+        ''
+    ).trim();
+
+    if (!preservedUserId || !preservedToken) {
+      const rawCachedUser = storage.getItem('alov_current_user');
+      if (rawCachedUser) {
+        const parsed = JSON.parse(rawCachedUser);
+        if (parsed && typeof parsed === 'object') {
+          if (!preservedUserId && (parsed.uid || parsed.id)) {
+            preservedUserId = String(parsed.uid || parsed.id).trim();
+          }
+          if (!preservedToken && (parsed.authToken || parsed.token)) {
+            preservedToken = String(parsed.authToken || parsed.token).trim();
+          }
+        }
+      }
+    }
+  } catch {
+    // ignore storage/JSON parse errors
+  }
+
+  const versionChanged = Boolean(cleanCurrentVersion && previousVersion !== cleanCurrentVersion);
+  const clearedKeys: string[] = [];
+
+  if (versionChanged) {
+    try {
+      const staleKeys = collectStaleCacheKeys(storage);
+      for (const k of staleKeys) {
+        storage.removeItem(k);
+        clearedKeys.push(k);
+      }
+      if (preservedUserId) {
+        storage.setItem('alov_user_id', preservedUserId);
+        storage.setItem('userId', preservedUserId);
+      }
+      if (preservedToken) {
+        storage.setItem('alov_auth_token', preservedToken);
+        storage.setItem('token', preservedToken);
+      }
+    } catch {
+      // ignore storage quota errors
+    }
+  }
+
+  try {
+    if (cleanCurrentVersion) {
+      storage.setItem('alov_app_version', cleanCurrentVersion);
+    }
+  } catch {
+    // ignore storage errors
+  }
+
+  return {
+    previousVersion,
+    currentVersion: cleanCurrentVersion,
+    versionChanged,
+    clearedKeys,
+    preservedUserId,
+    preservedToken,
+  };
+}
+
+export function writeAuthoritativeUserCache(
+  storage: Pick<StorageLike, 'length' | 'key' | 'setItem' | 'removeItem'> | null | undefined,
+  user: any
+): void {
+  if (!storage || !user || typeof user !== 'object' || !user.uid) return;
+  try {
+    const cleanUser = sanitizeUserProfileCollections(user);
+    const serialized = JSON.stringify(cleanUser);
+    const keepUserKey = `alov_user_${cleanUser.uid}`;
+    // Purge any stale alov_user_* keys for alias/other UIDs so old snapshots never linger
+    for (let i = storage.length - 1; i >= 0; i -= 1) {
+      const k = storage.key(i);
+      if (k && k.startsWith('alov_user_') && k !== keepUserKey) {
+        storage.removeItem(k);
+      }
+    }
+    storage.setItem('alov_current_user', serialized);
+    storage.setItem(keepUserKey, serialized);
+  } catch {
+    // ignore storage quota errors
+  }
+}
+

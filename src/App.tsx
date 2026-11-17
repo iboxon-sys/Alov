@@ -78,7 +78,13 @@ import { applyTelegramWebAppTheme, enterTelegramMiniAppFullscreen } from './util
 import { validateUsername, isUsernameUnique, formatUsernameDisplay } from './utils/username';
 import { formatPhoneNumberPretty } from './utils/phone';
 import { shouldEnableCaptureProtection, isCaptureShortcutEvent } from './utils/captureProtection';
-import { normalizeTelegramUrl } from './utils/profileSync';
+import {
+  mergeAuthoritativeUserState,
+  normalizeTelegramUrl,
+  reconcileAppVersionCache,
+  upsertUniqueUserInList,
+  writeAuthoritativeUserCache,
+} from './utils/profileSync';
 import {
   DEFAULT_MANDATORY_SUBSCRIPTION_CONFIG,
   evaluateMandatorySubscriptionAccess,
@@ -259,8 +265,8 @@ const UZ_LOCATIONS: Record<string, string[]> = {
 };
 
 
-const APP_VERSION = '1.1.1';
-const LATEST_VERSION = '1.1.1';
+const APP_VERSION = '1.1.2';
+const LATEST_VERSION = '1.1.2';
 
 function getYouTubeEmbedUrl(url: string): string | null {
   if (!url) return null;
@@ -372,7 +378,9 @@ export default function App() {
   const [regBio, setRegBio] = useState('');
   const [regAvatar, setRegAvatar] = useState('');
   const [regBanner, setRegBanner] = useState('');
+  const [regVideoUrl, setRegVideoUrl] = useState('');
   const [isUploadingBanner, setIsUploadingBanner] = useState(false);
+  const [isUploadingVideo, setIsUploadingVideo] = useState(false);
   const [isSavingProfile, setIsSavingProfile] = useState(false);
   const [toastMsg, setToastMsg] = useState('');
   const toastTimerRef = useRef<number | null>(null);
@@ -565,35 +573,27 @@ export default function App() {
 
     socket.on('user_updated', (updatedUser: any) => {
       if (!updatedUser) return;
-      setUsersList(prev => {
-        const userMap = new Map<string, any>();
-        prev.forEach(u => userMap.set(u.uid || u.id, u));
-        userMap.set(updatedUser.uid || updatedUser.id, updatedUser);
-        return Array.from(userMap.values());
-      });
+      setUsersList(prev => upsertUniqueUserInList(prev, updatedUser));
 
       const myUid = currentUserRef.current?.uid;
       if (myUid && (updatedUser.uid === myUid || updatedUser.id === myUid)) {
         setCurrentUser((prev: any) => {
-          const merged = { ...(prev || {}), ...updatedUser };
-          try {
-            localStorage.setItem('alov_current_user', JSON.stringify(merged));
-            localStorage.setItem('alov_user_' + merged.uid, JSON.stringify(merged));
-          } catch (e) {}
-          return merged;
+          const authoritative = mergeAuthoritativeUserState(prev, updatedUser);
+          writeAuthoritativeUserCache(localStorage, authoritative);
+          return authoritative;
         });
       }
 
       setSelectedProfile((prev: any) => {
         if (prev && (prev.uid === updatedUser.uid || prev.id === updatedUser.id)) {
-          return { ...prev, ...updatedUser };
+          return mergeAuthoritativeUserState(prev, updatedUser);
         }
         return prev;
       });
 
       setSelectedChatUser((prev: any) => {
         if (prev && (prev.uid === updatedUser.uid || prev.id === updatedUser.id)) {
-          return { ...prev, ...updatedUser };
+          return mergeAuthoritativeUserState(prev, updatedUser);
         }
         return prev;
       });
@@ -807,11 +807,9 @@ export default function App() {
           .then(r => r.json())
           .then(res => {
             if (res?.success && res.user) {
-              setCurrentUser(res.user);
-              try {
-                localStorage.setItem('alov_current_user', JSON.stringify(res.user));
-                localStorage.setItem('alov_user_' + res.user.uid, JSON.stringify(res.user));
-              } catch (e) {}
+              const cleanUser = mergeAuthoritativeUserState(currentUserRef.current, res.user);
+              setCurrentUser(cleanUser);
+              writeAuthoritativeUserCache(localStorage, cleanUser);
             }
           })
           .catch(() => {});
@@ -849,10 +847,22 @@ export default function App() {
     };
   }, []);
 
-  // Non-destructive LocalStorage Session Restore on App Mount (updating app version never clears user data)
+  // Version-aware Session Restore on App Mount: clears stale caches on version bump while keeping active login identity
   useEffect(() => {
     try {
-      localStorage.setItem('alov_app_version', APP_VERSION);
+      const versionState = reconcileAppVersionCache(localStorage, APP_VERSION);
+      if (versionState.versionChanged && typeof window !== 'undefined') {
+        if ('caches' in window && window.caches) {
+          window.caches.keys()
+            .then((keys) => Promise.all(keys.map((key) => window.caches.delete(key))))
+            .catch(() => {});
+        }
+        if ('serviceWorker' in navigator && navigator.serviceWorker) {
+          navigator.serviceWorker.getRegistrations()
+            .then((regs) => regs.forEach((reg) => { reg.update().catch(() => {}); }))
+            .catch(() => {});
+        }
+      }
 
       const cached = localStorage.getItem('alov_current_user');
       if (cached) {
@@ -870,18 +880,22 @@ export default function App() {
           setActiveTab('discover');
           setIsAuthChecking(false);
 
-          fetch(getApiUrl('/api/users/sync'), {
+          safeFetchJson(getApiUrl('/api/users/sync'), {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
+            cache: 'no-store',
             body: JSON.stringify({ user: sanitized, lookupOnly: true })
           })
-            .then(r => r.json())
             .then(res => {
-      if (res && res.success && res.exists && res.user) {
-                const syncedUser = res.token ? { ...res.user, authToken: res.token } : res.user;
+              if (res && res.success && res.exists && res.user) {
+                const syncedUser = mergeAuthoritativeUserState(
+                  null,
+                  res.token ? { ...res.user, authToken: res.token } : res.user
+                );
                 setCurrentUser(syncedUser);
+                writeAuthoritativeUserCache(localStorage, syncedUser);
                 persistLocalAuthCredentials(localStorage, {
-                  token: res.token,
+                  token: res.token || syncedUser.authToken,
                   userId: syncedUser.uid,
                   user: syncedUser,
                 });
@@ -897,6 +911,45 @@ export default function App() {
             })
             .catch(() => {});
         }
+      } else if (versionState.versionChanged && (versionState.preservedUserId || versionState.preservedToken)) {
+        const restoreRequest = versionState.preservedUserId
+          ? safeFetchJson(getApiUrl('/api/users/sync'), {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              cache: 'no-store',
+              body: JSON.stringify({ user: { uid: versionState.preservedUserId }, lookupOnly: true })
+            })
+          : safeFetchJson(getApiUrl('/api/auth/bridge-session'), {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              cache: 'no-store',
+              body: JSON.stringify({
+                token: versionState.preservedToken,
+                userId: versionState.preservedUserId,
+              })
+            });
+
+        restoreRequest
+          .then(res => {
+            if (res && res.success && res.user && canPersistUserProfile(res.user) && !requiresFaceIdForUser(res.user)) {
+              const syncedUser = mergeAuthoritativeUserState(
+                null,
+                res.token ? { ...res.user, authToken: res.token } : res.user
+              );
+              setCurrentUser(syncedUser);
+              writeAuthoritativeUserCache(localStorage, syncedUser);
+              persistLocalAuthCredentials(localStorage, {
+                token: res.token || versionState.preservedToken || syncedUser.authToken,
+                userId: syncedUser.uid,
+                user: syncedUser,
+              });
+              setActiveTab('discover');
+              setIsAuthChecking(false);
+            } else if (res && res.success && res.exists === false) {
+              persistLocalAuthCredentials(localStorage, null);
+            }
+          })
+          .catch(() => {});
       }
     } catch (e) {}
   }, []);
@@ -1041,21 +1094,20 @@ export default function App() {
           fetch(getBaseUrl() + '/api/users/sync', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
+            cache: 'no-store',
             body: JSON.stringify({ user: telegramUserObj, lookupOnly: true })
           })
           .then(res => res.json())
           .then(data => {
             const exists = Boolean(data && data.success && data.exists && data.user);
-            const u = exists ? data.user : null;
+            const u = exists ? mergeAuthoritativeUserState(null, data.user) : null;
             const bootDecision = resolveTelegramMiniAppBootAction({ exists, user: u });
             if (bootDecision.shouldAutoLogin && u) {
               setRegName(getSafeUserDisplayName(u, realName));
               setRegAvatar(resolveEffectiveProfileAvatar(u) || pickPreferredAvatar(tgUser.photo_url));
+              setRegVideoUrl(u.videoUrl || '');
               setCurrentUser(u);
-              try {
-                localStorage.setItem('alov_current_user', JSON.stringify(u));
-                localStorage.setItem('alov_user_' + u.uid, JSON.stringify(u));
-              } catch (e) {}
+              writeAuthoritativeUserCache(localStorage, u);
               setActiveTab('discover');
             }
           })
@@ -1141,6 +1193,7 @@ export default function App() {
       setRegBio(userData.bio || '');
       setRegAvatar(resolveEffectiveProfileAvatar(userData));
       setRegBanner(userData.banner || '');
+      setRegVideoUrl(userData.videoUrl || '');
       setRegLocationVisibility(userData.locationVisibility || 'everyone');
       setIsLocationEnabled(userData.isLocationEnabled !== false);
 
@@ -1160,15 +1213,12 @@ export default function App() {
         return userData;
       }
 
-      try {
-        localStorage.setItem('alov_user_' + userData.uid, JSON.stringify(userData));
-        localStorage.setItem('alov_current_user', JSON.stringify(userData));
-      } catch (e) {}
-
-      setCurrentUser(userData);
+      const cleanUser = mergeAuthoritativeUserState(currentUserRef.current, userData);
+      writeAuthoritativeUserCache(localStorage, cleanUser);
+      setCurrentUser(cleanUser);
       setShowAuthModal(false);
       setActiveTab(prev => (prev === 'landing' ? 'discover' : prev));
-      return userData;
+      return cleanUser;
     } catch (err: any) {
       console.error("User sync error:", err);
     } finally {
@@ -1196,10 +1246,6 @@ export default function App() {
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, async (user) => {
       try {
-        try {
-          localStorage.setItem('alov_app_version', APP_VERSION);
-        } catch (e) {}
-
         setFirebaseUser(user);
         if (user) {
           await syncUserWithBackend(user, { autoOpenFaceId: false });
@@ -1525,12 +1571,14 @@ export default function App() {
     if (localMatch && (localMatch.uid || localMatch.id)) {
       setSelectedProfile(localMatch);
       const canonical = localMatch.uid || localMatch.id;
-      fetch(getApiUrl(`/api/users/${encodeURIComponent(canonical)}`))
+      fetch(getApiUrl(`/api/users/${encodeURIComponent(canonical)}`), { cache: 'no-store' })
         .then((r) => (r.ok ? r.json() : null))
         .then((d) => {
           if (d?.success && d?.user && (d.user.uid === canonical || d.user.id === canonical)) {
             setSelectedProfile((prev: any) =>
-              prev && (prev.uid === d.user.uid || prev.id === d.user.id) ? { ...prev, ...d.user } : prev
+              prev && (prev.uid === d.user.uid || prev.id === d.user.id)
+                ? mergeAuthoritativeUserState(prev, d.user)
+                : prev
             );
           }
         })
@@ -1540,9 +1588,7 @@ export default function App() {
     try {
       const data = await safeFetchJson(getApiUrl(`/api/users/${encodeURIComponent(key)}`));
       if (data?.success && data?.user) {
-        setUsersList((prev) =>
-          prev.some((u) => u.uid === data.user.uid) ? prev : [...prev, data.user]
-        );
+        setUsersList((prev) => upsertUniqueUserInList(prev, data.user));
         setSelectedProfile(data.user);
       }
     } catch (err) {
@@ -1928,20 +1974,44 @@ export default function App() {
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ user: updated }),
         });
-        const finalUser = syncRes?.user || updated;
+        const finalUser = mergeAuthoritativeUserState(currentUser, syncRes?.user || updated);
         setCurrentUser(finalUser);
-        setUsersList((prev) =>
-          prev.map((u) => (u.uid === finalUser.uid ? { ...u, ...finalUser } : u))
-        );
-        try {
-          localStorage.setItem('alov_current_user', JSON.stringify(finalUser));
-          localStorage.setItem('alov_user_' + finalUser.uid, JSON.stringify(finalUser));
-        } catch {}
+        setUsersList((prev) => upsertUniqueUserInList(prev, finalUser));
+        writeAuthoritativeUserCache(localStorage, finalUser);
       }
     } catch (err: any) {
       setErrorMsg(err?.message || 'Banner yuklashda xatolik.');
     } finally {
       setIsUploadingBanner(false);
+    }
+  };
+
+  // Upload Profile Video directly via server media store (MP4 standardized)
+  const handleVideoFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    e.target.value = '';
+    if (!file) return;
+    setIsUploadingVideo(true);
+    setErrorMsg('');
+    try {
+      const res = await fetch(getApiUrl('/api/media/upload-raw?type=video'), {
+        method: 'POST',
+        headers: {
+          'Content-Type': file.type || 'video/mp4',
+          'x-file-name': encodeURIComponent(file.name || 'profile-video.mp4'),
+        },
+        body: file,
+      });
+      const data = await res.json();
+      if (!res.ok || !data?.success || !data?.url) {
+        setErrorMsg(data?.error || 'Video yuklanmadi.');
+        return;
+      }
+      setRegVideoUrl(data.url);
+    } catch (err: any) {
+      setErrorMsg(err?.message || 'Video yuklashda xatolik.');
+    } finally {
+      setIsUploadingVideo(false);
     }
   };
 
@@ -2132,7 +2202,7 @@ export default function App() {
     setIsSavingProfile(true);
 
     try {
-      let finalUsername = currentUser?.username || '';
+      let finalUsername = '';
       if (regUsername.trim()) {
         const uRes = validateUsername(regUsername);
         if (!uRes.valid) {
@@ -2146,13 +2216,13 @@ export default function App() {
         finalUsername = uRes.normalized;
       }
 
-      let resolvedSavedAvatar = pickPreferredAvatar(
-        regAvatar,
-        currentUser?.hasCustomAvatar ? currentUser?.avatar : '',
-        currentUser?.faceId?.capturedPhotoUrl,
-        currentUser?.avatar,
-        firebaseUser?.photoURL
-      );
+      let resolvedSavedAvatar = regAvatar.trim()
+        ? pickPreferredAvatar(regAvatar)
+        : pickPreferredAvatar(
+            currentUser?.hasCustomAvatar ? currentUser?.avatar : '',
+            currentUser?.faceId?.capturedPhotoUrl,
+            currentUser?.avatar
+          );
       if (resolvedSavedAvatar && resolvedSavedAvatar.startsWith('data:image/')) {
         try {
           const uploadRes = await safeFetchJson(getApiUrl('/api/media/upload'), {
@@ -2190,6 +2260,8 @@ export default function App() {
       const formattedPhone = trimmedPhone && trimmedPhone !== '+' && trimmedPhone !== '+998' ? formatPhoneNumberPretty(trimmedPhone) : '';
       const trimmedTelegram = regTelegram.trim();
       const normalizedTelegram = trimmedTelegram ? (normalizeTelegramUrl(trimmedTelegram) || trimmedTelegram) : '';
+      const resolvedBannerValue = showProfileModal ? regBanner : (regBanner || currentUser?.banner || '');
+      const resolvedVideoValue = showProfileModal ? regVideoUrl.trim() : (regVideoUrl.trim() || currentUser?.videoUrl || '');
       const newUserData = {
         ...currentUser,
         id: currentUser?.id || `ALOV-${activeUid.slice(0, 5).toUpperCase()}`,
@@ -2212,8 +2284,8 @@ export default function App() {
         bio: regBio.trim(),
         hasCustomAvatar,
         avatar: resolvedSavedAvatar,
-        banner: showProfileModal ? regBanner : (regBanner || currentUser?.banner || ''),
-        videoUrl: currentUser?.videoUrl || 'https://assets.mixkit.co/videos/preview/mixkit-young-woman-looking-at-camera-in-a-park-41686-large.mp4',
+        banner: resolvedBannerValue,
+        videoUrl: resolvedVideoValue,
         followersCount: currentUser?.followersCount ?? 0,
         followingCount: currentUser?.followingCount ?? 0,
         likesCount: currentUser?.likesCount ?? 0,
@@ -2233,23 +2305,28 @@ export default function App() {
         setErrorMsg(data?.error || "Profil ma'lumotlarini serverda saqlab bo'lmadi.");
         return;
       }
-      const savedUser = data.user;
+      const savedUser = mergeAuthoritativeUserState(
+        currentUser,
+        data.token ? { ...data.user, authToken: data.token } : data.user
+      );
 
       if (auth.currentUser && trimmedName) {
         const nextPhotoUrl =
           resolvedSavedAvatar && !resolvedSavedAvatar.startsWith('data:')
             ? (resolvedSavedAvatar.startsWith('/api/') ? `${window.location.origin}${resolvedSavedAvatar}` : resolvedSavedAvatar)
             : undefined;
-        updateProfile(auth.currentUser, {
+        await updateProfile(auth.currentUser, {
           displayName: trimmedName,
           ...(nextPhotoUrl ? { photoURL: nextPhotoUrl } : {}),
         }).catch(() => {});
       }
 
-      try {
-        localStorage.setItem('alov_current_user', JSON.stringify(savedUser));
-        localStorage.setItem('alov_user_' + (savedUser.uid || activeUid), JSON.stringify(savedUser));
-      } catch (e) {}
+      writeAuthoritativeUserCache(localStorage, savedUser);
+      persistLocalAuthCredentials(localStorage, {
+        token: savedUser.authToken || localStorage.getItem('alov_auth_token') || '',
+        userId: savedUser.uid || activeUid,
+        user: savedUser,
+      });
 
       setCurrentUser(savedUser);
       setRegName(getSafeUserDisplayName(savedUser, trimmedName));
@@ -2259,13 +2336,9 @@ export default function App() {
       setRegInstagram(savedUser.instagram || '');
       setRegNeighborhood(savedUser.neighborhood || '');
       setRegBanner(savedUser.banner || '');
+      setRegVideoUrl(savedUser.videoUrl || '');
       setRegAvatar(resolveEffectiveProfileAvatar(savedUser));
-      setUsersList(prev => {
-        const userMap = new Map<string, any>();
-        prev.forEach(u => userMap.set(u.uid || u.id, u));
-        userMap.set(savedUser.uid || activeUid, savedUser);
-        return Array.from(userMap.values());
-      });
+      setUsersList(prev => upsertUniqueUserInList(prev, savedUser));
       setPostsList(prev =>
         prev.map(p =>
           p.authorUid === (savedUser.uid || activeUid)
@@ -2343,6 +2416,7 @@ export default function App() {
     setRegBio(clean.regBio);
     setRegAvatar(clean.regAvatar);
     setRegBanner(clean.regBanner);
+    setRegVideoUrl('');
   };
 
   const openAuthModalClean = (mode: 'login' | 'register' | 'telegram' = 'login') => {
@@ -2531,6 +2605,7 @@ export default function App() {
         const response = await fetch(getApiUrl('/api/users/sync'), {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
+          cache: 'no-store',
           body: JSON.stringify({ user: partialUser, lookupOnly: true })
         });
         const data = await response.json();
@@ -2542,12 +2617,9 @@ export default function App() {
             user: data?.user,
           }) === 'enter_app'
         ) {
-          const canonicalUser = data.user;
+          const canonicalUser = mergeAuthoritativeUserState(null, data.user);
           setCurrentUser(canonicalUser);
-          try {
-            localStorage.setItem('alov_current_user', JSON.stringify(canonicalUser));
-            localStorage.setItem('alov_user_' + canonicalUser.uid, JSON.stringify(canonicalUser));
-          } catch(e) {}
+          writeAuthoritativeUserCache(localStorage, canonicalUser);
           setShowAuthModal(false);
           setActiveTab('discover');
           setIsLoggingIn(false);
@@ -2661,18 +2733,10 @@ export default function App() {
         setIsLoggingIn(false);
         return;
       }
-      const finalUser = syncData.user;
+      const finalUser = mergeAuthoritativeUserState(null, syncData.user);
       setCurrentUser(finalUser);
-      setUsersList(prev => {
-        const userMap = new Map<string, any>();
-        prev.forEach(u => userMap.set(u.uid || u.id, u));
-        userMap.set(finalUser.uid, finalUser);
-        return Array.from(userMap.values());
-      });
-      try {
-        localStorage.setItem('alov_current_user', JSON.stringify(finalUser));
-        localStorage.setItem('alov_user_' + finalUser.uid, JSON.stringify(finalUser));
-      } catch(e) {}
+      setUsersList(prev => upsertUniqueUserInList(prev, finalUser));
+      writeAuthoritativeUserCache(localStorage, finalUser);
       setPendingGoogleUser(null);
       setPendingFaceId(null);
       setShowAuthModal(false);
@@ -2714,11 +2778,9 @@ export default function App() {
         const exists = Boolean(res && res.success && res.exists && res.user);
         const step = resolvePostProviderAuthStep({ provider: 'telegram', exists, user: res?.user });
         if (step === 'enter_app' && res?.user) {
-          setCurrentUser(res.user);
-          try {
-            localStorage.setItem('alov_current_user', JSON.stringify(res.user));
-            localStorage.setItem('alov_user_' + res.user.uid, JSON.stringify(res.user));
-          } catch (e) {}
+          const cleanUser = mergeAuthoritativeUserState(null, res.user);
+          setCurrentUser(cleanUser);
+          writeAuthoritativeUserCache(localStorage, cleanUser);
           setShowAuthModal(false);
           setActiveTab('discover');
           setIsLoggingIn(false);
@@ -2877,12 +2939,9 @@ export default function App() {
           setTelegramStep('face_id');
         } else {
           // Admin (@Salikh_07) or already Face-ID-verified completed user logs straight in
-          const userData = data.user;
+          const userData = mergeAuthoritativeUserState(null, data.user);
           setCurrentUser(userData);
-          try {
-            localStorage.setItem('alov_current_user', JSON.stringify(userData));
-            localStorage.setItem('alov_user_' + userData.uid, JSON.stringify(userData));
-          } catch(e) {}
+          writeAuthoritativeUserCache(localStorage, userData);
           setShowAuthModal(false);
           setAuthMode('login');
           setTelegramStep('input_phone');
@@ -2933,18 +2992,10 @@ export default function App() {
           setErrorMsg(syncData?.error || "Profilni serverga yuklashda xatolik.");
           return;
         }
-        const finalUser = syncData.user;
+        const finalUser = mergeAuthoritativeUserState(null, syncData.user);
         setCurrentUser(finalUser);
-        setUsersList(prev => {
-          const userMap = new Map<string, any>();
-          prev.forEach(u => userMap.set(u.uid || u.id, u));
-          userMap.set(finalUser.uid, finalUser);
-          return Array.from(userMap.values());
-        });
-        try {
-          localStorage.setItem('alov_current_user', JSON.stringify(finalUser));
-          localStorage.setItem('alov_user_' + finalUser.uid, JSON.stringify(finalUser));
-        } catch (e) {}
+        setUsersList(prev => upsertUniqueUserInList(prev, finalUser));
+        writeAuthoritativeUserCache(localStorage, finalUser);
         setPendingTgUser(null);
         setPendingFaceId(null);
         setShowAuthModal(false);
@@ -3049,18 +3100,10 @@ export default function App() {
         setIsLoggingIn(false);
         return;
       }
-      const finalUser = syncData.user;
+      const finalUser = mergeAuthoritativeUserState(null, syncData.user);
       setCurrentUser(finalUser);
-      setUsersList(prev => {
-        const userMap = new Map<string, any>();
-        prev.forEach(u => userMap.set(u.uid || u.id, u));
-        userMap.set(finalUser.uid, finalUser);
-        return Array.from(userMap.values());
-      });
-      try {
-        localStorage.setItem('alov_current_user', JSON.stringify(finalUser));
-        localStorage.setItem('alov_user_' + finalUser.uid, JSON.stringify(finalUser));
-      } catch(e) {}
+      setUsersList(prev => upsertUniqueUserInList(prev, finalUser));
+      writeAuthoritativeUserCache(localStorage, finalUser);
       setPendingTgUser(null);
       setPendingFaceId(null);
       setShowAuthModal(false);
@@ -3128,24 +3171,17 @@ export default function App() {
       });
       if (data?.success) {
         if (data.follower) {
-          setCurrentUser(data.follower);
-          setFollowingIds(Array.isArray(data.follower.following) ? data.follower.following : []);
-          try {
-            localStorage.setItem('alov_current_user', JSON.stringify(data.follower));
-            localStorage.setItem('alov_user_' + data.follower.uid, JSON.stringify(data.follower));
-          } catch (e) {}
+          const cleanFollower = mergeAuthoritativeUserState(currentUserRef.current, data.follower);
+          setCurrentUser(cleanFollower);
+          setFollowingIds(Array.isArray(cleanFollower.following) ? cleanFollower.following : []);
+          writeAuthoritativeUserCache(localStorage, cleanFollower);
         }
-        setUsersList(prev =>
-          prev.map(u => {
-            if (data.follower && (u.uid === data.follower.uid || u.id === data.follower.id)) {
-              return { ...u, ...data.follower };
-            }
-            if (data.target && (u.uid === data.target.uid || u.id === data.target.id)) {
-              return { ...u, ...data.target };
-            }
-            return u;
-          })
-        );
+        setUsersList(prev => {
+          let next = prev;
+          if (data.follower) next = upsertUniqueUserInList(next, data.follower);
+          if (data.target) next = upsertUniqueUserInList(next, data.target);
+          return next;
+        });
         if (data.target && selectedProfile && (selectedProfile.uid === data.target.uid || selectedProfile.id === data.target.id)) {
           setSelectedProfile(data.target);
         }
@@ -3523,12 +3559,12 @@ export default function App() {
         }
 
         return (
-      <div className={`flex-1 min-h-0 relative z-10 ${(activeTab === 'reels' || activeTab === 'map' || activeTab === 'chatruletka') ? 'overflow-hidden flex flex-col p-0' : 'overflow-y-auto overscroll-y-contain p-3 sm:p-5 space-y-4 pb-24'}`}>
+      <div className={`flex-1 min-h-0 relative z-10 ${(activeTab === 'reels' || activeTab === 'map' || activeTab === 'chatruletka' || activeTab === 'chats') ? 'overflow-hidden flex flex-col p-0' : 'overflow-y-auto overscroll-y-contain p-3 sm:p-5 space-y-4 pb-24'}`}>
         {/* --- LANDING TAB --- */}
         {activeTab === 'landing' && <LandingPage onLogin={() => openAuthModalClean('login')} />}
 
         {/* --- DISCOVER, POSTS, PROFILE WITH SMOOTH ANIMATEPRESENCE --- */}
-        {activeTab !== 'landing' && activeTab !== 'map' && activeTab !== 'reels' && activeTab !== 'chatruletka' && (
+        {activeTab !== 'landing' && activeTab !== 'map' && activeTab !== 'reels' && activeTab !== 'chatruletka' && activeTab !== 'chats' && (
           <AnimatePresence mode="wait">
             <motion.div
               key={activeTab}
@@ -3810,6 +3846,7 @@ export default function App() {
                   setRegBio(currentUser?.bio || '');
                   setRegAvatar(resolveEffectiveProfileAvatar(currentUser));
                   setRegBanner(currentUser?.banner || '');
+                  setRegVideoUrl(currentUser?.videoUrl || '');
                   setRegLocationVisibility(currentUser?.locationVisibility || 'everyone');
                   setShowProfileModal(true);
                 };
@@ -4229,6 +4266,32 @@ export default function App() {
               })()}
             </motion.div>
           </AnimatePresence>
+        )}
+
+        {/* --- CHATS INLINE VIEW (when inside iframe or microfrontend=0) --- */}
+        {activeTab === 'chats' && (
+          <div className="flex-1 min-h-0 w-full flex flex-col overflow-hidden" data-testid="inline-chats-container">
+            <Suspense fallback={<div className="flex-1 flex items-center justify-center text-xs text-zinc-400">Chat yuklanmoqda...</div>}>
+              <ChatView
+                currentUser={currentUser}
+                backendOrigin={bridgeBackendOrigin}
+                initialPartner={selectedChatUser}
+                onOpenAuth={() => openAuthModalClean('login')}
+                onOpenProfile={openUserProfileByUid}
+                onStartCall={(u) => setActiveCallUser(u)}
+                onOpenGift={(u) => {
+                  setSelectedChatUser(u);
+                  setShowGiftModal(true);
+                }}
+                onOpenTopUp={(notice) => {
+                  if (notice) setWalletNoticeMsg(notice);
+                  setShowTopUpModal(true);
+                }}
+                onNotify={showToast}
+                onChatViewChange={(view) => setChatView(view)}
+              />
+            </Suspense>
+          </div>
         )}
 
         {/* --- CHATRULETKA FULLSCREEN FALLBACK (when inline / non-iframe) --- */}
@@ -6283,6 +6346,55 @@ export default function App() {
                       </div>
                     </div>
                   </div>
+
+                  {/* Profile Video Row */}
+                  <div className="bg-[#171A26] rounded-2xl border border-white/[0.08] p-3.5 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                    <div className="flex items-center gap-3 min-w-0">
+                      <div className="w-16 h-12 rounded-xl overflow-hidden bg-[#0E1018] border border-white/[0.08] flex items-center justify-center shrink-0">
+                        {resolveAvatarUrl(regVideoUrl) ? (
+                          <video
+                            src={resolveAvatarUrl(regVideoUrl)}
+                            className="w-full h-full object-cover"
+                            muted
+                            playsInline
+                            loop
+                            autoPlay
+                          />
+                        ) : (
+                          <Video className="w-4 h-4 text-zinc-500" />
+                        )}
+                      </div>
+                      <div className="min-w-0">
+                        <p className="text-xs font-bold text-white truncate">Profil videosi (MP4)</p>
+                        <p className="text-[11px] text-zinc-400 truncate">
+                          {regVideoUrl ? "Video biriktirilgan (yangilash yoki olib tashlash mumkin)" : "Ixtiyoriy — Reels/kashfiyot uchun video"}
+                        </p>
+                      </div>
+                    </div>
+                    <div className="flex items-center gap-2 shrink-0">
+                      {regVideoUrl && (
+                        <button
+                          type="button"
+                          onClick={() => setRegVideoUrl('')}
+                          data-testid="remove-profile-video-btn"
+                          className="px-2.5 py-1.5 rounded-lg bg-rose-500/15 hover:bg-rose-500/25 text-[11px] font-bold text-rose-300 border border-rose-500/25 transition cursor-pointer"
+                        >
+                          Olib tashlash
+                        </button>
+                      )}
+                      <label className="cursor-pointer px-3 py-1.5 rounded-lg bg-white/[0.08] hover:bg-white/[0.14] border border-white/10 text-zinc-100 text-[11px] font-bold transition inline-flex items-center gap-1.5">
+                        <Video className="w-3.5 h-3.5 text-rose-400" />
+                        <span>{isUploadingVideo ? 'Yuklanmoqda...' : 'Video yuklash'}</span>
+                        <input
+                          type="file"
+                          accept="video/*"
+                          disabled={isUploadingVideo}
+                          onChange={handleVideoFileChange}
+                          className="hidden"
+                        />
+                      </label>
+                    </div>
+                  </div>
                 </div>
 
                 {/* Section 2: Asosiy ma'lumotlar */}
@@ -6558,7 +6670,7 @@ export default function App() {
                 </button>
                 <button
                   type="submit"
-                  disabled={isSavingProfile || isUploadingBanner}
+                  disabled={isSavingProfile || isUploadingBanner || isUploadingVideo}
                   data-testid="edit-profile-submit-btn"
                   className="px-7 min-h-[44px] rounded-xl bg-gradient-to-r from-[#E11D48] to-rose-600 hover:brightness-110 text-white font-bold text-xs shadow-md shadow-rose-950/40 transition disabled:opacity-50 cursor-pointer"
                 >
@@ -6874,19 +6986,11 @@ export default function App() {
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ user: updatedUser }),
                   });
-                  const finalUser = syncData?.user || updatedUser;
+                  const finalUser = mergeAuthoritativeUserState(currentUser, syncData?.user || updatedUser);
                   setCurrentUser(finalUser);
                   setRegAvatar(resolveEffectiveProfileAvatar(finalUser));
-                  setUsersList(prev => {
-                    const userMap = new Map<string, any>();
-                    prev.forEach(u => userMap.set(u.uid || u.id, u));
-                    userMap.set(finalUser.uid, finalUser);
-                    return Array.from(userMap.values());
-                  });
-                  try {
-                    localStorage.setItem('alov_current_user', JSON.stringify(finalUser));
-                    localStorage.setItem('alov_user_' + finalUser.uid, JSON.stringify(finalUser));
-                  } catch {}
+                  setUsersList(prev => upsertUniqueUserInList(prev, finalUser));
+                  writeAuthoritativeUserCache(localStorage, finalUser);
                   setShowProfileFaceIdModal(false);
                   showToast("Face ID surati profilingizga qo'yildi");
                 }}
@@ -7347,11 +7451,9 @@ export default function App() {
             }}
             onUserUpdated={(updatedUser) => {
               if (updatedUser?.uid === currentUser?.uid) {
-                setCurrentUser(updatedUser);
-                try {
-                  localStorage.setItem('alov_current_user', JSON.stringify(updatedUser));
-                  localStorage.setItem('alov_user_' + updatedUser.uid, JSON.stringify(updatedUser));
-                } catch (e) {}
+                const clean = mergeAuthoritativeUserState(currentUser, updatedUser);
+                setCurrentUser(clean);
+                writeAuthoritativeUserCache(localStorage, clean);
               }
             }}
           />

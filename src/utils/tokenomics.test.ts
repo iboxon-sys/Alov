@@ -2,6 +2,9 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   MESSAGE_COIN_COST,
+  VOICE_MESSAGE_COIN_COST,
+  MEDIA_FILE_COIN_COST,
+  getMessageCoinCost,
   MESSAGE_DIAMOND_REWARD,
   AUDIO_CALL_COIN_COST_PER_MIN,
   AUDIO_CALL_DIAMOND_PER_MIN,
@@ -29,8 +32,17 @@ import {
 } from './tokenomics.ts';
 
 describe('tokenomics, wallet, 24h 120-diamond cap, 12h unlock & call billing helpers', () => {
-  it('sets 10 coins -> 2.5 diamonds, call pricing, 120 daily target, and exchange rate', () => {
+  it('sets 10 coins -> 2.5 diamonds, voice 5, audio/video 20, call pricing, 120 daily target, and exchange rate', () => {
     assert.equal(MESSAGE_COIN_COST, 10);
+    assert.equal(VOICE_MESSAGE_COIN_COST, 5);
+    assert.equal(MEDIA_FILE_COIN_COST, 20);
+    assert.equal(getMessageCoinCost('text'), 10);
+    assert.equal(getMessageCoinCost('gif'), 10);
+    assert.equal(getMessageCoinCost('image'), 10);
+    assert.equal(getMessageCoinCost('voice'), 5);
+    assert.equal(getMessageCoinCost('audio'), 20);
+    assert.equal(getMessageCoinCost('video'), 20);
+    assert.equal(getMessageCoinCost(undefined), 10);
     assert.equal(MESSAGE_DIAMOND_REWARD, 2.5);
     assert.equal(AUDIO_CALL_COIN_COST_PER_MIN, 10);
     assert.equal(AUDIO_CALL_DIAMOND_PER_MIN, 2.5);

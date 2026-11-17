@@ -1,7 +1,16 @@
 import { normalizeTelegramHandle } from './telegramProfile';
 
 export const MESSAGE_COIN_COST = 10;
+export const VOICE_MESSAGE_COIN_COST = 5;
+export const MEDIA_FILE_COIN_COST = 20;
 export const MESSAGE_DIAMOND_REWARD = 2.5;
+
+export function getMessageCoinCost(messageType?: string | null): number {
+  const normalized = String(messageType || 'text').trim().toLowerCase();
+  if (normalized === 'voice') return VOICE_MESSAGE_COIN_COST;
+  if (normalized === 'audio' || normalized === 'video') return MEDIA_FILE_COIN_COST;
+  return MESSAGE_COIN_COST;
+}
 export const AUDIO_CALL_COIN_COST_PER_MIN = 10;
 export const AUDIO_CALL_DIAMOND_PER_MIN = 2.5;
 export const VIDEO_CALL_COIN_COST_PER_MIN = 20;

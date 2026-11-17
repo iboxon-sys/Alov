@@ -8,5 +8,39 @@
     "lastMessage": "zo'r",
     "lastSenderId": "tg_salikh_07",
     "updatedAt": "2026-11-17T16:39:34.102Z"
+  },
+  "pw_female_chat_1_pw_male_chat_1": {
+    "id": "pw_female_chat_1_pw_male_chat_1",
+    "participants": [
+      "pw_male_chat_1",
+      "pw_female_chat_1"
+    ],
+    "lastMessage": "🎤 Ovozli xabar",
+    "lastSenderId": "pw_male_chat_1",
+    "updatedAt": "2026-11-17T17:11:44.311Z"
+  },
+  "pw_female_chat_v2_pw_male_chat_v2": {
+    "id": "pw_female_chat_v2_pw_male_chat_v2",
+    "participants": [
+      "pw_female_chat_v2",
+      "pw_male_chat_v2"
+    ],
+    "lastMessage": "Salom javob!",
+    "lastSenderId": "pw_female_chat_v2",
+    "updatedAt": "2026-11-17T17:20:33.546Z",
+    "partner": {
+      "uid": "pw_female_chat_v2",
+      "id": "pw_female_chat_v2",
+      "name": "Malika Test",
+      "username": "malika_pw2",
+      "avatar": "https://i.pravatar.cc/150?img=32",
+      "gender": "female",
+      "isOnline": false,
+      "status": "offline",
+      "isVerified": true,
+      "faceId": {
+        "verified": true
+      }
+    }
   }
 }

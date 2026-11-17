@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useRef, useCallback, Suspense, lazy } from 'react';
 import {
+  ArrowDown,
   ArrowLeft,
   ArrowUpRight,
   Check,
@@ -11,8 +12,9 @@ import {
   Mic,
   Plus,
   Send,
-  Square,
+  Trash2,
   Video,
+  X,
 } from 'lucide-react';
 import { io, Socket } from 'socket.io-client';
 import { getBaseUrl, MAIN_RENDER_ORIGIN } from '../config/api';
@@ -28,29 +30,37 @@ import { resolveEffectiveProfileAvatar } from '../utils/faceId';
 import { isUserOnlineStrict, formatLastSeenUz } from '../utils/presence';
 import {
   MESSAGE_COIN_COST,
+  VOICE_MESSAGE_COIN_COST,
+  MEDIA_FILE_COIN_COST,
   MESSAGE_DIAMOND_REWARD,
   DIAMOND_LIMIT_TARGET,
   DAILY_LIMIT_WINDOW_HOURS,
   DIAMOND_UNLOCK_HOURS,
+  canChargeForMessage,
+  isAdminTelegramUser,
+  getMessageCoinCost,
   formatDiamondsDisplay,
   getDiamondProgressPercent,
   getPendingDiamondsTotal,
   getNextUnlockTimestamp,
   computeCountdownParts,
 } from '../utils/tokenomics';
+import {
+  capMessagesForLocalCache,
+  formatMediaDuration,
+  generateUniqueMessageId,
+  isFramelessChatMediaType,
+  mergeUniqueChatMessages,
+  shouldAutoScrollConversation,
+} from '../utils/chatMessages';
 import type { ChatMediaKind } from './ChatMediaPicker';
 import { ChatGifBar } from './ChatGifBar';
+import { VideoPlayer, VoiceMessage, AudioPlayer } from './ChatMedia';
 import { isGifMessage, type GiphyGifItem } from '../utils/giphy';
 import { ChatSkeleton } from './Skeleton';
 
 const ChatMediaPicker = lazy(() =>
   import('./ChatMediaPicker').then((m) => ({ default: m.ChatMediaPicker }))
-);
-const VideoPlayer = lazy(() =>
-  import('./ChatMedia').then((m) => ({ default: m.VideoPlayer }))
-);
-const VoiceMessage = lazy(() =>
-  import('./ChatMedia').then((m) => ({ default: m.VoiceMessage }))
 );
 
 const ALOV_AI_USER = {
@@ -62,6 +72,25 @@ const ALOV_AI_USER = {
   status: 'online',
   isAI: true,
 };
+
+function pickSupportedAudioMimeType(): string {
+  if (typeof MediaRecorder === 'undefined' || typeof MediaRecorder.isTypeSupported !== 'function') {
+    return '';
+  }
+  const candidates = [
+    'audio/webm;codecs=opus',
+    'audio/webm',
+    'audio/mp4',
+    'audio/ogg;codecs=opus',
+    'audio/ogg',
+  ];
+  for (const mime of candidates) {
+    try {
+      if (MediaRecorder.isTypeSupported(mime)) return mime;
+    } catch {}
+  }
+  return '';
+}
 
 interface ChatViewProps {
   currentUser: any | null;
@@ -116,15 +145,32 @@ export const ChatView: React.FC<ChatViewProps> = ({
   const [isUploadingChatMedia, setIsUploadingChatMedia] = useState(false);
   const [isOtherTyping, setIsOtherTyping] = useState(false);
   const [isAiTyping, setIsAiTyping] = useState(false);
-  const [isRecording, setIsRecording] = useState(false);
   const [countdownNow, setCountdownNow] = useState<number>(() => Date.now());
+  const [lightboxImageUrl, setLightboxImageUrl] = useState<string | null>(null);
+  const [showScrollToBottom, setShowScrollToBottom] = useState(false);
+
+  // Dictaphone state
+  const [isRecording, setIsRecording] = useState(false);
+  const [recordingSeconds, setRecordingSeconds] = useState(0);
+  const [recordingLevels, setRecordingLevels] = useState<number[]>(() => Array(14).fill(25));
 
   const socketRef = useRef<Socket | null>(null);
   const typingTimeoutRef = useRef<any>(null);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const mediaStreamRef = useRef<MediaStream | null>(null);
+  const audioContextRef = useRef<AudioContext | null>(null);
+  const analyserRafRef = useRef<number | null>(null);
+  const recordingTimerRef = useRef<number | null>(null);
+  const recordingDurationRef = useRef<number>(0);
+  const shouldDiscardRecordingRef = useRef<boolean>(false);
   const isRecordingRef = useRef<boolean>(false);
+
   const chatMessagesContainerRef = useRef<HTMLDivElement | null>(null);
   const chatBottomRef = useRef<HTMLDivElement | null>(null);
+  const isUserNearBottomRef = useRef<boolean>(true);
+  const forceScrollToBottomRef = useRef<boolean>(false);
+  const prevConversationKeyRef = useRef<string>('');
+  const prevMessageCountRef = useRef<number>(0);
 
   const effectiveUser = bridgeUser || currentUser;
   const activeUserRef = useRef<any>(effectiveUser);
@@ -174,6 +220,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
     if (initialPartner) {
       setSelectedChatUser(initialPartner);
       setChatView('conversation');
+      forceScrollToBottomRef.current = true;
     }
   }, [initialPartner]);
 
@@ -290,12 +337,14 @@ export const ChatView: React.FC<ChatViewProps> = ({
       if (parsed.partner) {
         setSelectedChatUser(parsed.partner);
         setChatView('conversation');
+        forceScrollToBottomRef.current = true;
       } else if (parsed.partnerUid) {
         const matched = usersListRef.current.find(
           (u) => u.uid === parsed.partnerUid || u.id === parsed.partnerUid
         );
         setSelectedChatUser(matched || { uid: parsed.partnerUid, id: parsed.partnerUid, name: 'Foydalanuvchi' });
         setChatView('conversation');
+        forceScrollToBottomRef.current = true;
       }
     };
 
@@ -449,24 +498,17 @@ export const ChatView: React.FC<ChatViewProps> = ({
       };
 
       setChatMessages((prev) => {
-        const keys = Array.from(
-          new Set([chatId, partnerId, payload?.senderId, payload?.recipientId, selUser?.id, selUser?.uid].filter(Boolean))
-        ) as string[];
+        const partnerKeys = [partnerId, selUser?.id, selUser?.uid].filter(
+          (k): k is string => Boolean(k) && k !== uidNow
+        );
+        const keys = Array.from(new Set([chatId, ...partnerKeys].filter(Boolean))) as string[];
         const next = { ...prev };
         keys.forEach((k) => {
-          const list = prev[k] || [];
-          const idx = list.findIndex((m) => m.id === newMsg.id);
-          if (idx > -1) {
-            const copy = [...list];
-            copy[idx] = { ...copy[idx], ...newMsg };
-            next[k] = copy;
-          } else {
-            next[k] = [...list, newMsg];
-          }
+          next[k] = mergeUniqueChatMessages(prev[k], [newMsg]);
         });
         if (chatId && next[chatId]) {
           try {
-            localStorage.setItem('alov_msgs_' + chatId, JSON.stringify(next[chatId]));
+            localStorage.setItem('alov_msgs_' + chatId, JSON.stringify(capMessagesForLocalCache(next[chatId])));
           } catch {}
         }
         return next;
@@ -477,7 +519,15 @@ export const ChatView: React.FC<ChatViewProps> = ({
           const lastMsg =
             msg.type === 'gif'
               ? 'GIF 🎬'
-              : msg.text || (msg.type === 'image' ? 'Rasm 🖼️' : msg.type === 'video' ? 'Video 🎥' : 'Xabar');
+              : msg.type === 'voice'
+              ? '🎤 Ovozli xabar'
+              : msg.type === 'audio'
+              ? `🎵 ${msg.fileName || 'Audio fayl'}`
+              : msg.type === 'image'
+              ? '🖼️ Rasm'
+              : msg.type === 'video'
+              ? '🎥 Video'
+              : msg.text || 'Xabar';
           const partnerInfo =
             payload?.message?.sender ||
             (partnerId
@@ -535,7 +585,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
         });
         if (chatId && next[chatId]) {
           try {
-            localStorage.setItem('alov_msgs_' + chatId, JSON.stringify(next[chatId]));
+            localStorage.setItem('alov_msgs_' + chatId, JSON.stringify(capMessagesForLocalCache(next[chatId])));
           } catch {}
         }
         return next;
@@ -554,7 +604,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
         });
         if (chatId && next[chatId]) {
           try {
-            localStorage.setItem('alov_msgs_' + chatId, JSON.stringify(next[chatId]));
+            localStorage.setItem('alov_msgs_' + chatId, JSON.stringify(capMessagesForLocalCache(next[chatId])));
           } catch {}
         }
         return next;
@@ -596,52 +646,64 @@ export const ChatView: React.FC<ChatViewProps> = ({
     };
   }, [apiOrigin, bridgeToken, effectiveUser?.authToken, effectiveUser?.id, effectiveUser?.uid, notifyParentOrToast]);
 
-  // Join conversation room & fetch message history when selectedChatUser changes
+  // Join conversation room & fetch message history ONLY when active conversation ID changes (never clobber optimistic GIFs)
+  const selectedOtherUid = selectedChatUser?.uid || selectedChatUser?.id || '';
+  const myActiveUid = effectiveUser?.uid || effectiveUser?.id || '';
+
   useEffect(() => {
-    if (!selectedChatUser || chatView !== 'conversation') return;
-    const myUid = effectiveUser?.uid || effectiveUser?.id;
-    const otherUid = selectedChatUser.uid || selectedChatUser.id;
-    if (!myUid || !otherUid) return;
+    if (!selectedOtherUid || !myActiveUid || chatView !== 'conversation') return;
 
-    const chatId = buildCanonicalChatId(myUid, otherUid);
+    const chatId = buildCanonicalChatId(myActiveUid, selectedOtherUid);
     socketRef.current?.emit('join_chat', chatId);
-    socketRef.current?.emit('mark_read', { chatId, senderId: otherUid, recipientId: myUid });
+    socketRef.current?.emit('mark_read', { chatId, senderId: selectedOtherUid, recipientId: myActiveUid });
 
+    let cancelled = false;
     let localMsgs: any[] = [];
     try {
       const cached = localStorage.getItem('alov_msgs_' + chatId);
       if (cached) localMsgs = JSON.parse(cached);
     } catch {}
 
-    const sanitizedLocal = localMsgs.map((m) => ({
+    const sanitizedLocal = (Array.isArray(localMsgs) ? localMsgs : []).map((m) => ({
       ...m,
       status: m.status === 'sending' || !m.status ? 'sent' : m.status,
     }));
+
     if (sanitizedLocal.length > 0) {
-      setChatMessages((prev) => ({ ...prev, [chatId]: sanitizedLocal, [otherUid]: sanitizedLocal }));
+      setChatMessages((prev) => {
+        const merged = mergeUniqueChatMessages(sanitizedLocal, prev[chatId], prev[selectedOtherUid]);
+        return { ...prev, [chatId]: merged, [selectedOtherUid]: merged };
+      });
     }
 
     apiFetchJson(`/api/chats/${encodeURIComponent(chatId)}/messages`).then((data) => {
+      if (cancelled) return;
       if (data?.success) {
         if (data.friendship !== undefined) {
           setChatFriendships((prev) => ({ ...prev, [chatId]: Boolean(data.friendship?.active) }));
         }
         if (Array.isArray(data.messages)) {
-          const map = new Map<string, any>();
-          [...sanitizedLocal, ...data.messages].forEach((m) => {
-            map.set(m.id, { ...m, status: m.status === 'sending' || !m.status ? 'sent' : m.status });
+          setChatMessages((prev) => {
+            // Merge safely inside functional update so optimistically sent GIFs/messages are NEVER wiped!
+            const merged = mergeUniqueChatMessages(
+              sanitizedLocal,
+              data.messages,
+              prev[chatId],
+              prev[selectedOtherUid]
+            );
+            try {
+              localStorage.setItem('alov_msgs_' + chatId, JSON.stringify(capMessagesForLocalCache(merged)));
+            } catch {}
+            return { ...prev, [chatId]: merged, [selectedOtherUid]: merged };
           });
-          const merged = Array.from(map.values()).sort(
-            (a, b) => new Date(a.createdAt || 0).getTime() - new Date(b.createdAt || 0).getTime()
-          );
-          setChatMessages((prev) => ({ ...prev, [chatId]: merged, [otherUid]: merged }));
-          try {
-            localStorage.setItem('alov_msgs_' + chatId, JSON.stringify(merged));
-          } catch {}
         }
       }
     });
-  }, [apiFetchJson, chatView, effectiveUser?.id, effectiveUser?.uid, selectedChatUser]);
+
+    return () => {
+      cancelled = true;
+    };
+  }, [apiFetchJson, chatView, myActiveUid, selectedOtherUid]);
 
   // Countdown tick for female diamond unlock timer
   useEffect(() => {
@@ -651,15 +713,77 @@ export const ChatView: React.FC<ChatViewProps> = ({
     return () => window.clearInterval(timer);
   }, [effectiveUser?.pendingDiamondBatches]);
 
-  // Auto-scroll messages container
+  const myUid = effectiveUser?.uid || effectiveUser?.id;
+  const otherUid = selectedChatUser?.uid || selectedChatUser?.id;
+  const activeChatId = myUid && otherUid ? buildCanonicalChatId(myUid, otherUid) : '';
+  const isFriendActive = Boolean(activeChatId && chatFriendships[activeChatId]);
+  const isAIBotChat = otherUid === ALOV_AI_USER.uid || otherUid === 'user_kamola_006' || otherUid === 'ALOV-006';
+  const isSenderCharged = canChargeForMessage({
+    senderGender: effectiveUser?.gender,
+    isAIBot: isAIBotChat,
+    isFriendFreeChat: isFriendActive,
+    isAdminSender: isAdminTelegramUser(effectiveUser),
+  });
+
+  const msgs =
+    (activeChatId && chatMessages[activeChatId]) ||
+    (otherUid && chatMessages[otherUid]) ||
+    [];
+  const sortedMessages = mergeUniqueChatMessages(msgs);
+
+  // Smart scroll handler — never yanks user back down when scrolling up!
+  const handleMessagesScroll = useCallback(() => {
+    const el = chatMessagesContainerRef.current;
+    if (!el) return;
+    const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
+    const nearBottom = distanceFromBottom <= 100;
+    isUserNearBottomRef.current = nearBottom;
+    setShowScrollToBottom(!nearBottom && el.scrollHeight > el.clientHeight + 80);
+  }, []);
+
+  const scrollToBottom = useCallback((smooth = false) => {
+    const el = chatMessagesContainerRef.current;
+    if (!el) return;
+    if (smooth && typeof el.scrollTo === 'function') {
+      el.scrollTo({ top: el.scrollHeight, behavior: 'smooth' });
+    } else {
+      el.scrollTop = el.scrollHeight;
+    }
+    isUserNearBottomRef.current = true;
+    setShowScrollToBottom(false);
+  }, []);
+
   useEffect(() => {
-    if (chatView === 'conversation') {
+    if (chatView !== 'conversation') {
+      prevConversationKeyRef.current = '';
+      prevMessageCountRef.current = 0;
+      return;
+    }
+    const convKey = `${myUid || ''}_${otherUid || ''}`;
+    const conversationChanged = prevConversationKeyRef.current !== convKey;
+    const shouldScroll = shouldAutoScrollConversation({
+      prevCount: prevMessageCountRef.current,
+      nextCount: sortedMessages.length,
+      conversationChanged,
+      forceScroll: forceScrollToBottomRef.current,
+      isNearBottom: isUserNearBottomRef.current,
+    });
+
+    prevConversationKeyRef.current = convKey;
+    prevMessageCountRef.current = sortedMessages.length;
+
+    if (shouldScroll) {
+      forceScrollToBottomRef.current = false;
       requestAnimationFrame(() => {
         const el = chatMessagesContainerRef.current;
-        if (el) el.scrollTop = el.scrollHeight;
+        if (el) {
+          el.scrollTop = el.scrollHeight;
+          isUserNearBottomRef.current = true;
+          setShowScrollToBottom(false);
+        }
       });
     }
-  }, [chatMessages, chatView, selectedChatUser?.id, selectedChatUser?.uid]);
+  }, [chatView, myUid, otherUid, sortedMessages.length]);
 
   const handleOpenConversation = (targetUser: any) => {
     setSelectedChatUser(targetUser);
@@ -667,33 +791,35 @@ export const ChatView: React.FC<ChatViewProps> = ({
     setIsOtherTyping(false);
     setInputMessage('');
     setGifBarHideTrigger((n) => n + 1);
+    isUserNearBottomRef.current = true;
+    forceScrollToBottomRef.current = true;
 
-    const myUid = effectiveUser?.uid || effectiveUser?.id;
-    const otherUid = targetUser?.uid || targetUser?.id;
-    if (myUid && otherUid) {
-      const chatId = buildCanonicalChatId(myUid, otherUid);
+    const uidNow = effectiveUser?.uid || effectiveUser?.id;
+    const targetId = targetUser?.uid || targetUser?.id;
+    if (uidNow && targetId) {
+      const chatId = buildCanonicalChatId(uidNow, targetId);
       setChatsList((prev) =>
-        prev.map((c) => (c.id === chatId ? { ...c, unreadCount: { ...(c.unreadCount || {}), [myUid]: 0 } } : c))
+        prev.map((c) => (c.id === chatId ? { ...c, unreadCount: { ...(c.unreadCount || {}), [uidNow]: 0 } } : c))
       );
       apiFetchJson('/api/chats/open', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ myUid, targetUid: otherUid, partnerSnapshot: targetUser }),
+        body: JSON.stringify({ myUid: uidNow, targetUid: targetId, partnerSnapshot: targetUser }),
       }).catch(() => {});
     }
   };
 
   const handleToggleFriendship = async () => {
-    const myUid = effectiveUser?.uid || effectiveUser?.id;
-    const otherUid = selectedChatUser?.uid || selectedChatUser?.id;
-    if (!myUid || !otherUid) return;
-    const chatId = buildCanonicalChatId(myUid, otherUid);
+    const uidNow = effectiveUser?.uid || effectiveUser?.id;
+    const targetId = selectedChatUser?.uid || selectedChatUser?.id;
+    if (!uidNow || !targetId) return;
+    const chatId = buildCanonicalChatId(uidNow, targetId);
     const nextState = !chatFriendships[chatId];
     setChatFriendships((prev) => ({ ...prev, [chatId]: nextState }));
     const data = await apiFetchJson('/api/chats/friendship', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ chatId, uid: myUid, enabled: nextState }),
+      body: JSON.stringify({ chatId, uid: uidNow, enabled: nextState }),
     });
     if (data?.success && data.friendship) {
       setChatFriendships((prev) => ({ ...prev, [chatId]: Boolean(data.friendship.active) }));
@@ -703,27 +829,28 @@ export const ChatView: React.FC<ChatViewProps> = ({
   };
 
   const handleTyping = () => {
-    const myUid = effectiveUser?.uid || effectiveUser?.id;
-    const otherUid = selectedChatUser?.uid || selectedChatUser?.id;
-    if (!myUid || !otherUid) return;
-    const chatId = buildCanonicalChatId(myUid, otherUid);
+    const uidNow = effectiveUser?.uid || effectiveUser?.id;
+    const targetId = selectedChatUser?.uid || selectedChatUser?.id;
+    if (!uidNow || !targetId) return;
+    const chatId = buildCanonicalChatId(uidNow, targetId);
     if (typingTimeoutRef.current) clearTimeout(typingTimeoutRef.current);
-    socketRef.current?.emit('typing', { chatId, uid: myUid, isTyping: true });
+    socketRef.current?.emit('typing', { chatId, uid: uidNow, isTyping: true });
     typingTimeoutRef.current = setTimeout(() => {
-      socketRef.current?.emit('typing', { chatId, uid: myUid, isTyping: false });
+      socketRef.current?.emit('typing', { chatId, uid: uidNow, isTyping: false });
     }, 2000);
   };
 
   const handleSendMessage = async (
     type: 'text' | 'image' | 'gif' | 'video' | 'audio' | 'voice' = 'text',
     fileUrl?: string,
-    customCaption?: string
+    customCaption?: string,
+    extra?: { durationSec?: number; fileName?: string }
   ) => {
     if (!selectedChatUser) return;
     if (type === 'text' && !inputMessage.trim()) return;
 
-    const myUid = effectiveUser?.uid || effectiveUser?.id;
-    if (!myUid) {
+    const uidNow = effectiveUser?.uid || effectiveUser?.id;
+    if (!uidNow) {
       onOpenAuth?.();
       return;
     }
@@ -740,23 +867,27 @@ export const ChatView: React.FC<ChatViewProps> = ({
             ? 'Video 🎥'
             : type === 'voice'
             ? 'Ovozli xabar 🎤'
-            : 'Audio 🎵');
+            : extra?.fileName || 'Audio 🎵');
 
     if (type === 'text') setInputMessage('');
     setGifBarHideTrigger((n) => n + 1);
+    forceScrollToBottomRef.current = true;
 
-    const otherUid = selectedChatUser.uid || selectedChatUser.id;
-    const isAIBot = otherUid === ALOV_AI_USER.uid;
-    const chatId = buildCanonicalChatId(myUid, otherUid);
+    const targetId = selectedChatUser.uid || selectedChatUser.id;
+    const isAIBot = targetId === ALOV_AI_USER.uid;
+    const chatId = buildCanonicalChatId(uidNow, targetId);
+    const msgId = generateUniqueMessageId('msg');
 
     const msgObj = {
-      id: 'msg_' + Date.now() + Math.random().toString(36).substring(2, 5),
-      senderId: myUid,
+      id: msgId,
+      senderId: uidNow,
       senderName: effectiveUser?.name || 'Foydalanuvchi',
       text,
       type,
       fileUrl: fileUrl || null,
       ...(type === 'gif' && fileUrl ? { content: fileUrl } : {}),
+      ...(extra?.durationSec ? { durationSec: extra.durationSec } : {}),
+      ...(extra?.fileName ? { fileName: extra.fileName } : {}),
       status: 'sending' as 'sending' | 'sent' | 'read',
       read: false,
       createdAt: new Date().toISOString(),
@@ -764,11 +895,29 @@ export const ChatView: React.FC<ChatViewProps> = ({
     };
 
     if (typingTimeoutRef.current) clearTimeout(typingTimeoutRef.current);
-    socketRef.current?.emit('typing', { chatId, uid: myUid, isTyping: false });
+    socketRef.current?.emit('typing', { chatId, uid: uidNow, isTyping: false });
+
+    // Optimistically add via unique-ID merge BEFORE socket ack so consecutive GIFs always stay separate and visible
+    setChatMessages((prev) => {
+      const partnerKeys = [selectedChatUser.id, selectedChatUser.uid, targetId].filter(
+        (k): k is string => Boolean(k) && k !== uidNow
+      );
+      const keys = Array.from(new Set([chatId, ...partnerKeys].filter(Boolean))) as string[];
+      const next = { ...prev };
+      keys.forEach((k) => {
+        next[k] = mergeUniqueChatMessages(prev[k], [msgObj]);
+      });
+      try {
+        localStorage.setItem('alov_msgs_' + chatId, JSON.stringify(capMessagesForLocalCache(next[chatId])));
+      } catch {}
+      return next;
+    });
+
+    const coinCost = getMessageCoinCost(type);
 
     socketRef.current?.emit(
       'send_message',
-      { chatId, senderId: myUid, recipientId: otherUid, message: msgObj },
+      { chatId, senderId: uidNow, recipientId: targetId, message: msgObj },
       (ack: any) => {
         if (ack && ack.success === false) {
           setChatMessages((prev) => {
@@ -777,12 +926,12 @@ export const ChatView: React.FC<ChatViewProps> = ({
               if (next[k]) next[k] = next[k].filter((m) => m.id !== msgObj.id);
             });
             try {
-              localStorage.setItem('alov_msgs_' + chatId, JSON.stringify(next[chatId] || []));
+              localStorage.setItem('alov_msgs_' + chatId, JSON.stringify(capMessagesForLocalCache(next[chatId] || [])));
             } catch {}
             return next;
           });
           if (ack.error === 'insufficient_coins') {
-            const notice = ack.message || `Monetalaringiz yetarli emas! Har bir xabar narxi ${MESSAGE_COIN_COST} moneta.`;
+            const notice = ack.message || `Monetalaringiz yetarli emas! Ushbu xabar narxi ${coinCost} moneta.`;
             if (onOpenTopUp) {
               onOpenTopUp(notice);
             } else if (typeof window !== 'undefined' && window.self !== window.top) {
@@ -802,25 +951,13 @@ export const ChatView: React.FC<ChatViewProps> = ({
               }
             });
             try {
-              localStorage.setItem('alov_msgs_' + chatId, JSON.stringify(next[chatId] || []));
+              localStorage.setItem('alov_msgs_' + chatId, JSON.stringify(capMessagesForLocalCache(next[chatId] || [])));
             } catch {}
             return next;
           });
         }
       }
     );
-
-    setChatMessages((prev) => {
-      const keys = Array.from(new Set([chatId, selectedChatUser.id, selectedChatUser.uid, otherUid].filter(Boolean))) as string[];
-      const next = { ...prev };
-      keys.forEach((k) => {
-        next[k] = [...(prev[k] || []), msgObj];
-      });
-      try {
-        localStorage.setItem('alov_msgs_' + chatId, JSON.stringify(next[chatId]));
-      } catch {}
-      return next;
-    });
 
     setTimeout(() => {
       setChatMessages((prev) => {
@@ -832,22 +969,29 @@ export const ChatView: React.FC<ChatViewProps> = ({
         });
         return next;
       });
-    }, 300);
+    }, 350);
 
     setChatsList((prev) => {
       const entry = {
         id: chatId,
-        participants: [myUid, otherUid],
-        lastMessage: type === 'gif' ? 'GIF 🎬' : text,
+        participants: [uidNow, targetId],
+        lastMessage:
+          type === 'gif'
+            ? 'GIF 🎬'
+            : type === 'voice'
+            ? '🎤 Ovozli xabar'
+            : type === 'audio'
+            ? `🎵 ${extra?.fileName || 'Audio'}`
+            : text,
         updatedAt: msgObj.createdAt,
         partner: selectedChatUser,
       };
-      const merged = mergeChatLists([prev, [entry]], myUid, {
-        myAliases: [myUid, effectiveUser?.id].filter(Boolean) as string[],
+      const merged = mergeChatLists([prev, [entry]], uidNow, {
+        myAliases: [uidNow, effectiveUser?.id].filter(Boolean) as string[],
         usersList: usersListRef.current,
       });
       try {
-        localStorage.setItem('alov_chats_' + myUid, JSON.stringify(merged));
+        localStorage.setItem('alov_chats_' + uidNow, JSON.stringify(merged));
       } catch {}
       return merged;
     });
@@ -865,11 +1009,23 @@ export const ChatView: React.FC<ChatViewProps> = ({
     await handleSendMessage('gif', selectedGifUrl, 'GIF');
   };
 
-  const handleSendPickedMedia = async (file: File, kind: ChatMediaKind, caption?: string) => {
-    if (!file || !selectedChatUser) return;
+  const handleSendPickedMedia = async (
+    payload: { file?: File; remoteUrl?: string; fileName?: string },
+    kind: ChatMediaKind,
+    caption?: string
+  ) => {
+    if (!selectedChatUser) return;
+    if (payload.remoteUrl && !payload.file) {
+      await handleSendMessage(kind, payload.remoteUrl, caption, { fileName: payload.fileName });
+      setShowChatMediaPicker(false);
+      return;
+    }
+
+    const file = payload.file;
+    if (!file) return;
     setIsUploadingChatMedia(true);
     try {
-      const res = await fetch(`${apiOrigin}/api/media/upload-raw`, {
+      const res = await fetch(`${apiOrigin}/api/media/upload-raw?type=${encodeURIComponent(kind)}`, {
         method: 'POST',
         headers: {
           ...getAuthHeaders(),
@@ -881,13 +1037,13 @@ export const ChatView: React.FC<ChatViewProps> = ({
       const data = await res.json().catch(() => null);
       if (res.ok && data?.success && data?.url) {
         const resolved = data.url.startsWith('/') ? `${apiOrigin}${data.url}` : data.url;
-        await handleSendMessage(kind, resolved, caption);
+        await handleSendMessage(kind, resolved, caption, { fileName: file.name });
         setShowChatMediaPicker(false);
       } else {
         const reader = new FileReader();
         reader.onloadend = async () => {
           if (typeof reader.result === 'string') {
-            await handleSendMessage(kind, reader.result, caption);
+            await handleSendMessage(kind, reader.result, caption, { fileName: file.name });
             setShowChatMediaPicker(false);
           }
         };
@@ -900,41 +1056,119 @@ export const ChatView: React.FC<ChatViewProps> = ({
     }
   };
 
+  // Cleanup Dictaphone helpers
+  const cleanupDictaphoneResources = useCallback(() => {
+    if (recordingTimerRef.current !== null) {
+      window.clearInterval(recordingTimerRef.current);
+      recordingTimerRef.current = null;
+    }
+    if (analyserRafRef.current !== null) {
+      cancelAnimationFrame(analyserRafRef.current);
+      analyserRafRef.current = null;
+    }
+    if (audioContextRef.current) {
+      try {
+        void audioContextRef.current.close();
+      } catch {}
+      audioContextRef.current = null;
+    }
+    if (mediaStreamRef.current) {
+      try {
+        mediaStreamRef.current.getTracks().forEach((t) => t.stop());
+      } catch {}
+      mediaStreamRef.current = null;
+    }
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      cleanupDictaphoneResources();
+    };
+  }, [cleanupDictaphoneResources]);
+
   const startRecording = async () => {
     if (isRecordingRef.current) return;
     isRecordingRef.current = true;
+    shouldDiscardRecordingRef.current = false;
+    recordingDurationRef.current = 0;
+    setRecordingSeconds(0);
+    setRecordingLevels(Array(14).fill(25));
+
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       if (!isRecordingRef.current) {
         stream.getTracks().forEach((t) => t.stop());
         return;
       }
-      const recorder = new MediaRecorder(stream);
+      mediaStreamRef.current = stream;
+
+      // Live audio level meter via Web Audio AnalyserNode
+      try {
+        const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
+        if (AudioCtx) {
+          const ctx = new AudioCtx();
+          const source = ctx.createMediaStreamSource(stream);
+          const analyser = ctx.createAnalyser();
+          analyser.fftSize = 32;
+          source.connect(analyser);
+          audioContextRef.current = ctx;
+          const dataArray = new Uint8Array(analyser.frequencyBinCount);
+
+          const tickLevels = () => {
+            if (!isRecordingRef.current) return;
+            analyser.getByteFrequencyData(dataArray);
+            const bars: number[] = [];
+            for (let i = 0; i < 14; i++) {
+              const v = dataArray[i % dataArray.length] || 0;
+              bars.push(Math.max(18, Math.min(100, Math.round((v / 255) * 100) + 18)));
+            }
+            setRecordingLevels(bars);
+            analyserRafRef.current = requestAnimationFrame(tickLevels);
+          };
+          analyserRafRef.current = requestAnimationFrame(tickLevels);
+        }
+      } catch {}
+
+      const supportedMime = pickSupportedAudioMimeType();
+      const recorder = supportedMime
+        ? new MediaRecorder(stream, { mimeType: supportedMime })
+        : new MediaRecorder(stream);
       const chunks: Blob[] = [];
+      const finalMime = recorder.mimeType || supportedMime || 'audio/webm';
 
       recorder.ondataavailable = (e) => {
-        if (e.data.size > 0) chunks.push(e.data);
+        if (e.data && e.data.size > 0) chunks.push(e.data);
       };
 
       recorder.onstop = async () => {
-        const blob = new Blob(chunks, { type: 'audio/webm' });
-        stream.getTracks().forEach((t) => t.stop());
-        if (blob.size < 200) return;
+        const recordedSec = Math.max(1, recordingDurationRef.current);
+        cleanupDictaphoneResources();
+        if (shouldDiscardRecordingRef.current) {
+          shouldDiscardRecordingRef.current = false;
+          return;
+        }
+        const blob = new Blob(chunks, { type: finalMime });
+        if (blob.size < 120) return;
 
+        const ext = finalMime.includes('mp4')
+          ? 'm4a'
+          : finalMime.includes('ogg')
+          ? 'ogg'
+          : 'weba';
         try {
-          const uploadRes = await fetch(`${apiOrigin}/api/media/upload-raw`, {
+          const uploadRes = await fetch(`${apiOrigin}/api/media/upload-raw?type=voice`, {
             method: 'POST',
             headers: {
               ...getAuthHeaders(),
-              'Content-Type': 'audio/webm',
-              'x-file-name': encodeURIComponent(`voice_${Date.now()}.webm`),
+              'Content-Type': finalMime,
+              'x-file-name': encodeURIComponent(`voice_${Date.now()}.${ext}`),
             },
             body: blob,
           });
           const data = await uploadRes.json().catch(() => null);
           if (uploadRes.ok && data?.success && data?.url) {
             const resolved = data.url.startsWith('/') ? `${apiOrigin}${data.url}` : data.url;
-            await handleSendMessage('voice', resolved);
+            await handleSendMessage('voice', resolved, undefined, { durationSec: recordedSec });
             return;
           }
         } catch {}
@@ -942,32 +1176,44 @@ export const ChatView: React.FC<ChatViewProps> = ({
         const reader = new FileReader();
         reader.onloadend = () => {
           if (typeof reader.result === 'string') {
-            handleSendMessage('voice', reader.result);
+            void handleSendMessage('voice', reader.result, undefined, { durationSec: recordedSec });
           }
         };
         reader.readAsDataURL(blob);
       };
 
-      recorder.start();
+      recorder.start(250);
       mediaRecorderRef.current = recorder;
       setIsRecording(true);
+      recordingTimerRef.current = window.setInterval(() => {
+        recordingDurationRef.current += 1;
+        setRecordingSeconds(recordingDurationRef.current);
+      }, 1000);
     } catch {
       isRecordingRef.current = false;
-      notifyParentOrToast("Mikrofonga ruxsat berilmadi");
+      cleanupDictaphoneResources();
+      notifyParentOrToast('Mikrofonga ruxsat berilmadi');
     }
   };
 
-  const stopRecording = () => {
+  const finishRecording = (discard: boolean) => {
+    shouldDiscardRecordingRef.current = discard;
     isRecordingRef.current = false;
+    setIsRecording(false);
     if (mediaRecorderRef.current) {
       try {
         if (mediaRecorderRef.current.state !== 'inactive') {
           mediaRecorderRef.current.stop();
+        } else {
+          cleanupDictaphoneResources();
         }
-      } catch {}
+      } catch {
+        cleanupDictaphoneResources();
+      }
       mediaRecorderRef.current = null;
+    } else {
+      cleanupDictaphoneResources();
     }
-    setIsRecording(false);
   };
 
   const triggerOpenProfile = (uid: string, snapshot?: any) => {
@@ -1007,16 +1253,19 @@ export const ChatView: React.FC<ChatViewProps> = ({
     return (
       <div
         data-testid="chat-view-list"
-        className="h-full w-full flex flex-col bg-[#09090D] text-zinc-100 p-3 sm:p-4 overflow-hidden"
+        className="flex-1 min-h-0 h-full w-full flex flex-col bg-[#09090D] text-zinc-100 p-3 sm:p-4 overflow-hidden"
       >
-        <div className="bg-[#11131C] rounded-[24px] border border-white/[0.08] overflow-hidden flex flex-col h-full min-h-0">
+        <div className="bg-[#11131C] rounded-[24px] border border-white/[0.08] overflow-hidden flex flex-col flex-1 min-h-0">
           <div className="p-4 border-b border-white/[0.08] flex items-center justify-between shrink-0">
             <h2 className="font-editorial text-2xl font-bold text-white">Xabarlar</h2>
             <span className="text-xs font-semibold text-zinc-400 tabular-nums" data-testid="chats-count-badge">
               {chatsList.length} faol suhbat
             </span>
           </div>
-          <div className="flex-1 min-h-0 divide-y divide-white/[0.06] overflow-y-auto pb-20" data-testid="chats-list-scroll-area">
+          <div
+            className="flex-1 min-h-0 divide-y divide-white/[0.06] overflow-y-auto overscroll-y-contain touch-pan-y pb-20"
+            data-testid="chats-list-scroll-area"
+          >
             {isLoadingChats ? (
               <>
                 <ChatSkeleton />
@@ -1029,19 +1278,19 @@ export const ChatView: React.FC<ChatViewProps> = ({
                   <MessageCircle className="w-8 h-8 text-zinc-500" />
                 </div>
                 <p className="text-xs text-zinc-400 font-medium">
-                  Hozircha xabarlar yo'q. Nomzodlar bilan suhbatni boshlang!
+                  Hozircha xabarlar yo&apos;q. Nomzodlar bilan suhbatni boshlang!
                 </p>
               </div>
             ) : (
               chatsList.map((chat, idx) => {
-                const myUid = effectiveUser?.uid || effectiveUser?.id;
-                const otherUid =
-                  chat.participants?.find((p: string) => p !== myUid) || chat.partner?.uid || chat.partner?.id;
+                const uidNow = effectiveUser?.uid || effectiveUser?.id;
+                const partnerUid =
+                  chat.participants?.find((p: string) => p !== uidNow) || chat.partner?.uid || chat.partner?.id;
                 const otherUser =
-                  usersList.find((u) => u.uid === otherUid || u.id === otherUid) ||
-                  (otherUid === ALOV_AI_USER.uid ? ALOV_AI_USER : null) ||
-                  chat.partner || { uid: otherUid, name: 'Foydalanuvchi' };
-                const unread = chat.unreadCount?.[myUid || ''] || 0;
+                  usersList.find((u) => u.uid === partnerUid || u.id === partnerUid) ||
+                  (partnerUid === ALOV_AI_USER.uid ? ALOV_AI_USER : null) ||
+                  chat.partner || { uid: partnerUid, name: 'Foydalanuvchi' };
+                const unread = chat.unreadCount?.[uidNow || ''] || 0;
                 const chatAvatar = resolveMediaOrAvatar(resolveEffectiveProfileAvatar(otherUser));
 
                 return (
@@ -1111,21 +1360,8 @@ export const ChatView: React.FC<ChatViewProps> = ({
     );
   }
 
-  const myUid = effectiveUser?.uid || effectiveUser?.id;
-  const otherUid = selectedChatUser?.uid || selectedChatUser?.id;
-  const activeChatId = myUid && otherUid ? buildCanonicalChatId(myUid, otherUid) : '';
-  const isFriendActive = Boolean(activeChatId && chatFriendships[activeChatId]);
-  const isAIBotChat = otherUid === ALOV_AI_USER.uid || otherUid === 'user_kamola_006' || otherUid === 'ALOV-006';
   const partnerOnline = isUserOnlineStrict(selectedChatUser, onlineUserIds);
   const partnerAvatar = resolveMediaOrAvatar(resolveEffectiveProfileAvatar(selectedChatUser));
-
-  const msgs =
-    (activeChatId && chatMessages[activeChatId]) ||
-    (otherUid && chatMessages[otherUid]) ||
-    [];
-  const sortedMessages = [...msgs].sort(
-    (a, b) => new Date(a.createdAt || 0).getTime() - new Date(b.createdAt || 0).getTime()
-  );
 
   const progressVal = Number(effectiveUser?.diamondProgress || 0);
   const progressPct = getDiamondProgressPercent(progressVal);
@@ -1139,8 +1375,9 @@ export const ChatView: React.FC<ChatViewProps> = ({
   return (
     <div
       data-testid="chat-view-conversation"
-      className="h-full w-full bg-[#09090D] flex flex-col overflow-hidden text-zinc-100"
+      className="flex-1 min-h-0 h-full w-full bg-[#09090D] flex flex-col overflow-hidden text-zinc-100 relative"
     >
+      {/* Top Bar */}
       <div className="shrink-0 z-20 px-3 py-2.5 border-b border-white/[0.08] flex items-center justify-between bg-[#11131C]">
         <div className="flex items-center space-x-2 min-w-0">
           <button
@@ -1220,103 +1457,175 @@ export const ChatView: React.FC<ChatViewProps> = ({
         </div>
       </div>
 
+      {/* Pricing / Earnings Strip */}
       {isFriendActive && !isAIBotChat ? (
         <div className="bg-emerald-500/15 border-b border-emerald-500/25 text-emerald-200 px-3.5 py-1.5 text-[10.5px] font-semibold flex items-center justify-between shrink-0">
-          <span>Do'stlashish faol — Yigitdan moneta yechilmaydi</span>
+          <span>Do&apos;stlashish faol — Yigitdan moneta yechilmaydi</span>
           <span className="text-emerald-300 font-bold whitespace-nowrap">Bepul chat</span>
         </div>
       ) : effectiveUser?.gender === 'female' ? (
         <div className="bg-cyan-500/10 border-b border-cyan-500/20 text-cyan-200 px-3.5 py-1.5 text-[10.5px] font-semibold flex items-center justify-between shrink-0">
-          <span>💎 Har bir javobingiz uchun +{MESSAGE_DIAMOND_REWARD} Almaz limitga qo'shiladi</span>
+          <span>💎 Har bir javobingiz uchun +{MESSAGE_DIAMOND_REWARD} Almaz limitga qo&apos;shiladi</span>
           <span className="font-mono text-cyan-300 font-bold whitespace-nowrap tabular-nums">
             Wallet: {formatDiamondsDisplay(effectiveUser?.diamonds)}
           </span>
         </div>
       ) : !isAIBotChat ? (
-        <div className="bg-amber-500/10 border-b border-amber-500/20 text-amber-200 px-3.5 py-1.5 text-[10.5px] font-semibold flex items-center justify-between shrink-0">
-          <span>🪙 Har bir xabar narxi: {MESSAGE_COIN_COST} Moneta</span>
-          <span className="font-mono text-amber-300 font-bold whitespace-nowrap tabular-nums">
+        <div className="bg-amber-500/10 border-b border-amber-500/20 text-amber-200 px-3.5 py-1.5 text-[10.5px] font-semibold flex items-center justify-between gap-2 shrink-0">
+          <span className="truncate">
+            🪙 Xabar/GIF/Rasm: {MESSAGE_COIN_COST} · Ovozli: {VOICE_MESSAGE_COIN_COST} · Audio/Video: {MEDIA_FILE_COIN_COST}
+          </span>
+          <span className="font-mono text-amber-300 font-bold whitespace-nowrap tabular-nums shrink-0" data-testid="chat-coin-balance">
             Balans: {effectiveUser?.coins ?? 100}
           </span>
         </div>
       ) : null}
 
+      {/* Scrollable Messages Viewport */}
       <div
         ref={chatMessagesContainerRef}
-        className="flex-1 min-h-0 px-3.5 py-3 overflow-y-auto overscroll-y-contain space-y-2.5 bg-[#09090D]"
+        onScroll={handleMessagesScroll}
+        data-testid="chat-messages-scroll-area"
+        style={{ WebkitOverflowScrolling: 'touch' }}
+        className="flex-1 min-h-0 px-3.5 py-3 overflow-y-auto overscroll-y-contain touch-pan-y space-y-2.5 bg-[#09090D]"
       >
         {sortedMessages.map((msg, idx) => {
           const isMe = msg.senderId === 'me' || (myUid && (msg.senderId === myUid || msg.userId === myUid));
           const rawMediaUrl = msg.fileUrl || (msg.type === 'gif' ? msg.content : '') || '';
           const resolvedUrl = rawMediaUrl.startsWith('/api/') ? `${apiOrigin}${rawMediaUrl}` : rawMediaUrl;
+          const frameless = isFramelessChatMediaType(msg);
+          const isDefaultMediaText =
+            !msg.text ||
+            ['GIF', 'Rasm 🖼️', 'Rasm', 'Video 🎥', 'Video'].includes(String(msg.text).trim());
 
           return (
             <div
               key={msg.id ? `${msg.id}_${idx}` : `msg_${idx}`}
+              data-testid={`chat-message-row-${msg.type || 'text'}`}
               className={`flex ${isMe ? 'justify-end' : 'justify-start'}`}
             >
-              <div
-                className={`max-w-[85%] rounded-[18px] relative ${
-                  msg.type === 'image' || msg.type === 'gif' ? 'p-2' : 'px-4 py-2.5'
-                } ${
-                  isMe
-                    ? 'bg-gradient-to-br from-[#E11D48] to-[#BE123C] text-white rounded-tr-none shadow-md shadow-rose-950/30'
-                    : 'bg-[#151824] text-zinc-100 border border-white/[0.08] rounded-tl-none'
-                }`}
-              >
-                {msg.type === 'gift' ? (
-                  <div className="flex items-center space-x-2.5 py-1">
-                    <span className="text-3xl shrink-0">{msg.giftIcon || msg.giftInfo?.giftIcon || '🎁'}</span>
-                    <div>
-                      <p className="font-bold text-xs">{msg.giftName || msg.giftInfo?.giftName || "Sovg'a"} yuborildi!</p>
-                      <p className="text-[10px] opacity-90 mt-0.5">🪙 {msg.coinPrice || msg.giftInfo?.coinPrice || 10} moneta</p>
+              {frameless ? (
+                <div
+                  data-testid="chat-frameless-media"
+                  className="max-w-[82%] sm:max-w-[75%] relative bg-transparent border-0 p-0 shadow-none"
+                >
+                  {msg.type === 'video' ? (
+                    <div className="relative rounded-2xl overflow-hidden">
+                      <VideoPlayer url={resolvedUrl} />
+                      {/* Timestamp pill top-right so bottom native video controls remain clear */}
+                      <div className="pointer-events-none absolute top-2 right-2 px-2 py-0.5 rounded-full bg-black/60 backdrop-blur-xs text-white flex items-center gap-1">
+                        <span className="text-[9.5px] tabular-nums">{msg.time}</span>
+                        {isMe && (
+                          <span className="flex items-center shrink-0">
+                            {msg.status === 'sending' ? (
+                              <Clock className="w-3 h-3 text-white/80 animate-pulse" />
+                            ) : msg.status === 'read' || msg.read ? (
+                              <CheckCheck className="w-3.5 h-3.5 text-cyan-300" />
+                            ) : (
+                              <Check className="w-3.5 h-3.5 text-white/90" />
+                            )}
+                          </span>
+                        )}
+                      </div>
                     </div>
-                  </div>
-                ) : msg.type === 'meet' ? (
-                  <a href={msg.meetUrl} target="_blank" rel="noreferrer" className="underline font-bold flex items-center space-x-2 py-1">
-                    <Video className="w-4 h-4" />
-                    <span>Google Meet Qo'shilish</span>
-                    <ArrowUpRight className="w-3.5 h-3.5" />
-                  </a>
-                ) : msg.type === 'image' || msg.type === 'gif' ? (
-                  <img
-                    src={resolvedUrl}
-                    alt={msg.text || (isGifMessage(msg) ? 'GIF' : '')}
-                    className={`rounded-xl max-h-60 ${
-                      isGifMessage(msg)
-                        ? 'min-w-[148px] min-h-[104px] max-w-[260px] w-auto object-contain bg-black/25 block'
-                        : 'object-cover block'
-                    }`}
-                  />
-                ) : msg.type === 'video' ? (
-                  <Suspense fallback={null}>
-                    <VideoPlayer url={resolvedUrl} />
-                  </Suspense>
-                ) : msg.type === 'voice' || msg.type === 'audio' ? (
-                  <Suspense fallback={null}>
-                    <VoiceMessage url={resolvedUrl} senderId={isMe ? 'me' : msg.senderId} />
-                  </Suspense>
-                ) : (
-                  <p className="text-[13px] leading-relaxed whitespace-pre-wrap break-words">{msg.text}</p>
-                )}
+                  ) : (
+                    <div className="relative rounded-2xl overflow-hidden inline-block">
+                      <img
+                        src={resolvedUrl}
+                        alt={msg.text || (isGifMessage(msg) ? 'GIF' : 'Rasm')}
+                        onClick={() => !isGifMessage(msg) && resolvedUrl && setLightboxImageUrl(resolvedUrl)}
+                        className={`rounded-2xl max-h-64 block ${
+                          isGifMessage(msg)
+                            ? 'min-w-[140px] min-h-[96px] max-w-[260px] w-auto object-contain bg-black/20'
+                            : 'max-w-[270px] w-auto object-cover cursor-pointer'
+                        }`}
+                      />
+                      <div className="pointer-events-none absolute bottom-2 right-2 px-2 py-0.5 rounded-full bg-black/60 backdrop-blur-xs text-white flex items-center gap-1">
+                        <span className="text-[9.5px] tabular-nums">{msg.time}</span>
+                        {isMe && (
+                          <span className="flex items-center shrink-0">
+                            {msg.status === 'sending' ? (
+                              <Clock className="w-3 h-3 text-white/80 animate-pulse" />
+                            ) : msg.status === 'read' || msg.read ? (
+                              <CheckCheck className="w-3.5 h-3.5 text-cyan-300" />
+                            ) : (
+                              <Check className="w-3.5 h-3.5 text-white/90" />
+                            )}
+                          </span>
+                        )}
+                      </div>
+                    </div>
+                  )}
 
-                <div className="flex items-center justify-end space-x-1 mt-1">
-                  <span className={`text-[9.5px] tabular-nums ${isMe ? 'text-rose-100/80' : 'text-zinc-500'}`}>
-                    {msg.time}
-                  </span>
-                  {isMe && (
-                    <span className="flex items-center ml-1 shrink-0">
-                      {msg.status === 'sending' ? (
-                        <Clock className="w-3 h-3 text-rose-200/90 animate-pulse" />
-                      ) : msg.status === 'read' || msg.read ? (
-                        <CheckCheck className="w-3.5 h-3.5 text-cyan-200" />
-                      ) : (
-                        <Check className="w-3.5 h-3.5 text-rose-200" />
-                      )}
-                    </span>
+                  {!isDefaultMediaText && (
+                    <p
+                      className={`mt-1 px-3 py-1.5 rounded-xl text-xs max-w-[260px] ${
+                        isMe
+                          ? 'bg-[#E11D48]/90 text-white ml-auto'
+                          : 'bg-[#151824] text-zinc-100 border border-white/[0.08]'
+                      }`}
+                    >
+                      {msg.text}
+                    </p>
                   )}
                 </div>
-              </div>
+              ) : (
+                <div
+                  className={`max-w-[85%] rounded-[18px] relative px-4 py-2.5 ${
+                    isMe
+                      ? 'bg-gradient-to-br from-[#E11D48] to-[#BE123C] text-white rounded-tr-none shadow-md shadow-rose-950/30'
+                      : 'bg-[#151824] text-zinc-100 border border-white/[0.08] rounded-tl-none'
+                  }`}
+                >
+                  {msg.type === 'gift' ? (
+                    <div className="flex items-center space-x-2.5 py-1">
+                      <span className="text-3xl shrink-0">{msg.giftIcon || msg.giftInfo?.giftIcon || '🎁'}</span>
+                      <div>
+                        <p className="font-bold text-xs">{msg.giftName || msg.giftInfo?.giftName || "Sovg'a"} yuborildi!</p>
+                        <p className="text-[10px] opacity-90 mt-0.5">🪙 {msg.coinPrice || msg.giftInfo?.coinPrice || 10} moneta</p>
+                      </div>
+                    </div>
+                  ) : msg.type === 'meet' ? (
+                    <a href={msg.meetUrl} target="_blank" rel="noreferrer" className="underline font-bold flex items-center space-x-2 py-1">
+                      <Video className="w-4 h-4" />
+                      <span>Google Meet Qo&apos;shilish</span>
+                      <ArrowUpRight className="w-3.5 h-3.5" />
+                    </a>
+                  ) : msg.type === 'voice' ? (
+                    <VoiceMessage
+                      url={resolvedUrl}
+                      senderId={isMe ? 'me' : msg.senderId}
+                      durationSec={msg.durationSec}
+                    />
+                  ) : msg.type === 'audio' ? (
+                    <AudioPlayer
+                      url={resolvedUrl}
+                      senderId={isMe ? 'me' : msg.senderId}
+                      title={msg.fileName || msg.text}
+                      durationSec={msg.durationSec}
+                    />
+                  ) : (
+                    <p className="text-[13px] leading-relaxed whitespace-pre-wrap break-words">{msg.text}</p>
+                  )}
+
+                  <div className="flex items-center justify-end space-x-1 mt-1">
+                    <span className={`text-[9.5px] tabular-nums ${isMe ? 'text-rose-100/80' : 'text-zinc-500'}`}>
+                      {msg.time}
+                    </span>
+                    {isMe && (
+                      <span className="flex items-center ml-1 shrink-0">
+                        {msg.status === 'sending' ? (
+                          <Clock className="w-3 h-3 text-rose-200/90 animate-pulse" />
+                        ) : msg.status === 'read' || msg.read ? (
+                          <CheckCheck className="w-3.5 h-3.5 text-cyan-200" />
+                        ) : (
+                          <Check className="w-3.5 h-3.5 text-rose-200" />
+                        )}
+                      </span>
+                    )}
+                  </div>
+                </div>
+              )}
             </div>
           );
         })}
@@ -1333,6 +1642,20 @@ export const ChatView: React.FC<ChatViewProps> = ({
         )}
       </div>
 
+      {/* Floating Scroll-to-Bottom Button when user scrolled up */}
+      {showScrollToBottom && (
+        <button
+          type="button"
+          onClick={() => scrollToBottom(true)}
+          data-testid="chat-scroll-bottom-btn"
+          aria-label="Eng pastga tushish"
+          className="absolute right-4 bottom-20 z-30 w-9 h-9 rounded-full bg-[#1C1F2E] hover:bg-[#262A3E] border border-white/15 text-zinc-100 shadow-lg flex items-center justify-center transition active:scale-90 cursor-pointer"
+        >
+          <ArrowDown className="w-4 h-4" />
+        </button>
+      )}
+
+      {/* Female Diamond Limit Strip */}
       {effectiveUser?.gender === 'female' && (
         <div className="bg-[#11131C] border-t border-white/[0.08] px-3.5 pt-2 pb-1.5 shrink-0 space-y-1">
           <div className="flex items-center justify-between text-[10.5px] font-bold">
@@ -1364,6 +1687,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
         </div>
       )}
 
+      {/* Bottom Input / Media Picker / GIF Bar / Dictaphone */}
       <div className="shrink-0 z-20 px-3 pt-2 pb-2.5 bg-[#11131C] border-t border-white/[0.08] flex flex-col">
         <Suspense fallback={null}>
           <ChatMediaPicker
@@ -1371,79 +1695,162 @@ export const ChatView: React.FC<ChatViewProps> = ({
             onToggleOpen={() => setShowChatMediaPicker((prev) => !prev)}
             onSendMedia={handleSendPickedMedia}
             isUploading={isUploadingChatMedia}
+            apiOrigin={apiOrigin}
+            currentUserUid={myUid}
+            showPrices={isSenderCharged}
           />
         </Suspense>
+
         <ChatGifBar
           query={inputMessage}
           hideTrigger={gifBarHideTrigger}
           apiOrigin={apiOrigin}
           onSelectGif={handleSendGif}
         />
-        <div className="flex items-end space-x-2 w-full">
-          <button
-            type="button"
-            onClick={() => setShowChatMediaPicker((prev) => !prev)}
-            aria-label="Media yuklash"
-            data-testid="toggle-chat-media-picker"
-            className={`p-2.5 rounded-full transition active:scale-90 cursor-pointer shrink-0 ${
-              showChatMediaPicker
-                ? 'bg-rose-500/20 text-rose-400'
-                : 'text-zinc-400 hover:bg-white/[0.06] hover:text-zinc-200'
-            }`}
+
+        {isRecording ? (
+          <div
+            data-testid="dictaphone-bar"
+            className="flex items-center gap-2.5 w-full bg-[#181B29] border border-rose-500/40 rounded-[22px] px-2.5 py-1.5"
           >
-            <Plus className={`w-5 h-5 transition-transform ${showChatMediaPicker ? 'rotate-45' : ''}`} />
-          </button>
-          <div className="flex-1 relative">
-            <textarea
-              placeholder="Xabar yozing..."
-              rows={1}
-              value={inputMessage}
-              onFocus={() => {
-                setTimeout(() => {
-                  const el = chatMessagesContainerRef.current;
-                  if (el) el.scrollTop = el.scrollHeight;
-                }, 120);
-              }}
-              onChange={(e) => {
-                setInputMessage(e.target.value);
-                handleTyping();
-              }}
-              onKeyDown={(e) => {
-                if (e.key === 'Enter' && !e.shiftKey) {
-                  e.preventDefault();
-                  handleSendMessage();
-                }
-              }}
-              className="w-full px-4 py-2.5 rounded-[20px] bg-[#181B29] border border-white/[0.08] text-[13px] text-white placeholder:text-zinc-500 focus:outline-none focus:border-rose-500 resize-none max-h-32"
-            />
-          </div>
-          {inputMessage.trim() ? (
             <button
               type="button"
-              aria-label="Xabarni yuborish"
-              onClick={() => handleSendMessage()}
-              className="bg-[#E11D48] text-white p-3 rounded-full shadow-lg hover:bg-[#BE123C] transition-all active:scale-95 flex items-center justify-center cursor-pointer"
+              onClick={() => finishRecording(true)}
+              data-testid="dictaphone-cancel-btn"
+              aria-label="Ovozli xabarni bekor qilish"
+              title="Bekor qilish"
+              className="p-2 rounded-full bg-rose-500/15 hover:bg-rose-500/30 text-rose-300 transition active:scale-90 cursor-pointer shrink-0"
+            >
+              <Trash2 className="w-4.5 h-4.5" />
+            </button>
+
+            <div className="flex items-center gap-2 shrink-0">
+              <span className="w-2.5 h-2.5 rounded-full bg-red-500 animate-pulse shrink-0" />
+              <span
+                data-testid="dictaphone-timer"
+                className="text-xs font-mono font-bold text-white tabular-nums"
+              >
+                {formatMediaDuration(recordingSeconds)}
+              </span>
+            </div>
+
+            <div className="flex-1 flex items-center justify-center gap-1 h-7 overflow-hidden px-1">
+              {recordingLevels.map((lvl, idx) => (
+                <span
+                  key={idx}
+                  style={{ height: `${lvl}%` }}
+                  className="w-1 rounded-full bg-rose-400/85 transition-all duration-100"
+                />
+              ))}
+            </div>
+
+            {isSenderCharged && (
+              <span className="text-[10px] font-bold text-amber-300 bg-amber-500/15 px-2 py-0.5 rounded-full border border-amber-500/25 shrink-0">
+                {VOICE_MESSAGE_COIN_COST} 🪙
+              </span>
+            )}
+
+            <button
+              type="button"
+              onClick={() => finishRecording(false)}
+              data-testid="dictaphone-send-btn"
+              aria-label="Ovozli xabarni yuborish"
+              title="Ovozli xabarni yuborish"
+              className="bg-[#E11D48] hover:bg-[#BE123C] text-white p-2.5 rounded-full shadow-lg transition active:scale-95 flex items-center justify-center cursor-pointer shrink-0"
             >
               <Send className="w-4.5 h-4.5" />
             </button>
-          ) : (
+          </div>
+        ) : (
+          <div className="flex items-end space-x-2 w-full">
             <button
               type="button"
-              aria-label={isRecording ? "Ovozli xabarni to'xtatish" : 'Ovozli xabar yozish'}
-              onMouseDown={startRecording}
-              onMouseUp={stopRecording}
-              onMouseLeave={() => { if (isRecordingRef.current) stopRecording(); }}
-              onTouchStart={startRecording}
-              onTouchEnd={stopRecording}
-              className={`p-3 rounded-full transition-all active:scale-95 flex items-center justify-center cursor-pointer ${
-                isRecording ? 'bg-red-600 text-white animate-pulse' : 'bg-white/[0.07] text-zinc-300 hover:bg-white/[0.12]'
+              onClick={() => setShowChatMediaPicker((prev) => !prev)}
+              aria-label="Media yuklash"
+              data-testid="toggle-chat-media-picker"
+              className={`p-2.5 rounded-full transition active:scale-90 cursor-pointer shrink-0 ${
+                showChatMediaPicker
+                  ? 'bg-rose-500/20 text-rose-400'
+                  : 'text-zinc-400 hover:bg-white/[0.06] hover:text-zinc-200'
               }`}
             >
-              {isRecording ? <Square className="w-5 h-5" /> : <Mic className="w-5 h-5" />}
+              <Plus className={`w-5 h-5 transition-transform ${showChatMediaPicker ? 'rotate-45' : ''}`} />
             </button>
-          )}
-        </div>
+            <div className="flex-1 relative">
+              <textarea
+                placeholder="Xabar yozing..."
+                rows={1}
+                value={inputMessage}
+                onFocus={() => {
+                  if (isUserNearBottomRef.current) {
+                    setTimeout(() => {
+                      const el = chatMessagesContainerRef.current;
+                      if (el) el.scrollTop = el.scrollHeight;
+                    }, 120);
+                  }
+                }}
+                onChange={(e) => {
+                  setInputMessage(e.target.value);
+                  handleTyping();
+                }}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' && !e.shiftKey) {
+                    e.preventDefault();
+                    void handleSendMessage();
+                  }
+                }}
+                className="w-full px-4 py-2.5 rounded-[20px] bg-[#181B29] border border-white/[0.08] text-[13px] text-white placeholder:text-zinc-500 focus:outline-none focus:border-rose-500 resize-none max-h-32"
+              />
+            </div>
+            {inputMessage.trim() ? (
+              <button
+                type="button"
+                aria-label="Xabarni yuborish"
+                data-testid="chat-send-text-btn"
+                onClick={() => void handleSendMessage()}
+                className="bg-[#E11D48] text-white p-3 rounded-full shadow-lg hover:bg-[#BE123C] transition-all active:scale-95 flex items-center justify-center cursor-pointer shrink-0"
+              >
+                <Send className="w-4.5 h-4.5" />
+              </button>
+            ) : (
+              <button
+                type="button"
+                aria-label="Ovozli xabar yozish (diktafon)"
+                title={isSenderCharged ? `Diktafon (${VOICE_MESSAGE_COIN_COST} moneta)` : 'Diktafon'}
+                data-testid="start-voice-recording-btn"
+                onClick={() => void startRecording()}
+                className="p-3 rounded-full transition-all active:scale-95 flex items-center justify-center cursor-pointer bg-white/[0.07] text-zinc-300 hover:bg-rose-500/20 hover:text-rose-300 shrink-0"
+              >
+                <Mic className="w-5 h-5" />
+              </button>
+            )}
+          </div>
+        )}
       </div>
+
+      {/* Image Fullscreen Lightbox */}
+      {lightboxImageUrl && (
+        <div
+          className="fixed inset-0 z-50 bg-black/90 backdrop-blur-md flex items-center justify-center p-4"
+          onClick={(e) => {
+            if (e.target === e.currentTarget) setLightboxImageUrl(null);
+          }}
+        >
+          <button
+            type="button"
+            onClick={() => setLightboxImageUrl(null)}
+            aria-label="Yopish"
+            className="absolute top-4 right-4 p-2.5 rounded-full bg-white/10 hover:bg-white/20 text-white cursor-pointer"
+          >
+            <X className="w-5 h-5" />
+          </button>
+          <img
+            src={lightboxImageUrl}
+            alt="Rasm"
+            className="max-w-full max-h-[88dvh] rounded-2xl object-contain shadow-2xl"
+          />
+        </div>
+      )}
     </div>
   );
 };

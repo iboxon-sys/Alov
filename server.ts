@@ -38,6 +38,7 @@ import {
 } from './src/utils/telegramProfile';
 import {
   MESSAGE_COIN_COST,
+  getMessageCoinCost,
   MESSAGE_DIAMOND_REWARD,
   DIAMOND_LIMIT_TARGET,
   ADMIN_FULL_COINS,
@@ -107,10 +108,14 @@ import {
   type MandatorySubscriptionConfig,
 } from './src/utils/telegramBotUtils';
 import {
+  buildUpdatedUserSnapshot,
+  collectReplacedUserMediaUrls,
+  deduplicateUsersList,
   isExplicitProfileDisplayName,
   normalizeTelegramUrl,
   pickNewestCanonicalUser,
   propagateProfileUpdateAcrossStores,
+  sanitizeUserProfileCollections,
   userSharesIdentity,
 } from './src/utils/profileSync';
 import { isAllowedCorsOrigin } from './src/utils/microFrontendBridge';
@@ -254,6 +259,18 @@ async function startServer() {
       res.setHeader('X-Frame-Options', 'SAMEORIGIN');
     }
     res.setHeader('Permissions-Policy', 'camera=*, microphone=*, display-capture=*, geolocation=*');
+    if (
+      cleanPath.startsWith('/api/') &&
+      !cleanPath.startsWith('/api/media/') &&
+      !cleanPath.startsWith('/api/face-id/photo/') &&
+      !cleanPath.startsWith('/api/telegram/avatar/')
+    ) {
+      res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+      res.setHeader('Pragma', 'no-cache');
+      res.setHeader('Expires', '0');
+    } else if (cleanPath === '/' || cleanPath === '/index.html' || cleanPath === '/sw.js') {
+      res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+    }
     next();
   });
 
@@ -406,6 +423,9 @@ async function startServer() {
       decodedName = decodeURIComponent(decodedName);
     } catch {}
     const extFromName = path.extname(decodedName).replace(/[^a-zA-Z0-9.]/g, '').toLowerCase();
+    if (extFromName === '.webm' && lowerMime.startsWith('audio/')) {
+      return '.weba';
+    }
     if (
       extFromName &&
       [
@@ -419,6 +439,7 @@ async function startServer() {
         '.mp4',
         '.m4v',
         '.webm',
+        '.weba',
         '.mov',
         '.mkv',
         '.3gp',
@@ -448,7 +469,7 @@ async function startServer() {
     if (lowerMime.includes('aac')) return '.aac';
     if (lowerMime.includes('flac')) return '.flac';
     if (lowerMime.includes('m4a') || lowerMime.includes('mp4a')) return '.m4a';
-    if (lowerMime.includes('audio/webm')) return '.webm';
+    if (lowerMime.includes('audio/webm')) return '.weba';
     return '.jpg';
   }
 
@@ -479,10 +500,15 @@ async function startServer() {
       }
 
       // Ensure exotic video uploads (.mkv/.mov/.3gp/.webm) convert to browser-safe MP4 when needed
+      const isAudioOnlyUpload =
+        ['voice', 'audio', 'music'].includes(requestedType) ||
+        mimeType.toLowerCase().startsWith('audio/') ||
+        ['.weba', '.mp3', '.wav', '.ogg', '.m4a', '.aac', '.flac', '.opus'].includes(ext);
       const isVideoUpload =
-        requestedType === 'video' ||
-        mimeType.toLowerCase().startsWith('video/') ||
-        ['.mp4', '.webm', '.mov', '.m4v', '.mkv', '.3gp'].includes(ext);
+        !isAudioOnlyUpload &&
+        (requestedType === 'video' ||
+          mimeType.toLowerCase().startsWith('video/') ||
+          ['.mp4', '.webm', '.mov', '.m4v', '.mkv', '.3gp'].includes(ext));
       if (isVideoUpload && ext !== '.mp4') {
         const convertedMp4 = await convertLocalMediaToMp4(destPath);
         if (convertedMp4) {
@@ -548,6 +574,7 @@ async function startServer() {
       '.mp4': 'video/mp4',
       '.m4v': 'video/mp4',
       '.webm': 'video/webm',
+      '.weba': 'audio/webm',
       '.mov': 'video/quicktime',
       '.mkv': 'video/x-matroska',
       '.3gp': 'video/3gpp',
@@ -3295,22 +3322,41 @@ Suhbatlashish qoidalaringiz:
       contentRepository.loadAllUsers(),
       contentRepository.loadAllPosts(),
     ]);
+    const combinedUsers: any[] = [...Array.from(usersStore.values())];
     for (const mu of mongoUsers) {
       if (mu && mu.uid && canPersistUserProfile(mu)) {
-        const existingLocal = usersStore.get(mu.uid);
-        const mongoUpdatedMs = new Date(mu.updatedAt || 0).getTime();
-        const localUpdatedMs = new Date(existingLocal?.updatedAt || 0).getTime();
-        if (!existingLocal || mongoUpdatedMs > localUpdatedMs) {
-          normalizeAndReleaseUser(mu);
-          usersStore.set(mu.uid, mu);
-        }
+        combinedUsers.push(mu);
       }
+    }
+    const { users: dedupedUsers, removedUids } = deduplicateUsersList(combinedUsers);
+    usersStore.clear();
+    for (const u of dedupedUsers) {
+      normalizeAndReleaseUser(u);
+      usersStore.set(u.uid, u);
+    }
+    if (removedUids.length > 0) {
+      for (const remUid of removedUids) {
+        void contentRepository.deleteUser(remUid);
+      }
+      saveUsersToDisk();
+    } else if (mongoUsers.length > 0) {
+      saveUsersToDisk();
     }
     if (mongoPosts.length > 0 || postsStore.length > 0) {
       const mergedPosts = mergePostsLists(mongoPosts, postsStore);
       postsStore.length = 0;
       postsStore.push(...mergedPosts);
       savePostsToDisk();
+    }
+  } else {
+    const { users: dedupedLocalUsers, removedUids } = deduplicateUsersList(Array.from(usersStore.values()));
+    if (removedUids.length > 0) {
+      usersStore.clear();
+      for (const u of dedupedLocalUsers) {
+        normalizeAndReleaseUser(u);
+        usersStore.set(u.uid, u);
+      }
+      saveUsersToDisk();
     }
   }
 
@@ -3798,15 +3844,20 @@ Suhbatlashish qoidalaringiz:
       const fallbackAvatar = '';
       const isAdminAccount = isAdminTelegramUser(existing) || isAdminTelegramUser(user);
 
-      const rawUsername = String(user.username || existing.username || `user_${targetUid.slice(-6)}`).trim().replace(/^@/, '');
-      if (/\s/.test(rawUsername) || !/^[a-zA-Z0-9_]{3,20}$/.test(rawUsername)) {
+      const hasUsernameField = user.username !== undefined;
+      const rawUsername = hasUsernameField
+        ? String(user.username || '').trim().replace(/^@/, '')
+        : String(existing.username || `user_${targetUid.slice(-6)}`).trim().replace(/^@/, '');
+      if (rawUsername && (/\s/.test(rawUsername) || !/^[a-zA-Z0-9_]{3,20}$/.test(rawUsername))) {
         return res.status(400).json({ success: false, error: 'Username da bo\x27sh joy bo\'lishi mumkin emas (faqat harflar, raqamlar va pastki chiziq, 3-20 ta belgi).' });
       }
-      for (const [uUid, uObj] of usersStore.entries()) {
-        if (uUid !== targetUid && !userSharesIdentity(uObj, { ...user, uid: targetUid })) {
-          const uName = String(uObj.username || '').trim().toLowerCase();
-          if (uName === rawUsername.toLowerCase()) {
-            return res.status(400).json({ success: false, error: `Ushbu "@${rawUsername}" username band. Iltimos, boshqa username tanlang.` });
+      if (rawUsername) {
+        for (const [uUid, uObj] of usersStore.entries()) {
+          if (uUid !== targetUid && !userSharesIdentity(uObj, { ...user, uid: targetUid })) {
+            const uName = String(uObj.username || '').trim().toLowerCase();
+            if (uName === rawUsername.toLowerCase()) {
+              return res.status(400).json({ success: false, error: `Ushbu "@${rawUsername}" username band. Iltimos, boshqa username tanlang.` });
+            }
           }
         }
       }
@@ -3881,40 +3932,45 @@ Suhbatlashish qoidalaringiz:
         fallbackAvatar;
 
       const currentlyOnline = presenceRegistry.isUidOnline(targetUid);
-      const mergedUser = {
-        isVerified: false,
-        bankCard: '',
-        followersCount: 0,
-        followingCount: 0,
-        likesCount: 0,
-        followers: [],
-        following: [],
-        diamondProgress: 0,
-        pendingDiamondBatches: [],
-        ...existing,
-        ...cleanIncomingUser,
-        gender: lockedGender,
-        birthDate: lockedBirthDate,
-        age: lockedAge,
-        phone: formattedSyncedPhone,
-        telegram: resolvedSyncedTelegram,
-        username: rawUsername,
-        name: finalResolvedName,
-        firstName: finalResolvedName,
-        first_name: finalResolvedName,
-        lastName: '',
-        last_name: '',
-        hasCustomAvatar: Boolean(customAvatarResolved),
-        avatar: finalResolvedAvatar,
-        banner: user.banner !== undefined ? user.banner : (existing.banner || ''),
-        coins: (existing && existing.coins !== undefined) ? existing.coins : (user.coins !== undefined ? user.coins : 100),
-        diamonds: (existing && existing.diamonds !== undefined) ? existing.diamonds : (user.diamonds !== undefined ? user.diamonds : 0),
-        uid: targetUid,
-        telegramChatId: knownChatId || existing.telegramChatId,
-        isOnline: currentlyOnline,
-        status: currentlyOnline ? 'online' : 'offline',
-        updatedAt: new Date().toISOString()
-      };
+      const mergedUser = buildUpdatedUserSnapshot(
+        {
+          isVerified: false,
+          bankCard: '',
+          followersCount: 0,
+          followingCount: 0,
+          likesCount: 0,
+          followers: [],
+          following: [],
+          diamondProgress: 0,
+          pendingDiamondBatches: [],
+          ...existing,
+        },
+        {
+          ...cleanIncomingUser,
+          gender: lockedGender,
+          birthDate: lockedBirthDate,
+          age: lockedAge,
+          phone: formattedSyncedPhone,
+          telegram: resolvedSyncedTelegram,
+          username: rawUsername,
+          name: finalResolvedName,
+          firstName: finalResolvedName,
+          first_name: finalResolvedName,
+          lastName: '',
+          last_name: '',
+          hasCustomAvatar: Boolean(customAvatarResolved),
+          avatar: finalResolvedAvatar,
+          banner: user.banner !== undefined ? String(user.banner || '') : (existing.banner || ''),
+          videoUrl: user.videoUrl !== undefined ? String(user.videoUrl || '') : (existing.videoUrl || ''),
+          coins: (existing && existing.coins !== undefined) ? existing.coins : (user.coins !== undefined ? user.coins : 100),
+          diamonds: (existing && existing.diamonds !== undefined) ? existing.diamonds : (user.diamonds !== undefined ? user.diamonds : 0),
+          uid: targetUid,
+          telegramChatId: knownChatId || existing.telegramChatId,
+          isOnline: currentlyOnline,
+          status: currentlyOnline ? 'online' : 'offline',
+          updatedAt: new Date().toISOString()
+        }
+      );
       normalizeAndReleaseUser(mergedUser);
       if (!canPersistUserProfile(mergedUser)) {
         return res.status(400).json({
@@ -3945,9 +4001,13 @@ Suhbatlashish qoidalaringiz:
       if (!uid || !updates) {
         return res.status(400).json({ error: 'uid and updates required' });
       }
-      const existing = usersStore.get(uid);
+      const existing = findUserByUidOrId(String(uid));
       if (existing) {
-        const sanitizedUpdates = { ...updates };
+        const canonicalUid = existing.uid;
+        const sanitizedUpdates: Record<string, any> = {};
+        for (const [k, v] of Object.entries(updates)) {
+          if (v !== undefined) sanitizedUpdates[k] = v;
+        }
         if (existing.isProfileCompleted === true) {
           if (existing.gender === 'male' || existing.gender === 'female') {
             sanitizedUpdates.gender = existing.gender;
@@ -3966,21 +4026,23 @@ Suhbatlashish qoidalaringiz:
           sanitizedUpdates.last_name = '';
         }
         if (sanitizedUpdates.phone !== undefined) {
-          const cleanP = String(sanitizedUpdates.phone).trim();
+          const cleanP = String(sanitizedUpdates.phone || '').trim();
           sanitizedUpdates.phone = cleanP && cleanP !== '+' && cleanP !== '+998' ? formatPhoneNumberPretty(cleanP) : '';
         }
         if (sanitizedUpdates.telegram !== undefined) {
-          const cleanTg = String(sanitizedUpdates.telegram).trim();
+          const cleanTg = String(sanitizedUpdates.telegram || '').trim();
           sanitizedUpdates.telegram = cleanTg ? (normalizeTelegramUrl(cleanTg) || cleanTg) : '';
         }
-        if (sanitizedUpdates.username !== undefined && String(sanitizedUpdates.username).trim()) {
-          const nextUn = String(sanitizedUpdates.username).trim().replace(/^@/, '');
-          if (/\s/.test(nextUn) || !/^[a-zA-Z0-9_]{3,20}$/.test(nextUn)) {
-            return res.status(400).json({ success: false, error: 'Username formati noto\'g\'ri.' });
-          }
-          for (const [uUid, uObj] of usersStore.entries()) {
-            if (uUid !== uid && !userSharesIdentity(uObj, existing) && String(uObj.username || '').trim().toLowerCase() === nextUn.toLowerCase()) {
-              return res.status(400).json({ success: false, error: `Ushbu "@${nextUn}" username band.` });
+        if (sanitizedUpdates.username !== undefined) {
+          const nextUn = String(sanitizedUpdates.username || '').trim().replace(/^@/, '');
+          if (nextUn) {
+            if (/\s/.test(nextUn) || !/^[a-zA-Z0-9_]{3,20}$/.test(nextUn)) {
+              return res.status(400).json({ success: false, error: 'Username formati noto\'g\'ri.' });
+            }
+            for (const [uUid, uObj] of usersStore.entries()) {
+              if (uUid !== canonicalUid && !userSharesIdentity(uObj, existing) && String(uObj.username || '').trim().toLowerCase() === nextUn.toLowerCase()) {
+                return res.status(400).json({ success: false, error: `Ushbu "@${nextUn}" username band.` });
+              }
             }
           }
           sanitizedUpdates.username = nextUn;
@@ -4001,16 +4063,20 @@ Suhbatlashish qoidalaringiz:
         ) {
           sanitizedUpdates.avatar = existing.faceId.capturedPhotoUrl;
         }
-        const updated = { ...existing, ...sanitizedUpdates, updatedAt: new Date().toISOString() };
+        const updated = buildUpdatedUserSnapshot(existing, {
+          ...sanitizedUpdates,
+          uid: canonicalUid,
+          updatedAt: new Date().toISOString(),
+        });
         if (updates.isOnline === undefined && updates.status === undefined) {
-          const online = presenceRegistry.isUidOnline(uid);
+          const online = presenceRegistry.isUidOnline(canonicalUid);
           updated.isOnline = online;
           updated.status = online ? 'online' : 'offline';
         }
         normalizeAndReleaseUser(updated);
         if (!canPersistUserProfile(updated)) {
-          usersStore.delete(uid);
-          void contentRepository.deleteUser(uid);
+          usersStore.delete(canonicalUid);
+          void contentRepository.deleteUser(canonicalUid);
           saveUsersToDisk();
           return res.status(400).json({
             success: false,
@@ -4071,6 +4137,8 @@ Suhbatlashish qoidalaringiz:
       usersStore.set(follower.uid, follower);
       usersStore.set(target.uid, target);
       saveUsersToDisk();
+      void contentRepository.upsertUser(follower);
+      void contentRepository.upsertUser(target);
 
       io.emit('user_updated', follower);
       io.emit('user_updated', target);
@@ -4588,15 +4656,26 @@ Suhbatlashish qoidalaringiz:
     if (!clean.startsWith('/api/media/')) return;
     const filename = path.basename(clean.split('?')[0]);
     if (!filename || filename.includes('..')) return;
+    const isInUserArrays = (u: any) =>
+      (['photos', 'gallery', 'media'] as const).some(
+        (field) => Array.isArray(u?.[field]) && u[field].includes(clean)
+      );
     if (
       canonicalUser?.avatar === clean ||
       canonicalUser?.banner === clean ||
-      canonicalUser?.faceId?.capturedPhotoUrl === clean
+      canonicalUser?.videoUrl === clean ||
+      canonicalUser?.faceId?.capturedPhotoUrl === clean ||
+      isInUserArrays(canonicalUser)
     ) {
       return;
     }
     const stillReferencedInUsers = Array.from(usersStore.values()).some(
-      (u) => u?.avatar === clean || u?.banner === clean || u?.faceId?.capturedPhotoUrl === clean
+      (u) =>
+        u?.avatar === clean ||
+        u?.banner === clean ||
+        u?.videoUrl === clean ||
+        u?.faceId?.capturedPhotoUrl === clean ||
+        isInUserArrays(u)
     );
     if (stillReferencedInUsers) return;
     const stillReferencedInPosts = postsStore.some(
@@ -4609,6 +4688,7 @@ Suhbatlashish qoidalaringiz:
         fs.unlinkSync(fpath);
       }
     } catch {}
+    void contentRepository.deleteMediaFile(filename);
   }
 
   async function dedupeAndPropagateUserProfile(
@@ -4617,6 +4697,9 @@ Suhbatlashish qoidalaringiz:
     extraAliases: string[] = []
   ) {
     if (!canonicalUser?.uid) return;
+    sanitizeUserProfileCollections(canonicalUser);
+    delete canonicalUser.telegramUsername;
+
     const aliasSet = new Set<string>(
       [previousSnapshot?.uid, previousSnapshot?.id, ...extraAliases]
         .map((v) => String(v || '').trim())
@@ -4643,8 +4726,14 @@ Suhbatlashish qoidalaringiz:
     const chatIdNum = Number(canonicalUser.telegramChatId || canonicalUser.chatId || 0);
     if (chatIdNum > 0) {
       const existingBot = findStoredBotUser(chatIdNum);
+      const oldPrevHandle = normalizeTelegramHandle(previousSnapshot?.telegram);
+      const oldPrevPhone = String(previousSnapshot?.phone || '').replace(/\D/g, '');
       for (const [k, entry] of Array.from(telegramBotUsers.entries())) {
-        if (entry && Number(entry.chatId) === chatIdNum) {
+        if (
+          (entry && Number(entry.chatId) === chatIdNum) ||
+          (oldPrevHandle && (k === oldPrevHandle || k === `@${oldPrevHandle}` || k === `https://t.me/${oldPrevHandle}`)) ||
+          (oldPrevPhone && (k === oldPrevPhone || k === `+${oldPrevPhone}`))
+        ) {
           telegramBotUsers.delete(k);
         }
       }
@@ -4683,12 +4772,10 @@ Suhbatlashish qoidalaringiz:
       saveTelegramBotUsers(telegramBotUsers);
     }
 
-    // Delete orphaned local avatar / banner files replaced during edit
-    if (previousSnapshot?.avatar && previousSnapshot.avatar !== canonicalUser.avatar) {
-      cleanupUnusedLocalMediaUrl(previousSnapshot.avatar, canonicalUser);
-    }
-    if (previousSnapshot?.banner && previousSnapshot.banner !== canonicalUser.banner) {
-      cleanupUnusedLocalMediaUrl(previousSnapshot.banner, canonicalUser);
+    // Delete ALL orphaned local avatar / banner / video / gallery files replaced during edit
+    const replacedUrls = collectReplacedUserMediaUrls(previousSnapshot, canonicalUser);
+    for (const oldUrl of replacedUrls) {
+      cleanupUnusedLocalMediaUrl(oldUrl, canonicalUser);
     }
 
     // Propagate name, username, avatar, verified badge across all persisted stores
@@ -6112,8 +6199,17 @@ Suhbatlashish qoidalaringiz:
     });
     app.use(vite.middlewares);
   } else {
-    app.use(express.static(path.resolve(__dirname, 'dist')));
+    app.use(
+      express.static(path.resolve(__dirname, 'dist'), {
+        setHeaders: (res, filePath) => {
+          if (filePath.endsWith('index.html') || filePath.endsWith('sw.js')) {
+            res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+          }
+        },
+      })
+    );
     app.get('*', (_req, res) => {
+      res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
       res.sendFile(path.resolve(__dirname, 'dist', 'index.html'));
     });
   }
@@ -6216,38 +6312,41 @@ Suhbatlashish qoidalaringiz:
       const isFriendFreeChat = Boolean(chatFriendshipsStore[chatId]?.active);
       const isAdminSender = isAdminTelegramUser(senderUser);
 
-      // --- PAID MESSAGE & TOKENOMICS LOGIC (5 Moneta) ---
+      // --- PAID MESSAGE & TOKENOMICS LOGIC (10 text/gif/img, 5 voice, 20 audio/video; female reward unchanged at 2.5) ---
+      const msgCoinCost = getMessageCoinCost(message?.type);
       if (canChargeForMessage({ senderGender: senderUser?.gender, isAIBot, isFriendFreeChat, isAdminSender })) {
         const currentCoins = senderUser.coins !== undefined ? senderUser.coins : 100;
-        if (currentCoins < MESSAGE_COIN_COST) {
+        if (currentCoins < msgCoinCost) {
           if (typeof callback === 'function') {
             callback({
               success: false,
               error: 'insufficient_coins',
-              message: `Monetangiz yetarli emas! Xabar yuborish uchun ${MESSAGE_COIN_COST} moneta kerak.`
+              requiredCoins: msgCoinCost,
+              message: `Monetangiz yetarli emas! Ushbu xabar turi uchun ${msgCoinCost} moneta kerak.`
             });
           }
           io.to(`user_${senderId}`).emit('insufficient_coins', {
-            message: `Monetalaringiz yetarli emas! Har bir xabar narxi ${MESSAGE_COIN_COST} moneta.`
+            requiredCoins: msgCoinCost,
+            message: `Monetalaringiz yetarli emas! Ushbu xabar narxi ${msgCoinCost} moneta.`
           });
           return;
         }
 
-        // Deduct 5 coins
-        senderUser.coins = currentCoins - MESSAGE_COIN_COST;
+        senderUser.coins = currentCoins - msgCoinCost;
         usersStore.set(senderId, senderUser);
         saveUsersToDisk();
 
-        // Create Pending Transaction (5 diamonds reward upon female reply)
+        // Create Pending Transaction (female diamond reward stays MESSAGE_DIAMOND_REWARD = 2.5 unchanged)
         const pendingTx = {
           id: 'tx_msg_' + message.id,
           sender: senderId,
           receiver: recipientId,
           type: 'message_paid',
-          coinAmount: MESSAGE_COIN_COST,
+          messageType: message?.type || 'text',
+          coinAmount: msgCoinCost,
           diamondAmount: MESSAGE_DIAMOND_REWARD,
           status: 'pending',
-          note: `Xabar uchun to'lov (${MESSAGE_COIN_COST} moneta — javob kutilmoqda)`,
+          note: `Xabar uchun to'lov (${msgCoinCost} moneta — javob kutilmoqda)`,
           createdAt: new Date().toISOString()
         };
         transactionsStore.unshift(pendingTx);
@@ -6346,12 +6445,15 @@ Suhbatlashish qoidalaringiz:
         lastMessage:
           message.type === 'gif'
             ? 'GIF 🎬'
-            : message.text ||
-              (message.type === 'image'
-                ? 'Rasm 🖼️'
-                : message.type === 'video'
-                ? 'Video 🎥'
-                : 'Xabar'),
+            : message.type === 'voice'
+            ? '🎤 Ovozli xabar'
+            : message.type === 'audio'
+            ? `🎵 ${message.fileName || 'Audio fayl'}`
+            : message.type === 'image'
+            ? '🖼️ Rasm'
+            : message.type === 'video'
+            ? '🎥 Video'
+            : message.text || 'Xabar',
         lastSenderId: senderId,
         updatedAt: new Date().toISOString()
       };

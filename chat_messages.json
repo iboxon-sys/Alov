@@ -148,5 +148,208 @@
         "avatar": "/api/telegram/avatar/6621230534"
       }
     }
+  ],
+  "pw_female_chat_1_pw_male_chat_1": [
+    {
+      "id": "msg_1794935500795_1_916b6e94",
+      "senderId": "pw_male_chat_1",
+      "senderName": "Test Yigit",
+      "text": "GIF",
+      "type": "gif",
+      "fileUrl": "http://localhost:3000/assets/aistudio/image_e20a1307.webp?full=1",
+      "content": "http://localhost:3000/assets/aistudio/image_e20a1307.webp?full=1",
+      "status": "sent",
+      "read": false,
+      "createdAt": "2026-11-17T17:11:40.795Z",
+      "time": "05:11 PM",
+      "senderAvatar": "",
+      "sender": {
+        "_id": "pw_male_chat_1",
+        "uid": "pw_male_chat_1",
+        "name": "Test Yigit",
+        "avatar": ""
+      }
+    },
+    {
+      "id": "msg_1794935501781_2_b8f77f91",
+      "senderId": "pw_male_chat_1",
+      "senderName": "Test Yigit",
+      "text": "GIF",
+      "type": "gif",
+      "fileUrl": "http://localhost:3000/assets/aistudio/image_e20a1307.webp?full=2",
+      "content": "http://localhost:3000/assets/aistudio/image_e20a1307.webp?full=2",
+      "status": "sent",
+      "read": false,
+      "createdAt": "2026-11-17T17:11:41.781Z",
+      "time": "05:11 PM",
+      "senderAvatar": "",
+      "sender": {
+        "_id": "pw_male_chat_1",
+        "uid": "pw_male_chat_1",
+        "name": "Test Yigit",
+        "avatar": ""
+      }
+    },
+    {
+      "id": "msg_1794935504308_3_ff591ba4",
+      "senderId": "pw_male_chat_1",
+      "senderName": "Test Yigit",
+      "text": "Ovozli xabar 🎤",
+      "type": "voice",
+      "fileUrl": "http://localhost:3000/api/media/video_1794935503912_cah2hj.mp4",
+      "durationSec": 1,
+      "status": "sent",
+      "read": false,
+      "createdAt": "2026-11-17T17:11:44.308Z",
+      "time": "05:11 PM",
+      "senderAvatar": "",
+      "sender": {
+        "_id": "pw_male_chat_1",
+        "uid": "pw_male_chat_1",
+        "name": "Test Yigit",
+        "avatar": ""
+      }
+    }
+  ],
+  "pw_female_chat_v2_pw_male_chat_v2": [
+    {
+      "id": "msg_1794936012220_1_0fc2c7db",
+      "senderId": "pw_male_chat_v2",
+      "senderName": "Alisher Test",
+      "text": "GIF",
+      "type": "gif",
+      "fileUrl": "https://static.klipy.com/ii/35ccce3d852f7995dd2da910f2abd795/8c/69/FhLFVxQb.gif",
+      "content": "https://static.klipy.com/ii/35ccce3d852f7995dd2da910f2abd795/8c/69/FhLFVxQb.gif",
+      "status": "read",
+      "read": true,
+      "createdAt": "2026-11-17T17:20:12.221Z",
+      "time": "05:20 PM",
+      "senderAvatar": "https://i.pravatar.cc/150?img=12",
+      "sender": {
+        "_id": "pw_male_chat_v2",
+        "uid": "pw_male_chat_v2",
+        "name": "Alisher Test",
+        "avatar": "https://i.pravatar.cc/150?img=12"
+      }
+    },
+    {
+      "id": "msg_1794936013341_2_e661af5b",
+      "senderId": "pw_male_chat_v2",
+      "senderName": "Alisher Test",
+      "text": "GIF",
+      "type": "gif",
+      "fileUrl": "https://static.klipy.com/ii/d7aec6f6f171607374b2065c836f92f4/ec/f3/p30ORxL1.gif",
+      "content": "https://static.klipy.com/ii/d7aec6f6f171607374b2065c836f92f4/ec/f3/p30ORxL1.gif",
+      "status": "read",
+      "read": true,
+      "createdAt": "2026-11-17T17:20:13.341Z",
+      "time": "05:20 PM",
+      "senderAvatar": "https://i.pravatar.cc/150?img=12",
+      "sender": {
+        "_id": "pw_male_chat_v2",
+        "uid": "pw_male_chat_v2",
+        "name": "Alisher Test",
+        "avatar": "https://i.pravatar.cc/150?img=12"
+      }
+    },
+    {
+      "id": "msg_1794936017019_3_7c970944",
+      "senderId": "pw_male_chat_v2",
+      "senderName": "Alisher Test",
+      "text": "Ovozli xabar 🎤",
+      "type": "voice",
+      "fileUrl": "http://localhost:3000/api/media/media_1794936017014_4ca4y1.weba",
+      "durationSec": 1,
+      "status": "read",
+      "read": true,
+      "createdAt": "2026-11-17T17:20:17.019Z",
+      "time": "05:20 PM",
+      "senderAvatar": "https://i.pravatar.cc/150?img=12",
+      "sender": {
+        "_id": "pw_male_chat_v2",
+        "uid": "pw_male_chat_v2",
+        "name": "Alisher Test",
+        "avatar": "https://i.pravatar.cc/150?img=12"
+      }
+    },
+    {
+      "id": "msg_1794936017722_4_88b85307",
+      "senderId": "pw_male_chat_v2",
+      "senderName": "Alisher Test",
+      "text": "Rasm 🖼️",
+      "type": "image",
+      "fileUrl": "http://localhost:3000/api/media/media_1794936017695_1wfi89.png",
+      "fileName": "sample_img.png",
+      "status": "read",
+      "read": true,
+      "createdAt": "2026-11-17T17:20:17.722Z",
+      "time": "05:20 PM",
+      "senderAvatar": "https://i.pravatar.cc/150?img=12",
+      "sender": {
+        "_id": "pw_male_chat_v2",
+        "uid": "pw_male_chat_v2",
+        "name": "Alisher Test",
+        "avatar": "https://i.pravatar.cc/150?img=12"
+      }
+    },
+    {
+      "id": "msg_1794936025450_5_7f6d29b4",
+      "senderId": "pw_male_chat_v2",
+      "senderName": "Alisher Test",
+      "text": "Video 🎥",
+      "type": "video",
+      "fileUrl": "http://localhost:3000/api/media/media_1794936025239_gwcsqf.mp4",
+      "fileName": "sample_video.mp4",
+      "status": "read",
+      "read": true,
+      "createdAt": "2026-11-17T17:20:25.450Z",
+      "time": "05:20 PM",
+      "senderAvatar": "https://i.pravatar.cc/150?img=12",
+      "sender": {
+        "_id": "pw_male_chat_v2",
+        "uid": "pw_male_chat_v2",
+        "name": "Alisher Test",
+        "avatar": "https://i.pravatar.cc/150?img=12"
+      }
+    },
+    {
+      "id": "msg_1794936026032_6_104cee3a",
+      "senderId": "pw_male_chat_v2",
+      "senderName": "Alisher Test",
+      "text": "sample_audio.wav",
+      "type": "audio",
+      "fileUrl": "http://localhost:3000/api/media/media_1794936025998_awax32.wav",
+      "fileName": "sample_audio.wav",
+      "status": "read",
+      "read": true,
+      "createdAt": "2026-11-17T17:20:26.032Z",
+      "time": "05:20 PM",
+      "senderAvatar": "https://i.pravatar.cc/150?img=12",
+      "sender": {
+        "_id": "pw_male_chat_v2",
+        "uid": "pw_male_chat_v2",
+        "name": "Alisher Test",
+        "avatar": "https://i.pravatar.cc/150?img=12"
+      }
+    },
+    {
+      "id": "msg_1794936033518_1_14eaa981",
+      "senderId": "pw_female_chat_v2",
+      "senderName": "Malika Test",
+      "text": "Salom javob!",
+      "type": "text",
+      "fileUrl": null,
+      "status": "read",
+      "read": true,
+      "createdAt": "2026-11-17T17:20:33.518Z",
+      "time": "05:20 PM",
+      "senderAvatar": "https://i.pravatar.cc/150?img=32",
+      "sender": {
+        "_id": "pw_female_chat_v2",
+        "uid": "pw_female_chat_v2",
+        "name": "Malika Test",
+        "avatar": "https://i.pravatar.cc/150?img=32"
+      }
+    }
   ]
 }

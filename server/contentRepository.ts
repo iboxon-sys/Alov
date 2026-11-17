@@ -113,9 +113,9 @@ class ContentRepository {
     const normalized = normalizePostRecord(post);
     if (!normalized) return;
     try {
-      await this.postsCol.updateOne(
+      await this.postsCol.replaceOne(
         { id: normalized.id },
-        { $set: normalized },
+        normalized,
         { upsert: true }
       );
     } catch (err) {
@@ -159,9 +159,9 @@ class ContentRepository {
     if (!this.usersCol || !user?.uid) return;
     try {
       const { _id, ...cleanUser } = user;
-      await this.usersCol.updateOne(
+      await this.usersCol.replaceOne(
         { uid: cleanUser.uid },
-        { $set: cleanUser },
+        cleanUser,
         { upsert: true }
       );
     } catch (err) {

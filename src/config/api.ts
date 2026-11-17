@@ -120,11 +120,16 @@ export const safeFetchJson = async (url: string, options?: RequestInit): Promise
       url.startsWith(getBaseUrl()) ||
       url.startsWith(MAIN_RENDER_ORIGIN);
 
-    if (isBackendCall && Object.keys(authHeaders).length > 0) {
-      mergedOptions.headers = {
-        ...authHeaders,
-        ...(options?.headers || {}),
-      };
+    if (isBackendCall) {
+      if (!mergedOptions.cache) {
+        mergedOptions.cache = 'no-store';
+      }
+      if (Object.keys(authHeaders).length > 0) {
+        mergedOptions.headers = {
+          ...authHeaders,
+          ...(options?.headers || {}),
+        };
+      }
     }
 
     const res = await fetch(url, mergedOptions);

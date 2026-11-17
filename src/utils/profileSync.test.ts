@@ -1,12 +1,43 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import {
+  buildUpdatedUserSnapshot,
+  collectReplacedUserMediaUrls,
+  deduplicateUsersList,
   isExplicitProfileDisplayName,
+  mergeAuthoritativeUserState,
   normalizeTelegramUrl,
   pickNewestCanonicalUser,
   propagateProfileUpdateAcrossStores,
+  reconcileAppVersionCache,
+  upsertUniqueUserInList,
   userSharesIdentity,
+  writeAuthoritativeUserCache,
 } from './profileSync.ts';
+
+function createMemoryStorage(initial: Record<string, string> = {}) {
+  const map = new Map<string, string>(Object.entries(initial));
+  return {
+    get length() {
+      return map.size;
+    },
+    key(index: number) {
+      return Array.from(map.keys())[index] ?? null;
+    },
+    getItem(k: string) {
+      return map.has(k) ? map.get(k)! : null;
+    },
+    setItem(k: string, v: string) {
+      map.set(k, String(v));
+    },
+    removeItem(k: string) {
+      map.delete(k);
+    },
+    dump() {
+      return Object.fromEntries(map.entries());
+    },
+  };
+}
 
 describe('Profile persistence, identity deduplication & DB propagation', () => {
   it('normalizes Telegram handles into canonical https://t.me/ URLs or empty string', () => {
@@ -139,4 +170,131 @@ describe('Profile persistence, identity deduplication & DB propagation', () => {
     assert.equal(stores.coinRequests[0].userName, 'Yangi Ism');
     assert.equal(stores.withdrawals[0].userName, 'Yangi Ism');
   });
+
+  it('overwrites old profile fields/media cleanly instead of appending duplicates and clears removed fields', () => {
+    const existing = {
+      uid: 'u1',
+      name: 'Eski Ism',
+      username: 'eski_nick',
+      telegramUsername: 'eski_tg',
+      avatar: '/api/media/old_avatar.jpg',
+      banner: '/api/media/old_banner.jpg',
+      videoUrl: '/api/media/old_video.mp4',
+      photos: ['/api/media/p1.jpg', '/api/media/p1.jpg'],
+      gallery: ['/api/media/g1.jpg'],
+    };
+
+    const next = buildUpdatedUserSnapshot(existing, {
+      name: 'Yangi Ism',
+      username: '',
+      avatar: '/api/media/new_avatar.jpg',
+      banner: null,
+      videoUrl: '/api/media/new_video.mp4',
+      photos: ['/api/media/p2.jpg', '/api/media/p2.jpg'],
+      gallery: [],
+    });
+
+    assert.equal(next.name, 'Yangi Ism');
+    assert.equal(next.username, '');
+    assert.equal('telegramUsername' in next, false);
+    assert.equal(next.avatar, '/api/media/new_avatar.jpg');
+    assert.equal(next.banner, '');
+    assert.equal(next.videoUrl, '/api/media/new_video.mp4');
+    assert.deepEqual(next.photos, ['/api/media/p2.jpg']);
+    assert.deepEqual(next.gallery, []);
+
+    const replacedMedia = collectReplacedUserMediaUrls(existing, next);
+    assert.deepEqual(replacedMedia.sort(), [
+      '/api/media/g1.jpg',
+      '/api/media/old_avatar.jpg',
+      '/api/media/old_banner.jpg',
+      '/api/media/old_video.mp4',
+      '/api/media/p1.jpg',
+    ]);
+  });
+
+  it('deduplicates users sharing identity and replaces matching users in-place on update', () => {
+    const oldAlias: Record<string, any> = {
+      uid: 'tg_999',
+      id: 'TG-999',
+      name: 'Eski Alias',
+      telegram: 'https://t.me/sardor_uz',
+      isProfileCompleted: true,
+      updatedAt: '2026-11-10T10:00:00.000Z',
+    };
+    const canonical: Record<string, any> = {
+      uid: 'google_999',
+      id: 'ALOV-999',
+      name: 'Yangi Sardor',
+      telegram: 'https://t.me/sardor_uz',
+      isProfileCompleted: true,
+      updatedAt: '2026-11-16T10:00:00.000Z',
+    };
+    const unrelated: Record<string, any> = {
+      uid: 'u_other',
+      id: 'ALOV-2',
+      name: 'Dilnoza',
+      isProfileCompleted: true,
+    };
+
+    const deduped = deduplicateUsersList([oldAlias, unrelated, canonical]);
+    assert.equal(deduped.users.length, 2);
+    assert.deepEqual(deduped.removedUids, ['tg_999']);
+    assert.equal(deduped.users.some((u) => u.uid === 'google_999'), true);
+
+    const updatedList = upsertUniqueUserInList([oldAlias, unrelated], {
+      ...canonical,
+      name: 'Sardor Yangilandi',
+      photos: ['/api/media/a.jpg', '/api/media/a.jpg'],
+    });
+    assert.equal(updatedList.length, 2);
+    assert.equal(updatedList[0].uid, 'google_999');
+    assert.equal(updatedList[0].name, 'Sardor Yangilandi');
+    assert.deepEqual(updatedList[0].photos, ['/api/media/a.jpg']);
+
+    const mergedAuth = mergeAuthoritativeUserState(
+      { uid: 'google_999', authToken: 'tok_keep', staleExtra: 'old' },
+      { uid: 'google_999', name: 'Sardor Yangilandi' }
+    );
+    assert.equal(mergedAuth?.authToken, 'tok_keep');
+    assert.equal('staleExtra' in mergedAuth, false);
+  });
+
+  it('clears stale browser profile/chat/post caches on app version bump while keeping login identity', () => {
+    const storage = createMemoryStorage({
+      alov_app_version: '1.1.1',
+      alov_user_id: 'tg_777',
+      userId: 'tg_777',
+      alov_auth_token: 'alov_session_tg_777',
+      alov_tg_chat_salikh: '777',
+      alov_current_user: JSON.stringify({ uid: 'tg_777', name: 'Eski Kesh Ism' }),
+      alov_user_tg_777: JSON.stringify({ uid: 'tg_777', name: 'Eski Kesh Ism' }),
+      alov_user_old_alias: JSON.stringify({ uid: 'old_alias', name: 'Alias' }),
+      alov_chats_tg_777: '[{"id":"c1"}]',
+      alov_posts_feed: '[{"id":"p1"}]',
+    });
+
+    const res = reconcileAppVersionCache(storage, '1.1.2');
+    assert.equal(res.versionChanged, true);
+    assert.equal(res.previousVersion, '1.1.1');
+    assert.equal(res.currentVersion, '1.1.2');
+    assert.equal(res.preservedUserId, 'tg_777');
+    assert.equal(res.preservedToken, 'alov_session_tg_777');
+    assert.equal(storage.getItem('alov_app_version'), '1.1.2');
+    assert.equal(storage.getItem('alov_current_user'), null);
+    assert.equal(storage.getItem('alov_user_tg_777'), null);
+    assert.equal(storage.getItem('alov_chats_tg_777'), null);
+    assert.equal(storage.getItem('alov_posts_feed'), null);
+    assert.equal(storage.getItem('alov_user_id'), 'tg_777');
+    assert.equal(storage.getItem('alov_auth_token'), 'alov_session_tg_777');
+    assert.equal(storage.getItem('alov_tg_chat_salikh'), '777');
+
+    // Second boot on same version should NOT clear fresh cache
+    writeAuthoritativeUserCache(storage, { uid: 'tg_777', name: 'Yangi Server Ism' });
+    assert.equal(storage.getItem('alov_user_old_alias'), null);
+    const sameVersion = reconcileAppVersionCache(storage, '1.1.2');
+    assert.equal(sameVersion.versionChanged, false);
+    assert.ok(storage.getItem('alov_current_user')?.includes('Yangi Server Ism'));
+  });
 });
+

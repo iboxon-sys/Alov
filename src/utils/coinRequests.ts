@@ -1,3 +1,5 @@
+import { resolveEffectiveProfileAvatar } from './faceId';
+
 export type CoinRequestStatus = 'pending' | 'approved' | 'rejected';
 
 export interface CoinShopPackage {
@@ -52,10 +54,11 @@ export function buildCoinPurchaseRequest(params: {
     uid: string;
     name?: string;
     avatar?: string;
+    hasCustomAvatar?: boolean | null;
     username?: string;
     telegram?: string;
     phone?: string;
-    faceId?: { capturedPhotoUrl?: string | null } | null;
+    faceId?: { verified?: boolean; capturedPhotoUrl?: string | null } | null;
   };
   coinAmount: number;
   uzsAmount?: number;
@@ -68,7 +71,7 @@ export function buildCoinPurchaseRequest(params: {
 }): CoinPurchaseRequest {
   const pkg = findCoinPackageByAmount(params.coinAmount);
   const safeUzs = Number(params.uzsAmount) > 0 ? Math.floor(Number(params.uzsAmount)) : pkg.uzs;
-  const resolvedAvatar = String(params.user.faceId?.capturedPhotoUrl || params.user.avatar || '').trim();
+  const resolvedAvatar = resolveEffectiveProfileAvatar(params.user);
   const resolvedContact = String(
     params.contactInfo || params.user.telegram || params.user.phone || params.user.username || ''
   ).trim().slice(0, 120);

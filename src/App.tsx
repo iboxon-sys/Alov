@@ -10,7 +10,7 @@ import {
   ChevronRight, X, ArrowUpRight, ShieldCheck, Globe, LogIn, LogOut, CheckCircle2, Edit3, ArrowLeft, VideoOff,
   ZoomIn, ZoomOut, Move, Crop, AlertTriangle, RefreshCw, Navigation, Shield, Lock, EyeOff, Car, Upload,
   Clock, Check, CheckCheck, Gift, Coins, Wallet, CreditCard, Handshake, Crown, ScanFace,
-  Image as ImageIcon, Camera, Newspaper, SlidersHorizontal, Shuffle
+  Image as ImageIcon, Camera, Newspaper, SlidersHorizontal, Shuffle, ShoppingBag, Gem
 } from 'lucide-react';
 import { motion, AnimatePresence, MotionConfig } from 'framer-motion';
 import { clsx, type ClassValue } from 'clsx';
@@ -113,6 +113,19 @@ import {
   shouldRedirectVercelStandaloneToMain,
   shouldUseVercelIframeForSection,
 } from './utils/microFrontendBridge';
+import {
+  shouldHideMobileBottomDock,
+  shouldShowOuterAppHeader,
+  useVisualViewportLock,
+} from './utils/mobileViewport';
+import { ImageCropModal, type ImageCropMode } from './components/ImageCropModal';
+import { StoreView } from './components/StoreView';
+import {
+  MIN_DIAMOND_CASHOUT_AMOUNT,
+  MIN_DIAMOND_CASHOUT_UZS,
+  calculateDiamondCashoutUzs,
+  findCoinStorePackage,
+} from './utils/store';
 
 const LiveStreamModal = lazy(() =>
   import('./components/LiveStreamModal').then((m) => ({ default: m.LiveStreamModal }))
@@ -275,8 +288,8 @@ const UZ_LOCATIONS: Record<string, string[]> = {
 };
 
 
-const APP_VERSION = '1.1.2';
-const LATEST_VERSION = '1.1.2';
+const APP_VERSION = '1.2.0';
+const LATEST_VERSION = '1.2.0';
 
 function getYouTubeEmbedUrl(url: string): string | null {
   if (!url) return null;
@@ -456,13 +469,11 @@ export default function App() {
   const [liabilityCountdown, setLiabilityCountdown] = useState(10);
   const timerRef = useRef<any>(null);
 
-  // Avatar Image Cropper State
+  // Avatar & Banner Image Cropper State
   const [showCropModal, setShowCropModal] = useState(false);
+  const [cropMode, setCropMode] = useState<ImageCropMode>('avatar');
+  const [cropBannerSaveImmediately, setCropBannerSaveImmediately] = useState(false);
   const [cropImageSrc, setCropImageSrc] = useState<string | null>(null);
-  const [cropScale, setCropScale] = useState<number>(1);
-  const [cropPan, setCropPan] = useState<{ x: number; y: number }>({ x: 0, y: 0 });
-  const [isDraggingPan, setIsDraggingPan] = useState(false);
-  const dragStartRef = useRef<{ x: number; y: number }>({ x: 0, y: 0 });
   const commentsEndRef = useRef<HTMLDivElement>(null);
 
   const [usersList, setUsersList] = useState<any[]>([]);
@@ -506,14 +517,14 @@ export default function App() {
   const [showWithdrawModal, setShowWithdrawModal] = useState(false);
   const [showGiftModal, setShowGiftModal] = useState(false);
   const [topUpPackage, setTopUpPackage] = useState<{ coins: number; uzs: number }>({ coins: 1000, uzs: 50000 });
-  const [paymentProvider, setPaymentProvider] = useState<'click' | 'payme' | 'uzum' | 'telegram_stars'>('click');
+  const [paymentProvider, setPaymentProvider] = useState<'click' | 'payme' | 'uzum' | 'card' | 'telegram_stars'>('click');
   const [coinRequestContact, setCoinRequestContact] = useState('');
   const [coinRequestNote, setCoinRequestNote] = useState('');
   const [isSubmittingCoinRequest, setIsSubmittingCoinRequest] = useState(false);
   const [userCoinRequests, setUserCoinRequests] = useState<CoinPurchaseRequest[]>([]);
   const [withdrawCardNumber, setWithdrawCardNumber] = useState('');
   const [withdrawContact, setWithdrawContact] = useState('');
-  const [withdrawAmount, setWithdrawAmount] = useState<number>(100);
+  const [withdrawAmount, setWithdrawAmount] = useState<number>(MIN_DIAMOND_CASHOUT_AMOUNT);
   const [walletNoticeMsg, setWalletNoticeMsg] = useState('');
 
   const [selectedChatUser, setSelectedChatUser] = useState<any>(null);
@@ -955,7 +966,7 @@ export default function App() {
             })
             .catch(() => {});
         }
-      } else if (versionState.versionChanged && (versionState.preservedUserId || versionState.preservedToken)) {
+      } else if (versionState.preservedUserId || versionState.preservedToken) {
         const restoreRequest = versionState.preservedUserId
           ? safeFetchJson(getApiUrl('/api/users/sync'), {
               method: 'POST',
@@ -987,15 +998,21 @@ export default function App() {
                 userId: syncedUser.uid,
                 user: syncedUser,
               });
-              setActiveTab('discover');
-              setIsAuthChecking(false);
+              setActiveTab(prev => (prev === 'landing' ? 'discover' : prev));
             } else if (res && res.success && res.exists === false) {
               persistLocalAuthCredentials(localStorage, null);
             }
           })
-          .catch(() => {});
+          .catch(() => {})
+          .finally(() => {
+            setIsAuthChecking(false);
+          });
+      } else {
+        setIsAuthChecking(false);
       }
-    } catch (e) {}
+    } catch (e) {
+      setIsAuthChecking(false);
+    }
   }, []);
 
   // Vercel Direct-Access Guard + Parent <-> Iframe Auth Bridge (alov.onrender.com <-> alov-mu.vercel.app)
@@ -1005,6 +1022,25 @@ export default function App() {
   }, []);
 
   const isInIframe = typeof window !== 'undefined' ? window.self !== window.top : false;
+
+  const [isMobileViewport, setIsMobileViewport] = useState<boolean>(() =>
+    typeof window !== 'undefined' ? window.innerWidth < 768 : true
+  );
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const syncIsMobile = () => setIsMobileViewport(window.innerWidth < 768);
+    syncIsMobile();
+    window.addEventListener('resize', syncIsMobile);
+    return () => window.removeEventListener('resize', syncIsMobile);
+  }, []);
+
+  const appViewportMetrics = useVisualViewportLock({
+    enabled: true,
+    resetWindowScrollOnKeyboard: Boolean(
+      embedRouteInfo.isEmbedRoute || (currentUser && activeTab !== 'landing')
+    ),
+  });
 
   const standaloneRedirectUrl = React.useMemo(() => {
     if (typeof window === 'undefined') return null;
@@ -1153,6 +1189,11 @@ export default function App() {
               setRegStartGifUrl(u.startGifUrl || '');
               setCurrentUser(u);
               writeAuthoritativeUserCache(localStorage, u);
+              persistLocalAuthCredentials(localStorage, {
+                token: u.authToken || `alov_session_${u.uid}`,
+                userId: u.uid,
+                user: u,
+              });
               setActiveTab('discover');
             }
           })
@@ -1261,6 +1302,11 @@ export default function App() {
 
       const cleanUser = mergeAuthoritativeUserState(currentUserRef.current, userData);
       writeAuthoritativeUserCache(localStorage, cleanUser);
+      persistLocalAuthCredentials(localStorage, {
+        token: cleanUser?.authToken || localStorage.getItem('alov_auth_token') || `alov_session_${cleanUser?.uid || user.uid}`,
+        userId: cleanUser?.uid || user.uid,
+        user: cleanUser,
+      });
       setCurrentUser(cleanUser);
       setShowAuthModal(false);
       setActiveTab(prev => (prev === 'landing' ? 'discover' : prev));
@@ -1299,16 +1345,21 @@ export default function App() {
           let hasLocalSession = false;
           try {
             const cached = localStorage.getItem('alov_current_user');
+            const preservedUid = localStorage.getItem('alov_user_id') || localStorage.getItem('userId');
             if (cached) {
               const parsed = JSON.parse(cached);
               if (parsed && parsed.uid) hasLocalSession = true;
+            } else if (preservedUid) {
+              hasLocalSession = true;
             }
           } catch (e) {}
           const tgWebAppUser = (window as any).Telegram?.WebApp?.initDataUnsafe?.user;
           if (!hasLocalSession && !tgWebAppUser) {
             setCurrentUser(null);
+            setIsAuthChecking(false);
+          } else if (!localStorage.getItem('alov_user_id')) {
+            setIsAuthChecking(false);
           }
-          setIsAuthChecking(false);
         }
       } catch (err) {
         console.error("Auth state change error:", err);
@@ -2053,9 +2104,9 @@ export default function App() {
       const reader = new FileReader();
       reader.onloadend = () => {
         if (typeof reader.result === 'string') {
+          setCropMode('avatar');
+          setCropBannerSaveImmediately(false);
           setCropImageSrc(reader.result);
-          setCropScale(1);
-          setCropPan({ x: 0, y: 0 });
           setShowCropModal(true);
         }
       };
@@ -2063,45 +2114,22 @@ export default function App() {
     }
   };
 
-  // Upload Cover Banner directly via server media store (and optionally save immediately to profile)
+  // Select Cover Banner -> Opens interactive 16:7 Banner Crop & Position Modal
   const handleBannerFileChange = async (e: React.ChangeEvent<HTMLInputElement>, saveImmediately: boolean = false) => {
     const file = e.target.files?.[0];
     e.target.value = '';
     if (!file) return;
-    setIsUploadingBanner(true);
     setErrorMsg('');
-    try {
-      const res = await fetch(getApiUrl('/api/media/upload-raw'), {
-        method: 'POST',
-        headers: {
-          'Content-Type': file.type || 'image/jpeg',
-          'x-file-name': encodeURIComponent(file.name || 'banner.jpg'),
-        },
-        body: file,
-      });
-      const data = await res.json();
-      if (!res.ok || !data?.success || !data?.url) {
-        setErrorMsg(data?.error || 'Banner yuklanmadi.');
-        return;
+    const reader = new FileReader();
+    reader.onloadend = () => {
+      if (typeof reader.result === 'string') {
+        setCropMode('banner');
+        setCropBannerSaveImmediately(saveImmediately);
+        setCropImageSrc(reader.result);
+        setShowCropModal(true);
       }
-      setRegBanner(data.url);
-      if (saveImmediately && currentUser?.uid) {
-        const updated = { ...currentUser, banner: data.url };
-        const syncRes = await safeFetchJson(getApiUrl('/api/users/sync'), {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ user: updated }),
-        });
-        const finalUser = mergeAuthoritativeUserState(currentUser, syncRes?.user || updated);
-        setCurrentUser(finalUser);
-        setUsersList((prev) => upsertUniqueUserInList(prev, finalUser));
-        writeAuthoritativeUserCache(localStorage, finalUser);
-      }
-    } catch (err: any) {
-      setErrorMsg(err?.message || 'Banner yuklashda xatolik.');
-    } finally {
-      setIsUploadingBanner(false);
-    }
+    };
+    reader.readAsDataURL(file);
   };
 
   // Upload Profile Video directly via server media store (MP4 standardized)
@@ -2133,72 +2161,71 @@ export default function App() {
     }
   };
 
-  // Render Cropped Avatar via Canvas and Save
-  const handleApplyCrop = () => {
-    if (!cropImageSrc) return;
-    const img = new Image();
-    let handled = false;
-    const renderAndSave = () => {
-      if (handled) return;
-      handled = true;
-      const size = 300;
-      const previewSize = 224; // w-56 h-56 preview container
-      const panRatio = size / previewSize;
-      const canvas = document.createElement('canvas');
-      canvas.width = size;
-      canvas.height = size;
-      const ctx = canvas.getContext('2d');
-      if (!ctx) {
-        setShowCropModal(false);
-        return;
-      }
-
-      // Dark obsidian canvas background matching circular preview container
-      ctx.fillStyle = '#09090D';
-      ctx.fillRect(0, 0, size, size);
-
-      ctx.save();
-      ctx.translate(size / 2 + cropPan.x * panRatio, size / 2 + cropPan.y * panRatio);
-      ctx.scale(cropScale, cropScale);
-
-      // Draw image keeping object-cover aspect ratio
-      const naturalW = img.naturalWidth || img.width || size;
-      const naturalH = img.naturalHeight || img.height || size;
-      const aspect = naturalW / naturalH;
-      let drawW = size;
-      let drawH = size;
-      if (aspect > 1) {
-        drawW = size * aspect;
-      } else {
-        drawH = size / aspect;
-      }
-      ctx.drawImage(img, -drawW / 2, -drawH / 2, drawW, drawH);
-      ctx.restore();
-
-      try {
-        const croppedBase64 = canvas.toDataURL('image/jpeg', 0.9);
-        setRegAvatar(croppedBase64);
-      } catch {
-        setRegAvatar(cropImageSrc);
-      }
+  // Save Cropped Avatar or Cropped Banner (and immediately persist when edited from Profile Hero)
+  const handleCropConfirm = async (croppedDataUrl: string) => {
+    if (!croppedDataUrl) {
       setShowCropModal(false);
       setCropImageSrc(null);
-    };
-
-    img.onload = renderAndSave;
-    img.onerror = () => {
-      if (handled) return;
-      handled = true;
-      setRegAvatar(cropImageSrc);
-      setShowCropModal(false);
-      setCropImageSrc(null);
-    };
-    if (!cropImageSrc.startsWith('data:') && !cropImageSrc.startsWith('blob:')) {
-      img.crossOrigin = 'anonymous';
+      return;
     }
-    img.src = cropImageSrc;
-    if (img.complete && img.naturalWidth > 0) {
-      renderAndSave();
+
+    if (cropMode === 'avatar') {
+      setRegAvatar(croppedDataUrl);
+      setShowCropModal(false);
+      setCropImageSrc(null);
+      return;
+    }
+
+    // Banner crop mode: upload cropped JPEG cleanly to /api/media/upload
+    setIsUploadingBanner(true);
+    setErrorMsg('');
+    try {
+      const activeUid = currentUser?.uid || firebaseUser?.uid || 'user';
+      const uploadRes = await safeFetchJson(getApiUrl('/api/media/upload'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          dataUrl: croppedDataUrl,
+          fileName: `banner_${activeUid}_${Date.now()}.jpg`,
+          mimeType: 'image/jpeg',
+        }),
+      });
+      const finalBannerUrl = uploadRes?.success && uploadRes.url ? uploadRes.url : croppedDataUrl;
+      setRegBanner(finalBannerUrl);
+
+      if (cropBannerSaveImmediately && currentUser?.uid) {
+        const updateRes = await safeFetchJson(getApiUrl('/api/users/update'), {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            uid: currentUser.uid,
+            updates: {
+              banner: finalBannerUrl,
+              isProfileEdit: true,
+            },
+          }),
+        });
+        const serverUser = updateRes?.success && updateRes?.user
+          ? updateRes.user
+          : { ...currentUser, banner: finalBannerUrl, hasEditedProfile: true };
+        const finalUser = mergeAuthoritativeUserState(currentUser, serverUser);
+        setCurrentUser(finalUser);
+        setUsersList((prev) => upsertUniqueUserInList(prev, finalUser));
+        writeAuthoritativeUserCache(localStorage, finalUser);
+        persistLocalAuthCredentials(localStorage, {
+          token: finalUser?.authToken || localStorage.getItem('alov_auth_token') || `alov_session_${currentUser.uid}`,
+          userId: finalUser?.uid || currentUser.uid,
+          user: finalUser,
+        });
+        showToast("Profil banneri muvaffaqiyatli yangilandi");
+      }
+      setShowCropModal(false);
+      setCropImageSrc(null);
+    } catch (err: any) {
+      setErrorMsg(err?.message || 'Banner yuklashda xatolik.');
+    } finally {
+      setIsUploadingBanner(false);
+      setCropBannerSaveImmediately(false);
     }
   };
 
@@ -2389,6 +2416,11 @@ export default function App() {
             resolvedSavedAvatar.startsWith('/api/media/') ||
             resolvedSavedAvatar.startsWith('data:'))
       );
+      const replaceInitialAvatar = Boolean(
+        facePhotoUrl &&
+          resolvedSavedAvatar !== facePhotoUrl &&
+          (hasCustomAvatar || !resolvedSavedAvatar)
+      );
 
       const isPrimaryLocked = Boolean(currentUser?.isProfileCompleted === true);
       const lockedGender = isPrimaryLocked && (currentUser?.gender === 'male' || currentUser?.gender === 'female')
@@ -2403,10 +2435,18 @@ export default function App() {
       const resolvedBannerValue = showProfileModal ? regBanner : (regBanner || currentUser?.banner || '');
       const resolvedVideoValue = showProfileModal ? regVideoUrl.trim() : (regVideoUrl.trim() || currentUser?.videoUrl || '');
       const resolvedStartGifValue = showProfileModal ? regStartGifUrl.trim() : (regStartGifUrl.trim() || currentUser?.startGifUrl || '');
-      const newUserData = {
-        ...currentUser,
-        id: currentUser?.id || `ALOV-${activeUid.slice(0, 5).toUpperCase()}`,
-        uid: activeUid,
+
+      const nextFaceId = currentUser?.faceId && typeof currentUser.faceId === 'object'
+        ? (() => {
+            const copy = { ...currentUser.faceId };
+            if (replaceInitialAvatar) {
+              delete copy.capturedPhotoUrl;
+            }
+            return copy;
+          })()
+        : currentUser?.faceId;
+
+      const profileEditPayload = {
         name: trimmedName,
         firstName: trimmedName,
         first_name: trimmedName,
@@ -2429,21 +2469,44 @@ export default function App() {
         banner: resolvedBannerValue,
         videoUrl: resolvedVideoValue,
         startGifUrl: resolvedStartGifValue,
-        followersCount: currentUser?.followersCount ?? 0,
-        followingCount: currentUser?.followingCount ?? 0,
-        likesCount: currentUser?.likesCount ?? 0,
+        ...(nextFaceId ? { faceId: nextFaceId } : {}),
         isOnline: true,
         isLocationEnabled: isLocationEnabled,
         locationVisibility: regLocationVisibility,
         location: userCoords,
-        isProfileCompleted: true
+        isProfileCompleted: true,
+        isProfileEdit: true,
+        replaceInitialAvatar,
+        hasEditedProfile: true,
       };
 
-      const data = await safeFetchJson(getApiUrl('/api/users/sync'), {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ user: newUserData })
-      });
+      const newUserData = {
+        ...currentUser,
+        id: currentUser?.id || `ALOV-${activeUid.slice(0, 5).toUpperCase()}`,
+        uid: activeUid,
+        ...profileEditPayload,
+        followersCount: currentUser?.followersCount ?? 0,
+        followingCount: currentUser?.followingCount ?? 0,
+        likesCount: currentUser?.likesCount ?? 0,
+      };
+
+      // Update the existing account strictly in-place first (never creating a duplicate account)
+      let data = currentUser?.isProfileCompleted
+        ? await safeFetchJson(getApiUrl('/api/users/update'), {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ uid: activeUid, updates: profileEditPayload }),
+          }).catch(() => null)
+        : null;
+
+      if (!data || !data.success || !data.user) {
+        data = await safeFetchJson(getApiUrl('/api/users/sync'), {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ user: newUserData }),
+        });
+      }
+
       if (!data || !data.success || !data.user) {
         setErrorMsg(data?.error || "Profil ma'lumotlarini serverda saqlab bo'lmadi.");
         return;
@@ -2466,7 +2529,7 @@ export default function App() {
 
       writeAuthoritativeUserCache(localStorage, savedUser);
       persistLocalAuthCredentials(localStorage, {
-        token: savedUser.authToken || localStorage.getItem('alov_auth_token') || '',
+        token: savedUser.authToken || localStorage.getItem('alov_auth_token') || `alov_session_${savedUser.uid || activeUid}`,
         userId: savedUser.uid || activeUid,
         user: savedUser,
       });
@@ -2776,9 +2839,14 @@ export default function App() {
             user: data?.user,
           }) === 'enter_app'
         ) {
-          const canonicalUser = mergeAuthoritativeUserState(null, data.user);
+          const canonicalUser = mergeAuthoritativeUserState(null, data.token ? { ...data.user, authToken: data.token } : data.user);
           setCurrentUser(canonicalUser);
           writeAuthoritativeUserCache(localStorage, canonicalUser);
+          persistLocalAuthCredentials(localStorage, {
+            token: data.token || canonicalUser?.authToken || `alov_session_${canonicalUser?.uid}`,
+            userId: canonicalUser?.uid,
+            user: canonicalUser,
+          });
           setShowAuthModal(false);
           setActiveTab('discover');
           setIsLoggingIn(false);
@@ -2894,10 +2962,15 @@ export default function App() {
         setIsLoggingIn(false);
         return;
       }
-      const finalUser = mergeAuthoritativeUserState(null, syncData.user);
+      const finalUser = mergeAuthoritativeUserState(null, syncData.token ? { ...syncData.user, authToken: syncData.token } : syncData.user);
       setCurrentUser(finalUser);
       setUsersList(prev => upsertUniqueUserInList(prev, finalUser));
       writeAuthoritativeUserCache(localStorage, finalUser);
+      persistLocalAuthCredentials(localStorage, {
+        token: syncData.token || finalUser?.authToken || `alov_session_${finalUser?.uid}`,
+        userId: finalUser?.uid,
+        user: finalUser,
+      });
       setPendingGoogleUser(null);
       setPendingFaceId(null);
       setShowAuthModal(false);
@@ -2939,9 +3012,14 @@ export default function App() {
         const exists = Boolean(res && res.success && res.exists && res.user);
         const step = resolvePostProviderAuthStep({ provider: 'telegram', exists, user: res?.user });
         if (step === 'enter_app' && res?.user) {
-          const cleanUser = mergeAuthoritativeUserState(null, res.user);
+          const cleanUser = mergeAuthoritativeUserState(null, res.token ? { ...res.user, authToken: res.token } : res.user);
           setCurrentUser(cleanUser);
           writeAuthoritativeUserCache(localStorage, cleanUser);
+          persistLocalAuthCredentials(localStorage, {
+            token: res.token || cleanUser?.authToken || `alov_session_${cleanUser?.uid}`,
+            userId: cleanUser?.uid,
+            user: cleanUser,
+          });
           setShowAuthModal(false);
           setActiveTab('discover');
           setIsLoggingIn(false);
@@ -3098,9 +3176,14 @@ export default function App() {
           setTelegramStep('face_id');
         } else {
           // Admin (@Salikh_07) or already Face-ID-verified completed user logs straight in
-          const userData = mergeAuthoritativeUserState(null, data.user);
+          const userData = mergeAuthoritativeUserState(null, data.token ? { ...data.user, authToken: data.token } : data.user);
           setCurrentUser(userData);
           writeAuthoritativeUserCache(localStorage, userData);
+          persistLocalAuthCredentials(localStorage, {
+            token: data.token || userData?.authToken || `alov_session_${userData?.uid}`,
+            userId: userData?.uid,
+            user: userData,
+          });
           setShowAuthModal(false);
           setAuthMode('login');
           setTelegramStep('input_phone');
@@ -3130,18 +3213,23 @@ export default function App() {
             ? pendingTgUser.gender
             : (result.userSelectedGender || 'male');
         setRegGender(preservedGender);
+        const keepEditedAvatar = Boolean(pendingTgUser.hasCustomAvatar && pendingTgUser.avatar);
         const updatedUser = {
           ...pendingTgUser,
-          avatar: facePhoto,
+          avatar: keepEditedAvatar ? pendingTgUser.avatar : facePhoto,
           gender: preservedGender,
           birthDate: pendingTgUser.birthDate,
           faceId: {
             ...result.faceId,
+            ...(keepEditedAvatar ? {} : { capturedPhotoUrl: facePhoto }),
             detectedGender: preservedGender,
             genderLabelUz: genderToUzLabel(preservedGender),
           },
           isVerified: true,
         };
+        if (keepEditedAvatar) {
+          delete updatedUser.faceId.capturedPhotoUrl;
+        }
         const syncData = await safeFetchJson(getApiUrl('/api/users/sync'), {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -3151,10 +3239,15 @@ export default function App() {
           setErrorMsg(syncData?.error || "Profilni serverga yuklashda xatolik.");
           return;
         }
-        const finalUser = mergeAuthoritativeUserState(null, syncData.user);
+        const finalUser = mergeAuthoritativeUserState(null, syncData.token ? { ...syncData.user, authToken: syncData.token } : syncData.user);
         setCurrentUser(finalUser);
         setUsersList(prev => upsertUniqueUserInList(prev, finalUser));
         writeAuthoritativeUserCache(localStorage, finalUser);
+        persistLocalAuthCredentials(localStorage, {
+          token: syncData.token || finalUser?.authToken || `alov_session_${finalUser?.uid}`,
+          userId: finalUser?.uid,
+          user: finalUser,
+        });
         setPendingTgUser(null);
         setPendingFaceId(null);
         setShowAuthModal(false);
@@ -3259,10 +3352,15 @@ export default function App() {
         setIsLoggingIn(false);
         return;
       }
-      const finalUser = mergeAuthoritativeUserState(null, syncData.user);
+      const finalUser = mergeAuthoritativeUserState(null, syncData.token ? { ...syncData.user, authToken: syncData.token } : syncData.user);
       setCurrentUser(finalUser);
       setUsersList(prev => upsertUniqueUserInList(prev, finalUser));
       writeAuthoritativeUserCache(localStorage, finalUser);
+      persistLocalAuthCredentials(localStorage, {
+        token: syncData.token || finalUser?.authToken || `alov_session_${finalUser?.uid}`,
+        userId: finalUser?.uid,
+        user: finalUser,
+      });
       setPendingTgUser(null);
       setPendingFaceId(null);
       setShowAuthModal(false);
@@ -3420,21 +3518,21 @@ export default function App() {
   };
 
   useEffect(() => {
-    if (showTopUpModal) {
+    if (showTopUpModal || activeTab === 'store') {
       fetchMyCoinRequests();
       if (!coinRequestContact.trim()) {
         const fallback = currentUser?.telegram || currentUser?.phone || (currentUser?.username ? `@${currentUser.username.replace(/^@/, '')}` : '');
         if (fallback) setCoinRequestContact(fallback);
       }
     }
-  }, [showTopUpModal, currentUser?.uid]);
+  }, [showTopUpModal, activeTab, currentUser?.uid]);
 
   useEffect(() => {
-    if (showWithdrawModal && !withdrawContact.trim()) {
+    if ((showWithdrawModal || activeTab === 'store') && !withdrawContact.trim()) {
       const fallback = currentUser?.telegram || currentUser?.phone || (currentUser?.username ? `@${currentUser.username.replace(/^@/, '')}` : '');
       if (fallback) setWithdrawContact(fallback);
     }
-  }, [showWithdrawModal, currentUser?.uid]);
+  }, [showWithdrawModal, activeTab, currentUser?.uid]);
 
   const handleExecuteTopUp = async () => {
     const myUid = currentUser?.uid || firebaseUser?.uid;
@@ -3485,8 +3583,8 @@ export default function App() {
       showToast("Admin aloqaga chiqishi uchun Telegram username yoki telefon raqamingizni kiriting!");
       return;
     }
-    if (withdrawAmount < 100) {
-      showToast("Minimal yechib olish miqdori 100 almaz (10,000 so'm)!");
+    if (withdrawAmount < MIN_DIAMOND_CASHOUT_AMOUNT) {
+      showToast(`Minimal yechib olish miqdori ${MIN_DIAMOND_CASHOUT_AMOUNT} olmos (${MIN_DIAMOND_CASHOUT_UZS.toLocaleString()} so'm)!`);
       return;
     }
 
@@ -3504,7 +3602,7 @@ export default function App() {
       if (data && data.success && data.user) {
         setCurrentUser(data.user);
         setShowWithdrawModal(false);
-        showToast(`Pul yechish arizangiz adminga yuborildi (${calculateDiamondsToUzs(withdrawAmount).toLocaleString()} so'm). Admin siz bilan bog'lanadi!`);
+        showToast(`Pul yechish arizangiz adminga yuborildi (${calculateDiamondCashoutUzs(withdrawAmount).toLocaleString()} so'm). Admin siz bilan bog'lanadi!`);
       } else {
         showToast(data?.error || "Arizani yuborishda xatolik.");
       }
@@ -3535,9 +3633,9 @@ export default function App() {
       {/* Subtle Ambient Rose Glow */}
       <div className="pointer-events-none absolute -top-24 left-1/2 -translate-x-1/2 w-[540px] h-[180px] rounded-full bg-rose-600/10 blur-[90px]" />
 
-      {/* Top Header (hidden during full-screen Efirlar & Chatruletka) */}
-      {activeTab !== 'reels' && activeTab !== 'chatruletka' && (
-      <header className="shrink-0 bg-[#0D0F17]/92 backdrop-blur-xl border-b border-white/[0.08] px-3 sm:px-5 h-14 flex items-center justify-between gap-2 z-40 overflow-hidden">
+      {/* Top Header (hidden during full-screen Efirlar, Chatruletka & mobile Chat conversation) */}
+      {shouldShowOuterAppHeader({ isMobileViewport, activeTab, chatView }) && (
+      <header className="shrink-0 bg-[#0D0F17]/92 backdrop-blur-xl border-b border-white/[0.08] px-3 sm:px-5 pt-[env(safe-area-inset-top,0px)] min-h-14 flex items-center justify-between gap-2 z-40 overflow-hidden">
         <div
           className="flex items-center gap-2 sm:gap-2.5 min-w-0 shrink-0 cursor-pointer group"
           onClick={() => setActiveTab('discover')}
@@ -3559,51 +3657,38 @@ export default function App() {
 
         <div className="flex items-center gap-1.5 shrink-0">
           {isAdminTelegramUser(currentUser) ? (
-            <>
-              <button
-                onClick={() => setActiveTab('profile')}
-                title="Admin Full Almaz & Moneta Balansi"
-                className="sm:hidden flex items-center gap-1 bg-amber-500/10 border border-amber-400/30 text-amber-200 py-1 px-2 rounded-full text-[10px] font-bold transition whitespace-nowrap shrink-0 cursor-pointer"
-              >
-                <span>💎</span>
-                <Coins className="w-3 h-3 text-amber-400 shrink-0" />
-                <span>Full</span>
-              </button>
-              <button
-                onClick={() => setActiveTab('profile')}
-                title="Admin Full Almaz Balansi"
-                className="hidden sm:flex items-center gap-1 bg-cyan-500/10 border border-cyan-400/25 text-cyan-200 py-1 px-2.5 rounded-full text-[10.5px] font-bold hover:bg-cyan-500/20 transition whitespace-nowrap shrink-0 cursor-pointer"
-              >
-                <span>💎</span>
-                <span>Full</span>
-              </button>
-              <button
-                onClick={() => setActiveTab('profile')}
-                title="Admin Full Moneta Balansi"
-                className="hidden sm:flex items-center gap-1 bg-amber-500/10 border border-amber-400/25 text-amber-200 py-1 px-2.5 rounded-full text-[10.5px] font-bold hover:bg-amber-500/20 transition whitespace-nowrap shrink-0 cursor-pointer"
-              >
-                <Coins className="w-3 h-3 text-amber-400 shrink-0" />
-                <span>Full</span>
-              </button>
-            </>
+            <button
+              onClick={() => setActiveTab('store')}
+              data-testid="header-store-btn"
+              title="Alov.uz Do'koni (Admin)"
+              className="flex items-center gap-1.5 bg-amber-500/12 border border-amber-400/30 text-amber-200 py-1 px-2.5 rounded-full text-[10.5px] font-bold hover:bg-amber-500/20 transition active:scale-95 whitespace-nowrap shrink-0 cursor-pointer"
+            >
+              <span>💎</span>
+              <Coins className="w-3 h-3 text-amber-400 shrink-0" />
+              <span className="hidden sm:inline">Full ·</span>
+              <span className="text-amber-300">Do'kon</span>
+            </button>
           ) : currentUser?.gender === 'female' ? (
             <button
-              onClick={() => setShowWithdrawModal(true)}
+              onClick={() => setActiveTab('store')}
+              data-testid="header-store-btn"
+              title="Olmos va Do'kon"
               className="flex items-center gap-1 bg-cyan-500/10 border border-cyan-400/25 text-cyan-200 py-1 px-2.5 rounded-full text-[10.5px] font-bold hover:bg-cyan-500/20 transition active:scale-95 whitespace-nowrap shrink-0 cursor-pointer tabular-nums"
             >
               <span>💎</span>
               <span>{currentUser?.diamonds ?? 0}</span>
+              <span className="text-cyan-300 font-semibold">· Do'kon</span>
             </button>
           ) : (
             <button
-              onClick={() => setShowTopUpModal(true)}
+              onClick={() => setActiveTab('store')}
               data-testid="header-coin-shop-btn"
               title="Moneta Do'koni"
               className="flex items-center gap-1 bg-amber-500/12 border border-amber-400/30 text-amber-200 py-1 px-2.5 rounded-full text-[10.5px] font-bold hover:bg-amber-500/20 transition active:scale-95 whitespace-nowrap shrink-0 cursor-pointer tabular-nums"
             >
               <Coins className="w-3 h-3 text-amber-400 shrink-0" />
               <span>{currentUser?.coins ?? 100}</span>
-              <span className="hidden sm:inline text-amber-300 font-semibold">· Do'kon</span>
+              <span className="text-amber-300 font-semibold">· Do'kon</span>
             </button>
           )}
 
@@ -3631,9 +3716,15 @@ export default function App() {
                 <>
                   {headerAvatar ? (
                     <img
+                      key={headerAvatar}
                       src={headerAvatar}
                       alt={headerName}
                       className="w-6 h-6 sm:w-5 sm:h-5 rounded-full object-cover shrink-0 border border-white/20"
+                      onLoad={(e: any) => {
+                        e.currentTarget.style.display = '';
+                        const fallbackEl = e.currentTarget.nextElementSibling as HTMLElement | null;
+                        if (fallbackEl) fallbackEl.style.display = '';
+                      }}
                       onError={(e: any) => {
                         e.currentTarget.style.display = 'none';
                         const fallbackEl = e.currentTarget.nextElementSibling as HTMLElement | null;
@@ -3642,6 +3733,7 @@ export default function App() {
                     />
                   ) : null}
                   <span
+                    key={`header-fallback-${headerAvatar || 'none'}`}
                     className={cn(
                       "w-6 h-6 sm:w-5 sm:h-5 rounded-full bg-rose-500/20 text-rose-300 text-[10px] font-bold items-center justify-center shrink-0",
                       headerAvatar ? "hidden" : "flex"
@@ -3708,7 +3800,7 @@ export default function App() {
                   }}
                   onOpenTopUp={(notice) => {
                     if (notice) setWalletNoticeMsg(notice);
-                    setShowTopUpModal(true);
+                    setActiveTab('store');
                   }}
                   onChatViewChange={(view) => setChatView(view)}
                 />
@@ -3913,13 +4005,13 @@ export default function App() {
                           <div className="flex gap-1.5 pt-0.5">
                             <button
                               onClick={() => openUserProfileByUid(user.uid || user.id, user)}
-                              className="flex-1 py-2 rounded-xl bg-white/[0.06] hover:bg-white/[0.11] text-zinc-200 font-semibold text-[11px] border border-white/[0.08] transition active:scale-95 cursor-pointer"
+                              className="flex-1 min-h-[44px] sm:min-h-0 py-2.5 sm:py-2 rounded-xl bg-white/[0.06] hover:bg-white/[0.11] text-zinc-200 font-semibold text-xs sm:text-[11px] border border-white/[0.08] transition active:scale-95 cursor-pointer"
                             >
                               Profil
                             </button>
                             <button
                               onClick={() => openChatWithUser(user)}
-                              className="flex-1 py-2 rounded-xl bg-[#E11D48] hover:bg-[#BE123C] text-white font-bold text-[11px] transition active:scale-95 cursor-pointer"
+                              className="flex-1 min-h-[44px] sm:min-h-0 py-2.5 sm:py-2 rounded-xl bg-[#E11D48] hover:bg-[#BE123C] text-white font-bold text-xs sm:text-[11px] transition active:scale-95 cursor-pointer"
                             >
                               Chat
                             </button>
@@ -3970,6 +4062,32 @@ export default function App() {
 
               {/* Chatruletka renders exclusively via Vercel Micro-Frontend (/chatroulette) */}
               {/* Chat renders exclusively via Vercel Micro-Frontend (/chat) */}
+
+              {/* --- STORE TAB (DO'KON: OLMOS CASHOUT & MONETA SHOP) --- */}
+              {activeTab === 'store' && (
+                <StoreView
+                  currentUser={currentUser}
+                  selectedCoinPackage={findCoinStorePackage(topUpPackage.coins)}
+                  onSelectCoinPackage={(pkg) => setTopUpPackage({ coins: pkg.coins, uzs: pkg.uzs })}
+                  paymentProvider={paymentProvider}
+                  onSelectPaymentProvider={(id) => setPaymentProvider(id as any)}
+                  coinRequestContact={coinRequestContact}
+                  onChangeCoinRequestContact={setCoinRequestContact}
+                  coinRequestNote={coinRequestNote}
+                  onChangeCoinRequestNote={setCoinRequestNote}
+                  isSubmittingCoinRequest={isSubmittingCoinRequest}
+                  onSubmitCoinOrder={handleExecuteTopUp}
+                  userCoinRequests={userCoinRequests}
+                  withdrawAmount={withdrawAmount}
+                  onChangeWithdrawAmount={setWithdrawAmount}
+                  withdrawCardNumber={withdrawCardNumber}
+                  onChangeWithdrawCardNumber={setWithdrawCardNumber}
+                  withdrawContact={withdrawContact}
+                  onChangeWithdrawContact={setWithdrawContact}
+                  onSubmitWithdrawal={handleExecuteWithdrawal}
+                  walletNoticeMsg={walletNoticeMsg}
+                />
+              )}
 
               {/* --- PROFILE TAB (Editorial Obsidian Dating Profile) --- */}
               {activeTab === 'profile' && (() => {
@@ -4024,9 +4142,13 @@ export default function App() {
                       <div className="relative h-40 sm:h-52 bg-gradient-to-br from-[#27121C] via-[#1B1726] to-[#11131C] border-b border-white/[0.08] overflow-hidden">
                         {profileBanner ? (
                           <img
+                            key={profileBanner}
                             src={profileBanner}
                             alt={`${profileName} banneri`}
                             className="w-full h-full object-cover object-center"
+                            onLoad={(e: any) => {
+                              e.currentTarget.style.display = '';
+                            }}
                             onError={(e: any) => {
                               e.currentTarget.style.display = 'none';
                             }}
@@ -4076,9 +4198,15 @@ export default function App() {
                           <div className="relative shrink-0 self-start">
                             {profileAvatar ? (
                               <img
+                                key={profileAvatar}
                                 src={profileAvatar}
                                 alt={profileName}
                                 className="w-24 h-24 sm:w-28 sm:h-28 rounded-full object-cover border-4 border-[#12141E] shadow-xl bg-[#181B29]"
+                                onLoad={(e: any) => {
+                                  e.currentTarget.style.display = '';
+                                  const fallbackEl = e.currentTarget.nextElementSibling as HTMLElement | null;
+                                  if (fallbackEl) fallbackEl.style.display = '';
+                                }}
                                 onError={(e: any) => {
                                   e.currentTarget.style.display = 'none';
                                   const fallbackEl = e.currentTarget.nextElementSibling as HTMLElement | null;
@@ -4087,6 +4215,7 @@ export default function App() {
                               />
                             ) : null}
                             <div
+                              key={`profile-fallback-${profileAvatar || 'none'}`}
                               className={cn(
                                 "w-24 h-24 sm:w-28 sm:h-28 rounded-full bg-[#1C1F2E] text-rose-400 font-editorial font-black text-3xl items-center justify-center border-4 border-[#12141E] shadow-xl",
                                 profileAvatar ? "hidden" : "flex"
@@ -4199,11 +4328,20 @@ export default function App() {
                                   </p>
                                 </div>
                               </div>
-                              <div className="pt-2.5 border-t border-white/10 flex items-center justify-between text-[11px] text-zinc-300">
+                              <div className="pt-2.5 border-t border-white/10 flex items-center justify-between text-[11px] text-zinc-300 gap-2">
                                 <span className="inline-flex items-center gap-1.5">
                                   <Crown className="w-3.5 h-3.5 text-amber-400" />
                                   <span>Admin tezkor kirishi faol</span>
                                 </span>
+                                <button
+                                  type="button"
+                                  data-testid="profile-wallet-action-btn"
+                                  onClick={() => setActiveTab('store')}
+                                  className="px-3 py-1.5 rounded-xl bg-rose-500/20 hover:bg-rose-600 text-rose-200 hover:text-white font-bold transition cursor-pointer inline-flex items-center gap-1"
+                                >
+                                  <ShoppingBag className="w-3.5 h-3.5" />
+                                  <span>Do'kon</span>
+                                </button>
                               </div>
                             </div>
                           ) : (
@@ -4219,20 +4357,19 @@ export default function App() {
                                     </p>
                                     <p className="text-[11px] text-zinc-400 tabular-nums">
                                       {currentUser?.gender === 'female'
-                                        ? `${formatDiamondsDisplay(currentUser?.diamonds)} olmos mavjud`
+                                        ? `${formatDiamondsDisplay(currentUser?.diamonds)} olmos (${calculateDiamondCashoutUzs(currentUser?.diamonds || 0).toLocaleString()} so'm)`
                                         : `${currentUser?.coins ?? 100} moneta mavjud`}
                                     </p>
                                   </div>
                                 </div>
                                 <button
                                   type="button"
-                                  onClick={() =>
-                                    currentUser?.gender === 'female' ? setShowWithdrawModal(true) : setShowTopUpModal(true)
-                                  }
+                                  onClick={() => setActiveTab('store')}
                                   data-testid="profile-wallet-action-btn"
-                                  className="px-3.5 py-1.5 rounded-xl bg-rose-500/15 hover:bg-rose-600 text-rose-300 hover:text-white text-[11px] font-bold transition cursor-pointer"
+                                  className="px-3.5 py-1.5 rounded-xl bg-rose-500/15 hover:bg-rose-600 text-rose-300 hover:text-white text-[11px] font-bold transition cursor-pointer inline-flex items-center gap-1.5"
                                 >
-                                  {currentUser?.gender === 'female' ? 'Chiqarish' : "Do'kon"}
+                                  <ShoppingBag className="w-3.5 h-3.5" />
+                                  <span>Do'kon</span>
                                 </button>
                               </div>
 
@@ -4902,10 +5039,15 @@ export default function App() {
         );
       })()}
 
-      {/* Sticky Bottom Navigation Dock with Animated Active Pill */}
-      {activeTab !== 'reels' && activeTab !== 'chatruletka' && !(activeTab === 'chats' && chatView === 'conversation') && (
-        <div className="sticky bottom-0 left-0 right-0 z-50 shrink-0 pointer-events-none pb-2.5 pt-1 px-1.5 sm:px-4">
-          <nav className="pointer-events-auto max-w-2xl mx-auto bg-[#11131C]/92 backdrop-blur-2xl border border-white/[0.1] rounded-2xl sm:rounded-full px-1 py-1.5 flex items-center justify-around shadow-[0_16px_42px_rgba(0,0,0,0.65)]">
+      {/* Sticky Bottom Navigation Dock with Animated Active Pill (auto-hides when mobile keyboard opens) */}
+      {!shouldHideMobileBottomDock({
+        isMobileViewport,
+        isKeyboardOpen: appViewportMetrics.isKeyboardOpen,
+        activeTab,
+        chatView,
+      }) && (
+        <div className="sticky bottom-0 left-0 right-0 z-50 shrink-0 pointer-events-none pb-[max(0.5rem,env(safe-area-inset-bottom))] pt-1 px-1.5 sm:px-4">
+          <nav className="pointer-events-auto max-w-2xl mx-auto bg-[#11131C]/92 backdrop-blur-2xl border border-white/[0.1] rounded-2xl sm:rounded-full px-1 py-1 flex items-center justify-around shadow-[0_16px_42px_rgba(0,0,0,0.65)]">
             {[
               { id: 'discover', label: 'Nomzodlar', icon: Users, onClick: () => setActiveTab('discover') },
               { id: 'posts', label: 'Postlar', icon: Newspaper, onClick: () => setActiveTab('posts') },
@@ -4922,7 +5064,7 @@ export default function App() {
                   key={tab.id}
                   onClick={tab.onClick}
                   data-testid={`tab-${tab.id}`}
-                  className={`relative flex flex-col items-center justify-center px-1.5 sm:px-3 py-1.5 rounded-xl sm:rounded-full transition-colors duration-150 cursor-pointer min-w-0 flex-1 ${
+                  className={`relative flex flex-col items-center justify-center min-h-[44px] px-1 sm:px-3 py-1 rounded-xl sm:rounded-full transition-colors duration-150 cursor-pointer min-w-0 flex-1 ${
                     isActive ? 'text-white font-bold' : 'text-zinc-400 hover:text-zinc-200'
                   }`}
                 >
@@ -4934,7 +5076,7 @@ export default function App() {
                     />
                   )}
                   <Icon className={`relative z-10 w-4 h-4 sm:w-4.5 sm:h-4.5 transition-transform duration-150 ${isActive ? 'text-rose-400 scale-105' : ''}`} />
-                  <span className="relative z-10 text-[9px] sm:text-[10px] truncate mt-0.5">{tab.label}</span>
+                  <span className="relative z-10 text-[9px] sm:text-[10px] truncate mt-0.5 max-w-full">{tab.label}</span>
                 </button>
               );
             })}
@@ -4996,13 +5138,24 @@ export default function App() {
 
   return (
     <MotionConfig reducedMotion="user">
-    <div className="min-h-screen bg-[#09090D] text-[#F4F4F6] font-sans selection:bg-rose-600 selection:text-white">
+    <div className="min-h-app-viewport bg-[#09090D] text-[#F4F4F6] font-sans selection:bg-rose-600 selection:text-white">
 
-      {/* Vercel Micro-Frontend Embed View (/efir, /postlar, /chatruletka inside seamless iframe) */}
+      {/* Vercel Micro-Frontend Embed View (/efir, /postlar, /chatruletka, /chat inside seamless iframe) */}
       {embedRouteInfo.isEmbedRoute && embedRouteInfo.section ? (
         <div
           data-testid={`embed-section-root-${embedRouteInfo.section}`}
-          className="h-[100dvh] w-full bg-[#09090D] flex flex-col overflow-hidden"
+          style={{
+            height: `${appViewportMetrics.heightPx}px`,
+            ...(appViewportMetrics.offsetTopPx > 0
+              ? {
+                  position: 'fixed',
+                  top: `${appViewportMetrics.offsetTopPx}px`,
+                  left: 0,
+                  right: 0,
+                }
+              : {}),
+          }}
+          className="h-app-viewport w-full bg-[#09090D] flex flex-col overflow-hidden"
         >
           {embedRouteInfo.section === 'postlar' && (
             <div className="flex-1 overflow-y-auto p-3 sm:p-5 space-y-4">
@@ -5147,7 +5300,17 @@ export default function App() {
       ) : !currentUser || activeTab === 'landing' ? (
         <LandingPage onLogin={() => openAuthModalClean('login')} />
       ) : (
-        <div className="min-h-screen bg-[#09090D] flex flex-col items-center justify-center p-0 md:p-4 overflow-hidden relative">
+        <div
+          style={
+            isMobileViewport
+              ? {
+                  top: `${appViewportMetrics.offsetTopPx}px`,
+                  height: `${appViewportMetrics.heightPx}px`,
+                }
+              : undefined
+          }
+          className="fixed inset-x-0 md:static md:min-h-screen bg-[#09090D] flex flex-col items-center justify-center p-0 md:p-4 overflow-hidden"
+        >
           <div className="pointer-events-none fixed inset-0 bg-[radial-gradient(ellipse_at_top,rgba(225,29,72,0.12),transparent_55%)]" />
           {showUpdateBanner && (
             <motion.div
@@ -5167,7 +5330,7 @@ export default function App() {
               </button>
             </motion.div>
           )}
-          <div className="w-full md:max-w-[1060px] h-[100dvh] md:h-[calc(100dvh-2rem)] bg-[#09090D] md:rounded-[28px] md:shadow-[0_28px_80px_rgba(0,0,0,0.8)] md:border md:border-white/[0.09] relative overflow-hidden flex flex-col z-10">
+          <div className="w-full md:max-w-[1060px] flex-1 min-h-0 h-full md:flex-none md:h-[calc(100dvh-2rem)] bg-[#09090D] md:rounded-[28px] md:shadow-[0_28px_80px_rgba(0,0,0,0.8)] md:border md:border-white/[0.09] relative overflow-hidden flex flex-col z-10">
             {dashboardContent}
           </div>
         </div>
@@ -6469,9 +6632,13 @@ export default function App() {
                       <div className="w-20 h-20 rounded-full overflow-hidden border-2 border-white/15 shadow-md bg-[#0E1018] flex items-center justify-center shrink-0">
                         {resolveAvatarUrl(regAvatar) ? (
                           <img
+                            key={resolveAvatarUrl(regAvatar)}
                             src={resolveAvatarUrl(regAvatar)}
                             alt="Profil rasmi"
                             className="w-full h-full object-cover"
+                            onLoad={(e: any) => {
+                              e.currentTarget.style.display = '';
+                            }}
                             onError={(e: any) => {
                               e.currentTarget.style.display = 'none';
                             }}
@@ -7057,145 +7224,19 @@ export default function App() {
         </div>
       )}
 
-      {/* --- IMAGE CROP & ZOOM EDITING MODAL (Renders ON TOP of Edit Profile modal with z-[210]) --- */}
-      {showCropModal && cropImageSrc && (
-        <div
-          data-testid="avatar-crop-modal"
-          onClick={() => setShowCropModal(false)}
-          className="fixed inset-0 z-[210] flex items-center justify-center p-4 bg-black/80 backdrop-blur-md"
-        >
-          <motion.div
-            initial={{ opacity: 0, scale: 0.96, y: 10 }}
-            animate={{ opacity: 1, scale: 1, y: 0 }}
-            onClick={(e) => e.stopPropagation()}
-            className="bg-[#11131C] rounded-[28px] max-w-sm w-full p-5 space-y-4 relative select-none shadow-[0_28px_80px_rgba(0,0,0,0.85)] border border-white/10 text-zinc-100"
-          >
-            <div className="flex items-center justify-between">
-              <div className="flex items-center space-x-2">
-                <Crop className="w-5 h-5 text-rose-400" />
-                <h3 className="font-bold text-sm text-white">Rasmni moslashtirish</h3>
-              </div>
-              <button
-                type="button"
-                aria-label="Rasm tahrirlash oynasini yopish"
-                onClick={() => setShowCropModal(false)}
-                className="p-1.5 rounded-full bg-white/[0.06] text-zinc-400 hover:text-white hover:bg-rose-500/20 transition cursor-pointer"
-              >
-                <X className="w-4 h-4" />
-              </button>
-            </div>
-
-            <p className="text-[11px] text-zinc-400">
-              Barmoq/sichqoncha bilan rasmni suring va zoom orqali joylashuvini to'g'rilang:
-            </p>
-
-            {/* Circular Preview Container with Drag and Pinch capabilities */}
-            <div 
-              className="relative w-56 h-56 mx-auto rounded-full overflow-hidden border-4 border-rose-500 shadow-lg bg-[#09090D] cursor-move flex items-center justify-center touch-none"
-              onMouseDown={(e) => {
-                setIsDraggingPan(true);
-                dragStartRef.current = { x: e.clientX - cropPan.x, y: e.clientY - cropPan.y };
-              }}
-              onMouseMove={(e) => {
-                if (!isDraggingPan) return;
-                setCropPan({
-                  x: e.clientX - dragStartRef.current.x,
-                  y: e.clientY - dragStartRef.current.y
-                });
-              }}
-              onMouseUp={() => setIsDraggingPan(false)}
-              onMouseLeave={() => setIsDraggingPan(false)}
-              onTouchStart={(e) => {
-                if (e.touches.length === 1) {
-                  setIsDraggingPan(true);
-                  dragStartRef.current = { 
-                    x: e.touches[0].clientX - cropPan.x, 
-                    y: e.touches[0].clientY - cropPan.y 
-                  };
-                }
-              }}
-              onTouchMove={(e) => {
-                if (isDraggingPan && e.touches.length === 1) {
-                  setCropPan({
-                    x: e.touches[0].clientX - dragStartRef.current.x,
-                    y: e.touches[0].clientY - dragStartRef.current.y
-                  });
-                }
-              }}
-              onTouchEnd={() => setIsDraggingPan(false)}
-            >
-              <img 
-                src={cropImageSrc} 
-                alt="Crop preview" 
-                className="max-w-none transition-transform duration-75 pointer-events-none select-none"
-                style={{
-                  transform: `scale(${cropScale}) translate(${cropPan.x / cropScale}px, ${cropPan.y / cropScale}px)`,
-                  width: '100%',
-                  height: '100%',
-                  objectFit: 'cover'
-                }}
-              />
-            </div>
-
-            {/* Zoom Slider and Controls */}
-            <div className="space-y-2 pt-2">
-              <div className="flex items-center space-x-3 px-2">
-                <button 
-                  type="button"
-                  onClick={() => setCropScale(prev => Math.max(1, prev - 0.2))} 
-                  className="p-1.5 rounded-full bg-white/[0.08] hover:bg-white/[0.15] text-zinc-200 cursor-pointer"
-                >
-                  <ZoomOut className="w-4 h-4" />
-                </button>
-                <input 
-                  type="range" 
-                  min="1" 
-                  max="3" 
-                  step="0.05"
-                  value={cropScale}
-                  onChange={(e) => setCropScale(parseFloat(e.target.value))}
-                  className="flex-1 accent-rose-500 h-1.5 bg-white/15 rounded-lg cursor-pointer"
-                />
-                <button 
-                  type="button"
-                  onClick={() => setCropScale(prev => Math.min(3, prev + 0.2))} 
-                  className="p-1.5 rounded-full bg-white/[0.08] hover:bg-white/[0.15] text-zinc-200 cursor-pointer"
-                >
-                  <ZoomIn className="w-4 h-4" />
-                </button>
-              </div>
-
-              <div className="flex items-center justify-between text-[10px] text-zinc-500 px-2">
-                <span>1x (Oddiy)</span>
-                <span>Zoom: {cropScale.toFixed(2)}x</span>
-                <span>3x (Kattaroq)</span>
-              </div>
-            </div>
-
-            {/* Action Buttons */}
-            <div className="flex space-x-2 pt-2">
-              <button 
-                type="button"
-                onClick={() => {
-                  setCropScale(1);
-                  setCropPan({ x: 0, y: 0 });
-                }}
-                className="px-3 py-2.5 rounded-full bg-white/[0.07] text-zinc-200 font-bold text-xs hover:bg-white/[0.14] transition-all flex items-center space-x-1 cursor-pointer"
-              >
-                <RefreshCw className="w-3.5 h-3.5" />
-                <span>Tiklash</span>
-              </button>
-              <button 
-                type="button"
-                onClick={handleApplyCrop}
-                className="flex-1 py-2.5 rounded-full bg-gradient-to-r from-[#E11D48] to-rose-600 text-white font-bold text-xs shadow-md hover:brightness-110 transition-all flex items-center justify-center space-x-1.5 cursor-pointer"
-              >
-                <span>Saqlash va Tasdiqlash</span>
-              </button>
-            </div>
-          </motion.div>
-        </div>
-      )}
+      {/* --- IMAGE & BANNER CROP / ZOOM MODAL (Renders ON TOP of Edit Profile modal with z-[210]) --- */}
+      <ImageCropModal
+        isOpen={Boolean(showCropModal && cropImageSrc)}
+        mode={cropMode}
+        imageSrc={cropImageSrc}
+        isSubmitting={isUploadingBanner}
+        onClose={() => {
+          setShowCropModal(false);
+          setCropImageSrc(null);
+          setCropBannerSaveImmediately(false);
+        }}
+        onConfirm={handleCropConfirm}
+      />
 
       {/* --- 2ND-PERSON EDITORIAL PUBLIC USER PROFILE MODAL --- */}
       {selectedProfile && (
@@ -7659,17 +7700,17 @@ export default function App() {
                 <span className="text-sm font-mono font-bold text-cyan-300">{formatDiamondsDisplay(currentUser?.diamonds)} Almaz</span>
               </div>
               <p className="text-[10px] text-cyan-300/80 font-medium">
-                Kurs: 1 Almaz = 100 So'm • Minimal yechish: 100 Almaz (10,000 So'm)
+                Minimal yechish: {MIN_DIAMOND_CASHOUT_AMOUNT} Olmos ({MIN_DIAMOND_CASHOUT_UZS.toLocaleString()} So'm)
               </p>
             </div>
 
             <form onSubmit={handleExecuteWithdrawal} className="space-y-3">
               <div>
-                <label className="block text-[11px] font-bold text-zinc-300 mb-1">Yechib olinadigan almaz miqdori:</label>
+                <label className="block text-[11px] font-bold text-zinc-300 mb-1">Yechib olinadigan olmos miqdori:</label>
                 <input 
                   type="number"
-                  step="0.5"
-                  min={100}
+                  step="1"
+                  min={MIN_DIAMOND_CASHOUT_AMOUNT}
                   max={currentUser?.diamonds ?? 0}
                   value={withdrawAmount}
                   onChange={(e) => setWithdrawAmount(Number(e.target.value))}
@@ -7678,7 +7719,7 @@ export default function App() {
                   className="w-full px-3.5 py-2.5 rounded-xl bg-[#171A26] border border-white/10 text-xs font-bold text-white focus:border-cyan-400 outline-none"
                 />
                 <p className="text-[10px] text-zinc-400 mt-1">
-                  Kartangizga o'tkaziladi: <span className="font-bold text-emerald-400">{calculateDiamondsToUzs(withdrawAmount).toLocaleString()} So'm</span>
+                  Kartangizga o'tkaziladi: <span className="font-bold text-emerald-400">{calculateDiamondCashoutUzs(withdrawAmount).toLocaleString()} So'm</span>
                 </p>
               </div>
 

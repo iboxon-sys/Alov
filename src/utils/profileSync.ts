@@ -382,7 +382,9 @@ export function collectReplacedUserMediaUrls(previousUser: any, nextUser: any): 
   if (!previousUser || typeof previousUser !== 'object') return [];
   const prevUrls = extractUserMediaUrls(previousUser);
   const nextSet = new Set(extractUserMediaUrls(nextUser));
-  return prevUrls.filter((url) => url.startsWith('/api/media/') && !nextSet.has(url));
+  return prevUrls.filter(
+    (url) => (url.startsWith('/api/media/') || url.startsWith('/api/face-id/photo/')) && !nextSet.has(url)
+  );
 }
 
 export function deduplicateUsersList<T extends Record<string, any>>(
@@ -462,14 +464,37 @@ export function upsertUniqueUserInList<T extends Record<string, any>>(
   return result;
 }
 
-export function buildUpdatedUserSnapshot(existing: any, updates: any): any {
+export function buildUpdatedUserSnapshot(
+  existing: any,
+  updates: any,
+  options?: { isProfileEdit?: boolean; replaceInitialAvatar?: boolean }
+): any {
   const base = existing && typeof existing === 'object' ? { ...existing } : {};
   const incoming = updates && typeof updates === 'object' ? updates : {};
+  const isProfileEdit = Boolean(options?.isProfileEdit || incoming.isProfileEdit);
   const next: Record<string, any> = { ...base };
 
+  // Preserve original uid on profile edits so duplicate accounts are never created
+  const originalUid = base.uid ? String(base.uid).trim() : '';
+
   for (const [key, val] of Object.entries(incoming)) {
-    if (val === undefined) continue;
-    if (val === null && ['username', 'banner', 'videoUrl', 'startGifUrl', 'bio', 'phone', 'telegram', 'instagram', 'neighborhood', 'avatar', 'photoURL'].includes(key)) {
+    if (val === undefined || key === 'isProfileEdit' || key === 'replaceInitialAvatar') continue;
+    if (
+      val === null &&
+      [
+        'username',
+        'banner',
+        'videoUrl',
+        'startGifUrl',
+        'bio',
+        'phone',
+        'telegram',
+        'instagram',
+        'neighborhood',
+        'avatar',
+        'photoURL',
+      ].includes(key)
+    ) {
       next[key] = '';
       continue;
     }
@@ -478,6 +503,20 @@ export function buildUpdatedUserSnapshot(existing: any, updates: any): any {
       continue;
     }
     next[key] = val;
+  }
+
+  if (isProfileEdit && originalUid) {
+    next.uid = originalUid;
+  }
+
+  // Keep name shadows locked to the edited primary name (wipe stale first_name/last_name/displayName)
+  if (incoming.name !== undefined && isExplicitProfileDisplayName(next.name)) {
+    const cleanName = String(next.name).trim();
+    next.name = cleanName;
+    next.firstName = cleanName;
+    next.first_name = cleanName;
+    next.lastName = '';
+    next.last_name = '';
   }
 
   // Replace stale photoURL when avatar has been explicitly updated or cleared
@@ -492,8 +531,101 @@ export function buildUpdatedUserSnapshot(existing: any, updates: any): any {
     }
   }
 
-  // Never keep stale legacy telegramUsername / first_name / last_name shadows out of sync
+  // When user replaces or removes their initial/Face-ID avatar during edit, wipe old faceId.capturedPhotoUrl
+  // while keeping biometric verification status & detected gender intact.
+  const oldFacePhoto = String(base?.faceId?.capturedPhotoUrl || '').trim();
+  const nextAvatarClean = String(next.avatar || '').trim();
+  const explicitlyReplacedAvatar = Boolean(
+    options?.replaceInitialAvatar ||
+      incoming.replaceInitialAvatar ||
+      (isProfileEdit &&
+        incoming.avatar !== undefined &&
+        oldFacePhoto &&
+        nextAvatarClean !== oldFacePhoto &&
+        (next.hasCustomAvatar === true || nextAvatarClean === ''))
+  );
+  if (explicitlyReplacedAvatar && next.faceId && typeof next.faceId === 'object') {
+    const nextFaceId = { ...next.faceId };
+    delete nextFaceId.capturedPhotoUrl;
+    next.faceId = nextFaceId;
+  }
+
+  if (isProfileEdit) {
+    next.hasEditedProfile = true;
+    next.profileUpdatedAt = String(incoming.profileUpdatedAt || incoming.updatedAt || new Date().toISOString());
+  }
+
+  // Never keep stale initial-login / legacy shadows around
   delete next.telegramUsername;
+  delete next.displayName;
+  delete next.initialName;
+  delete next.initialAvatar;
+  delete next.googlePhotoURL;
+  delete next.isProfileEdit;
+  delete next.replaceInitialAvatar;
+
+  return sanitizeUserProfileCollections(next);
+}
+
+/**
+ * Merges incoming Telegram/Google login provider payload into an existing account WITHOUT
+ * letting initial-login provider fields overwrite edited primary profile attributes.
+ */
+export function mergeReturningAuthProfile(
+  storedUser: any,
+  providerData: {
+    name?: string | null;
+    firstName?: string | null;
+    lastName?: string | null;
+    avatar?: string | null;
+    telegram?: string | null;
+    telegramChatId?: number | string | null;
+    phone?: string | null;
+    email?: string | null;
+  } = {}
+): any {
+  if (!storedUser || typeof storedUser !== 'object') return storedUser;
+  const next = { ...storedUser };
+  const isEditedOrCompleted = Boolean(next.hasEditedProfile || next.isProfileCompleted);
+
+  if (!isEditedOrCompleted) {
+    if (providerData.name && isExplicitProfileDisplayName(providerData.name) && !isExplicitProfileDisplayName(next.name)) {
+      next.name = String(providerData.name).trim();
+    }
+    if (providerData.avatar && !next.avatar && !next.hasCustomAvatar) {
+      next.avatar = String(providerData.avatar).trim();
+    }
+  }
+
+  // Always anchor explicit edited name into firstName and clear lastName
+  if (isExplicitProfileDisplayName(next.name)) {
+    const cleanName = String(next.name).trim();
+    next.name = cleanName;
+    next.firstName = cleanName;
+    next.first_name = cleanName;
+    next.lastName = '';
+    next.last_name = '';
+  }
+
+  // Backfill ONLY strictly missing auth linkers (never overwrite edited handle/phone)
+  if (!next.telegramChatId && providerData.telegramChatId) {
+    next.telegramChatId = Number(providerData.telegramChatId);
+  }
+  if (next.telegram === undefined && providerData.telegram) {
+    next.telegram = normalizeTelegramUrl(providerData.telegram) || String(providerData.telegram).trim();
+  }
+  if (next.phone === undefined && providerData.phone) {
+    next.phone = String(providerData.phone).trim();
+  }
+  if (!next.email && providerData.email) {
+    next.email = String(providerData.email).trim();
+  }
+
+  delete next.telegramUsername;
+  delete next.displayName;
+  delete next.initialName;
+  delete next.initialAvatar;
+  delete next.googlePhotoURL;
 
   return sanitizeUserProfileCollections(next);
 }

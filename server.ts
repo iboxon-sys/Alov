@@ -115,12 +115,18 @@ import {
   collectReplacedUserMediaUrls,
   deduplicateUsersList,
   isExplicitProfileDisplayName,
+  mergeReturningAuthProfile,
   normalizeTelegramUrl,
   pickNewestCanonicalUser,
   propagateProfileUpdateAcrossStores,
   sanitizeUserProfileCollections,
   userSharesIdentity,
 } from './src/utils/profileSync';
+import {
+  MIN_DIAMOND_CASHOUT_AMOUNT,
+  MIN_DIAMOND_CASHOUT_UZS,
+  calculateDiamondCashoutUzs,
+} from './src/utils/store';
 import { isAllowedCorsOrigin } from './src/utils/microFrontendBridge';
 import { createTurnstileReplayGuard, verifyTurnstileWithSiteverify } from './src/utils/turnstile';
 import {
@@ -2542,15 +2548,9 @@ async function startServer() {
           io.emit('user_updated', user);
         }
       } else {
-        // NEVER overwrite an explicit saved display name on re-login
-        if (!isExplicitProfileDisplayName(user.name)) {
+        // NEVER overwrite an explicit edited/saved profile on re-login
+        if (!isExplicitProfileDisplayName(user.name) && !user.hasEditedProfile) {
           user.name = botFullName || '';
-        }
-        if (isExplicitProfileDisplayName(user.name)) {
-          user.firstName = user.name;
-          user.first_name = user.name;
-          user.lastName = '';
-          user.last_name = '';
         }
         // Preserve explicitly uploaded custom avatar; otherwise prioritize Face ID photo
         if (user.hasCustomAvatar && user.avatar && !isPlaceholderAvatar(user.avatar)) {
@@ -2560,16 +2560,14 @@ async function startServer() {
         } else if (!user.faceId?.verified && user.avatar && user.avatar.includes('api.telegram.org/file/')) {
           user.avatar = '';
         }
-        if (formattedTgUrl && user.telegram === undefined) {
+        user = mergeReturningAuthProfile(user, {
+          name: botFullName,
+          telegram: formattedTgUrl,
+          telegramChatId: userChatId,
+          phone: formattedTgPhone,
+        });
+        if (formattedTgUrl && user.telegram && user.telegram.startsWith('@')) {
           user.telegram = formattedTgUrl;
-        } else if (formattedTgUrl && user.telegram && user.telegram.startsWith('@')) {
-          user.telegram = formattedTgUrl;
-        }
-        if (userChatId && !user.telegramChatId) {
-          user.telegramChatId = userChatId;
-        }
-        if (formattedTgPhone && user.phone === undefined) {
-          user.phone = formattedTgPhone;
         }
         user.isOnline = true;
         user.status = 'online';
@@ -2700,14 +2698,16 @@ async function startServer() {
         matchedUser.last_name = '';
       }
 
-      normalizeAndReleaseUser(matchedUser);
-      await dedupeAndPropagateUserProfile(matchedUser, matchedUser);
+      const canonicalLoginUser = mergeReturningAuthProfile(matchedUser, {});
+      normalizeAndReleaseUser(canonicalLoginUser);
+      usersStore.set(canonicalLoginUser.uid, canonicalLoginUser);
+      await dedupeAndPropagateUserProfile(canonicalLoginUser, canonicalLoginUser);
 
       res.json({
         success: true,
         message: 'Muvaffaqiyatli kirdingiz',
-        token: createAuthBridgeToken(matchedUser.uid),
-        user: matchedUser
+        token: createAuthBridgeToken(canonicalLoginUser.uid),
+        user: canonicalLoginUser
       });
     } catch (err: any) {
       res.status(500).json({ success: false, error: err.message });
@@ -3804,19 +3804,26 @@ Suhbatlashish qoidalaringiz:
         user.uid?.startsWith('tg_')
       );
       let knownChatId = incomingTgChatId || existing.telegramChatId;
+      const isProfileEditSync = Boolean(user.isProfileEdit);
       const incomingValidName = isExplicitProfileDisplayName(user.name) ? String(user.name).trim() : '';
       const existingValidName = isExplicitProfileDisplayName(existing.name) ? String(existing.name).trim() : '';
+      const protectEditedProfile = Boolean(
+        !isProfileEditSync && (existing.hasEditedProfile === true || existing.isProfileCompleted === true)
+      );
 
-      let fetchedAvatar = pickPreferredAvatar(user.avatar, existing.avatar);
-      let fetchedName =
-        incomingValidName ||
-        buildTelegramDisplayName({
-          firstName: user.firstName || user.first_name || existingValidName,
-          lastName: user.lastName || user.last_name,
-          username: incomingTgHandle || existing.telegram,
-          phone: incomingPhone || existing.phone,
-          existingName: existingValidName,
-        });
+      let fetchedAvatar = protectEditedProfile
+        ? pickPreferredAvatar(existing.avatar, user.avatar)
+        : pickPreferredAvatar(user.avatar, existing.avatar);
+      let fetchedName = protectEditedProfile && existingValidName
+        ? existingValidName
+        : incomingValidName ||
+          buildTelegramDisplayName({
+            firstName: user.firstName || user.first_name || existingValidName,
+            lastName: user.lastName || user.last_name,
+            username: incomingTgHandle || existing.telegram,
+            phone: incomingPhone || existing.phone,
+            existingName: existingValidName,
+          });
 
       if (!knownChatId && (incomingTgHandle || incomingPhone)) {
         const found = findStoredBotUser(undefined, undefined, incomingTgHandle || undefined, incomingPhone || undefined);
@@ -3844,12 +3851,12 @@ Suhbatlashish qoidalaringiz:
         const botRecord = await registerBotUser(
           Number(knownChatId),
           {
-            username: incomingTgHandle || undefined,
+            username: (protectEditedProfile ? existing.telegram : incomingTgHandle) || undefined,
             first_name: fetchedName || undefined,
-            last_name: incomingValidName ? '' : undefined,
+            last_name: (incomingValidName || protectEditedProfile) ? '' : undefined,
             avatar: fetchedAvatar || undefined,
           },
-          incomingPhone || existing.phone
+          (protectEditedProfile ? existing.phone : incomingPhone) || existing.phone
         );
         const botName = buildTelegramDisplayName({
           firstName: botRecord.firstName,
@@ -3857,11 +3864,11 @@ Suhbatlashish qoidalaringiz:
           username: botRecord.username || incomingTgHandle,
           phone: botRecord.phone || incomingPhone,
         });
-        if (!fetchedName && botName) {
+        if (!protectEditedProfile && !fetchedName && botName) {
           fetchedName = botName;
         }
-        // Only use Telegram photo if no Face ID photo & no custom avatar exists AND account is admin or completed
-        if (!faceIdAvatar && !hasExplicitCustomAvatar && (!isTelegramAccount || isAdminTelegramUser(existing) || isAdminTelegramUser(user))) {
+        // Only use Telegram photo if no Face ID photo & no custom avatar exists AND profile hasn't been edited
+        if (!protectEditedProfile && !faceIdAvatar && !hasExplicitCustomAvatar && (!isTelegramAccount || isAdminTelegramUser(existing) || isAdminTelegramUser(user))) {
           const preferredBotAvatar = pickPreferredAvatar(botRecord.avatar, fetchedAvatar);
           if (preferredBotAvatar) {
             fetchedAvatar = preferredBotAvatar;
@@ -3872,10 +3879,10 @@ Suhbatlashish qoidalaringiz:
       const fallbackAvatar = '';
       const isAdminAccount = isAdminTelegramUser(existing) || isAdminTelegramUser(user);
 
-      const hasUsernameField = user.username !== undefined;
+      const hasUsernameField = user.username !== undefined && !protectEditedProfile;
       const rawUsername = hasUsernameField
         ? String(user.username || '').trim().replace(/^@/, '')
-        : String(existing.username || `user_${targetUid.slice(-6)}`).trim().replace(/^@/, '');
+        : String(existing.username !== undefined ? existing.username : (user.username ?? `user_${targetUid.slice(-6)}`)).trim().replace(/^@/, '');
       if (rawUsername && (/\s/.test(rawUsername) || !/^[a-zA-Z0-9_]{3,20}$/.test(rawUsername))) {
         return res.status(400).json({ success: false, error: 'Username da bo\x27sh joy bo\'lishi mumkin emas (faqat harflar, raqamlar va pastki chiziq, 3-20 ta belgi).' });
       }
@@ -3924,42 +3931,60 @@ Suhbatlashish qoidalaringiz:
         isAlreadyCompleted && existing.birthDate
           ? computeAgeFromBirth(existing.birthDate, existing.age)
           : Number(user.age || existing.age || computeAgeFromBirth(lockedBirthDate, 22));
-      const rawSyncedPhone = user.phone !== undefined ? String(user.phone) : String(existing.phone || '');
+      const rawSyncedPhone = (!protectEditedProfile && user.phone !== undefined)
+        ? String(user.phone)
+        : String(existing.phone !== undefined ? existing.phone : (user.phone || ''));
       const trimmedSyncedPhone = rawSyncedPhone.trim();
       const formattedSyncedPhone =
         trimmedSyncedPhone && trimmedSyncedPhone !== '+' && trimmedSyncedPhone !== '+998'
           ? formatPhoneNumberPretty(trimmedSyncedPhone)
           : '';
       const resolvedSyncedTelegram =
-        user.telegram !== undefined
+        (!protectEditedProfile && user.telegram !== undefined)
           ? (String(user.telegram).trim() ? (normalizeTelegramUrl(String(user.telegram)) || String(user.telegram).trim()) : '')
-          : (existing.telegram || '');
+          : (existing.telegram !== undefined ? existing.telegram : (user.telegram || ''));
 
       // Strip undefined keys and client-controlled privilege fields so role/isAdmin never escalate via sync
       const cleanIncomingUser: Record<string, any> = {};
       for (const [k, v] of Object.entries(user)) {
         if (v !== undefined && k !== 'role' && k !== 'isAdmin') {
+          if (
+            protectEditedProfile &&
+            ['name', 'firstName', 'first_name', 'lastName', 'last_name', 'displayName', 'username', 'avatar', 'photoURL', 'banner', 'region', 'district', 'neighborhood', 'bio', 'phone', 'telegram', 'instagram', 'videoUrl', 'startGifUrl'].includes(k) &&
+            existing[k] !== undefined
+          ) {
+            continue;
+          }
           cleanIncomingUser[k] = v;
         }
       }
       const isPrimarySyncedAdmin = isPrimaryAdminUser({ ...existing, ...cleanIncomingUser, uid: targetUid });
       const preservedIsAdmin = isPrimarySyncedAdmin || existing.role === 'admin' || existing.isAdmin === true;
 
-      const finalResolvedName =
-        incomingValidName ||
-        fetchedName ||
-        existingValidName ||
-        (isTelegramAccount ? '' : 'Foydalanuvchi');
+      const finalResolvedName = protectEditedProfile && existingValidName
+        ? existingValidName
+        : incomingValidName ||
+          fetchedName ||
+          existingValidName ||
+          (isTelegramAccount ? '' : 'Foydalanuvchi');
 
       const customAvatarResolved = hasExplicitCustomAvatar
         ? (incomingAvatarClean || pickPreferredAvatar(existing.avatar))
         : '';
 
-      const finalResolvedAvatar =
-        customAvatarResolved ||
-        faceIdAvatar ||
-        (isTelegramAccount && !isAdminAccount && !isAlreadyCompleted ? '' : fetchedAvatar) ||
-        fallbackAvatar;
+      const finalResolvedAvatar = isProfileEditSync
+        ? (customAvatarResolved || incomingAvatarClean || '')
+        : (
+            customAvatarResolved ||
+            faceIdAvatar ||
+            (isTelegramAccount && !isAdminAccount && !isAlreadyCompleted ? '' : fetchedAvatar) ||
+            fallbackAvatar
+          );
+
+      const shouldWipeInitialFacePhoto = Boolean(
+        user.replaceInitialAvatar ||
+        (isProfileEditSync && hasExplicitCustomAvatar && existingFaceIdUrl && finalResolvedAvatar !== existingFaceIdUrl)
+      );
 
       const currentlyOnline = presenceRegistry.isUidOnline(targetUid);
       const mergedUser = buildUpdatedUserSnapshot(
@@ -3993,16 +4018,22 @@ Suhbatlashish qoidalaringiz:
           hasCustomAvatar: Boolean(customAvatarResolved),
           avatar: finalResolvedAvatar,
           photoURL: finalResolvedAvatar && !finalResolvedAvatar.startsWith('data:') ? finalResolvedAvatar : '',
-          banner: user.banner !== undefined ? String(user.banner || '') : (existing.banner || ''),
-          videoUrl: user.videoUrl !== undefined ? String(user.videoUrl || '') : (existing.videoUrl || ''),
-          startGifUrl: user.startGifUrl !== undefined ? String(user.startGifUrl || '').trim() : String(existing.startGifUrl || '').trim(),
+          banner: (!protectEditedProfile && user.banner !== undefined) ? String(user.banner || '') : (existing.banner || ''),
+          videoUrl: (!protectEditedProfile && user.videoUrl !== undefined) ? String(user.videoUrl || '') : (existing.videoUrl || ''),
+          startGifUrl: (!protectEditedProfile && user.startGifUrl !== undefined) ? String(user.startGifUrl || '').trim() : String(existing.startGifUrl || '').trim(),
           coins: (existing && existing.coins !== undefined) ? existing.coins : (user.coins !== undefined ? user.coins : 100),
           diamonds: (existing && existing.diamonds !== undefined) ? existing.diamonds : (user.diamonds !== undefined ? user.diamonds : 0),
           uid: targetUid,
           telegramChatId: knownChatId || existing.telegramChatId,
           isOnline: currentlyOnline,
           status: currentlyOnline ? 'online' : 'offline',
+          isProfileEdit: isProfileEditSync || undefined,
+          replaceInitialAvatar: shouldWipeInitialFacePhoto || undefined,
           updatedAt: new Date().toISOString()
+        },
+        {
+          isProfileEdit: isProfileEditSync,
+          replaceInitialAvatar: shouldWipeInitialFacePhoto,
         }
       );
       normalizeAndReleaseUser(mergedUser);
@@ -4100,11 +4131,23 @@ Suhbatlashish qoidalaringiz:
         if (sanitizedUpdates.startGifUrl !== undefined) {
           sanitizedUpdates.startGifUrl = String(sanitizedUpdates.startGifUrl || '').trim();
         }
-        const updated = buildUpdatedUserSnapshot(existing, {
-          ...sanitizedUpdates,
-          uid: canonicalUid,
-          updatedAt: new Date().toISOString(),
-        });
+        const replaceInitialAvatar = Boolean(
+          sanitizedUpdates.replaceInitialAvatar ||
+          (sanitizedUpdates.hasCustomAvatar === true &&
+            existing.faceId?.capturedPhotoUrl &&
+            sanitizedUpdates.avatar !== existing.faceId.capturedPhotoUrl)
+        );
+        const updated = buildUpdatedUserSnapshot(
+          existing,
+          {
+            ...sanitizedUpdates,
+            uid: canonicalUid,
+            isProfileEdit: true,
+            replaceInitialAvatar,
+            updatedAt: new Date().toISOString(),
+          },
+          { isProfileEdit: true, replaceInitialAvatar }
+        );
         if (updates.isOnline === undefined && updates.status === undefined) {
           const online = presenceRegistry.isUidOnline(canonicalUid);
           updated.isOnline = online;
@@ -4500,11 +4543,13 @@ Suhbatlashish qoidalaringiz:
       if (!user) return res.status(404).json({ error: 'Foydalanuvchi topilmadi' });
 
       const count = roundDiamonds(Number(diamondAmount));
-      if (isNaN(count) || count < 100) {
-        return res.status(400).json({ error: 'Minimal yechib olish miqdori 100 almaz (10 000 so\'m)' });
+      if (isNaN(count) || count < MIN_DIAMOND_CASHOUT_AMOUNT) {
+        return res.status(400).json({
+          error: `Minimal yechib olish miqdori ${MIN_DIAMOND_CASHOUT_AMOUNT} olmos (${MIN_DIAMOND_CASHOUT_UZS.toLocaleString()} so'm)`,
+        });
       }
       if ((user.diamonds || 0) < count) {
-        return res.status(400).json({ error: 'Balansingizda yetarli almaz mavjud emas' });
+        return res.status(400).json({ error: 'Balansingizda yetarli olmos mavjud emas' });
       }
       if (!bankCard || bankCard.trim().replace(/\D/g, '').length < 16) {
         return res.status(400).json({ error: '16 xonali Humo/Uzcard karta raqamini kiriting' });
@@ -4514,7 +4559,7 @@ Suhbatlashish qoidalaringiz:
         return res.status(400).json({ error: 'Admin aloqaga chiqishi uchun Telegram username yoki telefon raqamingizni kiriting' });
       }
 
-      const uzsAmount = calculateDiamondsToUzs(count);
+      const uzsAmount = calculateDiamondCashoutUzs(count);
       user.diamonds = roundDiamonds((user.diamonds || 0) - count);
       user.bankCard = bankCard.trim();
       user.updatedAt = new Date().toISOString();
@@ -4690,7 +4735,9 @@ Suhbatlashish qoidalaringiz:
   // --- Full Cross-Store Profile Sync, Deduplication & Old Data Cleanup ---
   function cleanupUnusedLocalMediaUrl(oldUrl?: string | null, canonicalUser?: any) {
     const clean = String(oldUrl || '').trim();
-    if (!clean.startsWith('/api/media/')) return;
+    const isMediaFile = clean.startsWith('/api/media/');
+    const isFaceIdFile = clean.startsWith('/api/face-id/photo/');
+    if (!isMediaFile && !isFaceIdFile) return;
     const filename = path.basename(clean.split('?')[0]);
     if (!filename || filename.includes('..')) return;
     const isInUserArrays = (u: any) =>
@@ -4722,12 +4769,15 @@ Suhbatlashish qoidalaringiz:
     );
     if (stillReferencedInPosts) return;
     try {
-      const fpath = path.join(MEDIA_UPLOADS_DIR, filename);
+      const targetDir = isFaceIdFile ? FACE_ID_DIR : MEDIA_UPLOADS_DIR;
+      const fpath = path.join(targetDir, filename);
       if (fs.existsSync(fpath)) {
         fs.unlinkSync(fpath);
       }
     } catch {}
-    void contentRepository.deleteMediaFile(filename);
+    if (isMediaFile) {
+      void contentRepository.deleteMediaFile(filename);
+    }
   }
 
   async function dedupeAndPropagateUserProfile(
@@ -4788,7 +4838,7 @@ Suhbatlashish qoidalaringiz:
         lastName: isExplicitProfileDisplayName(canonicalUser.name) ? '' : (existingBot?.lastName || ''),
         avatar: canonicalUser.avatar && !isPlaceholderAvatar(canonicalUser.avatar)
           ? canonicalUser.avatar
-          : existingBot?.avatar,
+          : (canonicalUser.hasEditedProfile ? '' : existingBot?.avatar),
         updatedAt: Date.now(),
       };
       if (nextHandle) {

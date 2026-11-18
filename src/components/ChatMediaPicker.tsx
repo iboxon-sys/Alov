@@ -511,7 +511,7 @@ export const ChatMediaPicker: React.FC<ChatMediaPickerProps> = ({
               value={caption}
               onChange={(e) => setCaption(e.target.value)}
               placeholder="Izoh qo'shish (ixtiyoriy)..."
-              className="flex-1 bg-[#101219] border border-white/10 rounded-xl px-3 py-2 text-xs text-white placeholder-zinc-500 outline-none focus:border-rose-500/60"
+              className="flex-1 bg-[#101219] border border-white/10 rounded-xl px-3 py-2 text-[16px] sm:text-xs text-white placeholder-zinc-500 outline-none focus:border-rose-500/60"
             />
             <div className="flex items-center gap-2 justify-end">
               <button
@@ -519,7 +519,7 @@ export const ChatMediaPicker: React.FC<ChatMediaPickerProps> = ({
                 onClick={handleReplace}
                 disabled={isUploading}
                 data-testid="media-preview-replace"
-                className="px-3 py-2 rounded-xl bg-white/8 hover:bg-white/15 border border-white/10 text-zinc-200 text-xs font-bold flex items-center gap-1.5 transition active:scale-95 disabled:opacity-50 cursor-pointer"
+                className="min-h-[44px] sm:min-h-0 px-3 py-2 rounded-xl bg-white/8 hover:bg-white/15 border border-white/10 text-zinc-200 text-xs font-bold flex items-center gap-1.5 transition active:scale-95 disabled:opacity-50 cursor-pointer"
               >
                 <RefreshCw className="w-3.5 h-3.5" />
                 <span>Almashtirish</span>
@@ -529,7 +529,7 @@ export const ChatMediaPicker: React.FC<ChatMediaPickerProps> = ({
                 onClick={handleClear}
                 disabled={isUploading}
                 data-testid="media-preview-delete"
-                className="px-3 py-2 rounded-xl bg-rose-500/15 hover:bg-rose-500/25 border border-rose-500/30 text-rose-300 text-xs font-bold flex items-center gap-1.5 transition active:scale-95 disabled:opacity-50 cursor-pointer"
+                className="min-h-[44px] sm:min-h-0 px-3 py-2 rounded-xl bg-rose-500/15 hover:bg-rose-500/25 border border-rose-500/30 text-rose-300 text-xs font-bold flex items-center gap-1.5 transition active:scale-95 disabled:opacity-50 cursor-pointer"
               >
                 <Trash2 className="w-3.5 h-3.5" />
                 <span>O&apos;chirish</span>
@@ -539,7 +539,7 @@ export const ChatMediaPicker: React.FC<ChatMediaPickerProps> = ({
                 onClick={() => void handleSend()}
                 disabled={isUploading}
                 data-testid="media-preview-send"
-                className="px-4 py-2 rounded-xl bg-gradient-to-r from-[#E11D48] to-[#BE123C] hover:brightness-110 text-white text-xs font-extrabold flex items-center gap-1.5 shadow-lg shadow-rose-900/40 transition active:scale-95 disabled:opacity-50 cursor-pointer"
+                className="min-h-[44px] sm:min-h-0 px-4 py-2 rounded-xl bg-gradient-to-r from-[#E11D48] to-[#BE123C] hover:brightness-110 text-white text-xs font-extrabold flex items-center gap-1.5 shadow-lg shadow-rose-900/40 transition active:scale-95 disabled:opacity-50 cursor-pointer"
               >
                 <Send className="w-3.5 h-3.5" />
                 <span>{isUploading ? 'Yuklanmoqda...' : 'Yuborish'}</span>

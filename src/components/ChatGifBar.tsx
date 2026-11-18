@@ -381,7 +381,7 @@ export const ChatGifBar: React.FC<ChatGifBarProps> = ({
           data-testid="gif-bar-expand-btn"
           aria-label="Barcha GIFlarni yarim oynada ko'rish"
           title="Barcha GIFlar"
-          className="h-14 w-10 rounded-xl shrink-0 bg-white/[0.07] hover:bg-rose-500/20 border border-white/[0.12] hover:border-rose-400/60 text-zinc-200 hover:text-white flex items-center justify-center transition active:scale-95 cursor-pointer"
+          className="h-14 min-w-[44px] rounded-xl shrink-0 bg-white/[0.07] hover:bg-rose-500/20 border border-white/[0.12] hover:border-rose-400/60 text-zinc-200 hover:text-white flex items-center justify-center transition active:scale-95 cursor-pointer"
         >
           <ChevronRight className="w-5 h-5" />
         </button>
@@ -410,7 +410,7 @@ export const ChatGifBar: React.FC<ChatGifBarProps> = ({
                   onChange={(e) => setDrawerQuery(e.target.value)}
                   data-testid="gif-drawer-search-input"
                   placeholder="GIF qidirish (o'zbekcha yoki inglizcha)..."
-                  className="w-full pl-8 pr-3 py-1.5 rounded-xl bg-[#181B29] border border-white/[0.1] text-xs text-white placeholder:text-zinc-500 focus:outline-none focus:border-rose-500"
+                  className="w-full pl-8 pr-3 py-2 rounded-xl bg-[#181B29] border border-white/[0.1] text-[16px] sm:text-xs text-white placeholder:text-zinc-500 focus:outline-none focus:border-rose-500"
                 />
               </div>
               {drawerTranslated && (
@@ -423,7 +423,7 @@ export const ChatGifBar: React.FC<ChatGifBarProps> = ({
                 onClick={closeDrawer}
                 data-testid="gif-drawer-close-btn"
                 aria-label="Yopish"
-                className="p-1.5 rounded-full bg-white/[0.06] hover:bg-white/[0.14] text-zinc-300 hover:text-white transition cursor-pointer shrink-0"
+                className="min-w-[44px] min-h-[44px] rounded-full bg-white/[0.06] hover:bg-white/[0.14] text-zinc-300 hover:text-white flex items-center justify-center transition cursor-pointer shrink-0"
               >
                 <X className="w-4 h-4" />
               </button>

@@ -6,6 +6,7 @@ import {
   deduplicateUsersList,
   isExplicitProfileDisplayName,
   mergeAuthoritativeUserState,
+  mergeReturningAuthProfile,
   normalizeTelegramUrl,
   pickNewestCanonicalUser,
   propagateProfileUpdateAcrossStores,
@@ -306,5 +307,92 @@ describe('Profile persistence, identity deduplication & DB propagation', () => {
     assert.ok(storage.getItem('alov_current_user')?.includes('/api/media/new.jpg'));
     assert.ok(!storage.getItem('alov_current_user')?.includes('/api/media/old.jpg'));
   });
+
+  it('completely erases initial login avatar/name/address shadows on profile edit while keeping uid & immunity against returning auth', () => {
+    const initialUser = {
+      uid: 'tg_555001',
+      id: 'ALOV-555001',
+      name: 'Telegram Birinchi Ism',
+      firstName: 'Telegram',
+      lastName: 'Familiya',
+      displayName: 'Telegram Birinchi Ism',
+      googlePhotoURL: 'https://lh3.googleusercontent.com/initial.jpg',
+      username: 'birinchi_nick',
+      region: 'Toshkent shahri',
+      district: 'Yunusobod tumani',
+      neighborhood: 'Eski MFY',
+      avatar: '/api/face-id/photo/face_tg_555001.jpg',
+      banner: '/api/media/initial_banner.jpg',
+      hasCustomAvatar: false,
+      isProfileCompleted: true,
+      coins: 450,
+      faceId: {
+        verified: true,
+        detectedGender: 'male',
+        genderLabelUz: 'Erkak',
+        confidence: 96,
+        capturedPhotoUrl: '/api/face-id/photo/face_tg_555001.jpg',
+      },
+    };
+
+    const edited = buildUpdatedUserSnapshot(
+      initialUser,
+      {
+        uid: 'wrong_duplicate_uid',
+        name: 'Azizbek Yangi',
+        username: 'azizbek_yangi',
+        region: 'Samarqand viloyati',
+        district: 'Samarqand shahri',
+        neighborhood: 'Bog\'i Shamol MFY',
+        avatar: '/api/media/edited_avatar.jpg',
+        banner: '/api/media/cropped_banner.jpg',
+        hasCustomAvatar: true,
+        isProfileEdit: true,
+      },
+      { isProfileEdit: true, replaceInitialAvatar: true }
+    );
+
+    // Must keep original uid (no duplicate account) & preserve coins
+    assert.equal(edited.uid, 'tg_555001');
+    assert.equal(edited.coins, 450);
+    assert.equal(edited.hasEditedProfile, true);
+
+    // Primary edited data overwrites completely; old shadows & initial capturedPhotoUrl removed
+    assert.equal(edited.name, 'Azizbek Yangi');
+    assert.equal(edited.firstName, 'Azizbek Yangi');
+    assert.equal(edited.lastName, '');
+    assert.equal(edited.username, 'azizbek_yangi');
+    assert.equal(edited.region, 'Samarqand viloyati');
+    assert.equal(edited.district, 'Samarqand shahri');
+    assert.equal(edited.neighborhood, 'Bog\'i Shamol MFY');
+    assert.equal(edited.avatar, '/api/media/edited_avatar.jpg');
+    assert.equal(edited.photoURL, '/api/media/edited_avatar.jpg');
+    assert.equal(edited.banner, '/api/media/cropped_banner.jpg');
+    assert.equal('displayName' in edited, false);
+    assert.equal('googlePhotoURL' in edited, false);
+    assert.equal('capturedPhotoUrl' in edited.faceId, false);
+    assert.equal(edited.faceId.verified, true);
+    assert.equal(edited.faceId.detectedGender, 'male');
+
+    const replaced = collectReplacedUserMediaUrls(initialUser, edited);
+    assert.deepEqual(replaced.sort(), [
+      '/api/face-id/photo/face_tg_555001.jpg',
+      '/api/media/initial_banner.jpg',
+    ]);
+
+    // Subsequent Telegram/Google login must NEVER revert edited primary data back to initial values
+    const afterRelogin = mergeReturningAuthProfile(edited, {
+      name: 'Telegram Birinchi Ism',
+      firstName: 'Telegram',
+      lastName: 'Familiya',
+      avatar: 'https://api.telegram.org/file/bot123/initial.jpg',
+      telegram: '@birinchi_nick',
+    });
+    assert.equal(afterRelogin.name, 'Azizbek Yangi');
+    assert.equal(afterRelogin.lastName, '');
+    assert.equal(afterRelogin.avatar, '/api/media/edited_avatar.jpg');
+    assert.equal(afterRelogin.username, 'azizbek_yangi');
+  });
 });
+
 

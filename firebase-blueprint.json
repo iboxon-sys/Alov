@@ -18,6 +18,7 @@
         "instagram": { "type": "string", "maxLength": 50 },
         "bio": { "type": "string", "maxLength": 500 },
         "avatar": { "type": "string" },
+        "startGifUrl": { "type": "string" },
         "email": { "type": "string" },
         "photoURL": { "type": "string" },
         "role": { "type": "string" },

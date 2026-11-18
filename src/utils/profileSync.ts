@@ -205,6 +205,7 @@ export function propagateProfileUpdateAcrossStores(
         name: newName || chat.partner.name,
         username: newUsername !== undefined ? newUsername : chat.partner.username,
         avatar: newAvatar !== undefined ? newAvatar : chat.partner.avatar,
+        startGifUrl: updatedUser.startGifUrl !== undefined ? String(updatedUser.startGifUrl || '') : (chat.partner.startGifUrl || ''),
         isVerified,
         faceId: updatedUser.faceId ?? chat.partner.faceId,
       };
@@ -355,6 +356,7 @@ export function extractUserMediaUrls(user: any): string[] {
   push(user.avatar);
   push(user.banner);
   push(user.videoUrl);
+  push(user.startGifUrl);
   push(user.faceId?.capturedPhotoUrl);
   for (const field of ['photos', 'gallery', 'media'] as const) {
     if (Array.isArray(user[field])) {
@@ -457,7 +459,7 @@ export function buildUpdatedUserSnapshot(existing: any, updates: any): any {
 
   for (const [key, val] of Object.entries(incoming)) {
     if (val === undefined) continue;
-    if (val === null && ['username', 'banner', 'videoUrl', 'bio', 'phone', 'telegram', 'instagram', 'neighborhood', 'avatar'].includes(key)) {
+    if (val === null && ['username', 'banner', 'videoUrl', 'startGifUrl', 'bio', 'phone', 'telegram', 'instagram', 'neighborhood', 'avatar', 'photoURL'].includes(key)) {
       next[key] = '';
       continue;
     }
@@ -466,6 +468,18 @@ export function buildUpdatedUserSnapshot(existing: any, updates: any): any {
       continue;
     }
     next[key] = val;
+  }
+
+  // Replace stale photoURL when avatar has been explicitly updated or cleared
+  if (incoming.avatar !== undefined && !isPlaceholderAvatar(incoming.avatar)) {
+    const cleanAvatar = String(incoming.avatar || '').trim();
+    if (!cleanAvatar) {
+      next.photoURL = '';
+    } else if (!cleanAvatar.startsWith('data:')) {
+      next.photoURL = cleanAvatar;
+    } else {
+      next.photoURL = '';
+    }
   }
 
   // Never keep stale legacy telegramUsername / first_name / last_name shadows out of sync
@@ -505,9 +519,6 @@ export interface VersionCacheReconciliationResult {
 
 const STALE_SNAPSHOT_PREFIXES = [
   'alov_user_',
-  'alov_chats_',
-  'alov_msgs_',
-  'alov_posts_',
 ];
 
 export function collectStaleCacheKeys(storage: StorageLike): string[] {
@@ -527,10 +538,9 @@ export function collectStaleCacheKeys(storage: StorageLike): string[] {
 
 /**
  * Compares stored `alov_app_version` with the running `currentVersion` BEFORE overwriting it.
- * Whenever the version changes (or was never stamped alongside an old snapshot), removes stale
- * cached profile/chat/feed snapshots while preserving active auth session credentials
- * (`alov_user_id`, `alov_auth_token`, `alov_tg_chat_*`) so the client immediately re-hydrates
- * fresh authoritative data from the server without restoring stale pre-update cache.
+ * Whenever the version changes, removes ONLY stale cached profile snapshots (`alov_current_user`,
+ * `alov_user_*`) while STRICTLY preserving chat history (`alov_chats_*`, `alov_msgs_*`), posts
+ * (`alov_posts_*`), and active auth session credentials (`alov_user_id`, `alov_auth_token`, `alov_tg_chat_*`).
  */
 export function reconcileAppVersionCache(
   storage: StorageLike | null | undefined,
@@ -632,10 +642,11 @@ export function writeAuthoritativeUserCache(
     const cleanUser = sanitizeUserProfileCollections(user);
     const serialized = JSON.stringify(cleanUser);
     const keepUserKey = `alov_user_${cleanUser.uid}`;
-    // Purge any stale alov_user_* keys for alias/other UIDs so old snapshots never linger
+    // Clear ALL previous profile snapshot keys before writing fresh authoritative profile from server
+    storage.removeItem('alov_current_user');
     for (let i = storage.length - 1; i >= 0; i -= 1) {
       const k = storage.key(i);
-      if (k && k.startsWith('alov_user_') && k !== keepUserKey) {
+      if (k && k.startsWith('alov_user_')) {
         storage.removeItem(k);
       }
     }

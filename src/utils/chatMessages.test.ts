@@ -7,9 +7,53 @@ import {
   shouldAutoScrollConversation,
   formatMediaDuration,
   isFramelessChatMediaType,
+  evaluateStartGifGate,
 } from './chatMessages.ts';
 
-describe('chatMessages helpers for consecutive GIFs, scroll guard, frameless media & duration', () => {
+describe('chatMessages helpers for consecutive GIFs, scroll guard, frameless media, Start GIF gate & duration', () => {
+  it('enforces Start GIF gate ONLY on empty non-AI chats when partner configured a startGifUrl', () => {
+    const startGif = 'https://static.klipy.com/start-hello.gif';
+
+    assert.deepEqual(
+      evaluateStartGifGate({
+        isAIBotChat: false,
+        partnerStartGifUrl: startGif,
+        messages: [],
+      }),
+      { isLocked: true, startGifUrl: startGif }
+    );
+
+    // Unlocks as soon as first GIF/message is sent
+    assert.deepEqual(
+      evaluateStartGifGate({
+        isAIBotChat: false,
+        partnerStartGifUrl: startGif,
+        messages: [{ id: 'm1', type: 'gif', fileUrl: startGif }],
+      }),
+      { isLocked: false, startGifUrl: startGif }
+    );
+
+    // Never locks when partner has no startGifUrl
+    assert.deepEqual(
+      evaluateStartGifGate({
+        isAIBotChat: false,
+        partnerStartGifUrl: '',
+        messages: [],
+      }),
+      { isLocked: false, startGifUrl: '' }
+    );
+
+    // Never locks AI bot chats
+    assert.deepEqual(
+      evaluateStartGifGate({
+        isAIBotChat: true,
+        partnerStartGifUrl: startGif,
+        messages: [],
+      }),
+      { isLocked: false, startGifUrl: startGif }
+    );
+  });
+
   it('generates collision-free message IDs even in tight synchronous loops', () => {
     const ids = new Set<string>();
     for (let i = 0; i < 500; i++) {

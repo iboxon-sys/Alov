@@ -8,10 +8,14 @@ import {
   Clock,
   Gift,
   Handshake,
+  Lock,
+  MapPin,
   MessageCircle,
   Mic,
   Plus,
   Send,
+  ShieldCheck,
+  Sparkles,
   Trash2,
   Video,
   X,
@@ -47,6 +51,7 @@ import {
 } from '../utils/tokenomics';
 import {
   capMessagesForLocalCache,
+  evaluateStartGifGate,
   formatMediaDuration,
   generateUniqueMessageId,
   isFramelessChatMediaType,
@@ -148,6 +153,8 @@ export const ChatView: React.FC<ChatViewProps> = ({
   const [countdownNow, setCountdownNow] = useState<number>(() => Date.now());
   const [lightboxImageUrl, setLightboxImageUrl] = useState<string | null>(null);
   const [showScrollToBottom, setShowScrollToBottom] = useState(false);
+  const [partnerStartGifByChat, setPartnerStartGifByChat] = useState<Record<string, string>>({});
+  const [loadedMessagesByChat, setLoadedMessagesByChat] = useState<Record<string, boolean>>({});
 
   // Dictaphone state
   const [isRecording, setIsRecording] = useState(false);
@@ -670,15 +677,22 @@ export const ChatView: React.FC<ChatViewProps> = ({
     }));
 
     if (sanitizedLocal.length > 0) {
+      setLoadedMessagesByChat((prev) => ({ ...prev, [chatId]: true }));
       setChatMessages((prev) => {
         const merged = mergeUniqueChatMessages(sanitizedLocal, prev[chatId], prev[selectedOtherUid]);
         return { ...prev, [chatId]: merged, [selectedOtherUid]: merged };
       });
+    } else {
+      setLoadedMessagesByChat((prev) => ({ ...prev, [chatId]: false }));
     }
 
-    apiFetchJson(`/api/chats/${encodeURIComponent(chatId)}/messages`).then((data) => {
+    apiFetchJson(`/api/chats/${encodeURIComponent(chatId)}/messages?viewerUid=${encodeURIComponent(myActiveUid)}`).then((data) => {
       if (cancelled) return;
+      setLoadedMessagesByChat((prev) => ({ ...prev, [chatId]: true }));
       if (data?.success) {
+        if (typeof data.partnerStartGifUrl === 'string') {
+          setPartnerStartGifByChat((prev) => ({ ...prev, [chatId]: data.partnerStartGifUrl }));
+        }
         if (data.friendship !== undefined) {
           setChatFriendships((prev) => ({ ...prev, [chatId]: Boolean(data.friendship?.active) }));
         }
@@ -730,6 +744,23 @@ export const ChatView: React.FC<ChatViewProps> = ({
     (otherUid && chatMessages[otherUid]) ||
     [];
   const sortedMessages = mergeUniqueChatMessages(msgs);
+
+  const partnerFromUsersList = otherUid
+    ? usersList.find((u) => u.uid === otherUid || u.id === otherUid)
+    : undefined;
+  const resolvedPartnerStartGif = String(
+    partnerFromUsersList?.startGifUrl ??
+      selectedChatUser?.startGifUrl ??
+      (activeChatId ? partnerStartGifByChat[activeChatId] : '') ??
+      ''
+  ).trim();
+  const startGifGate = evaluateStartGifGate({
+    isAIBotChat,
+    partnerStartGifUrl: resolvedPartnerStartGif,
+    messages: sortedMessages,
+  });
+  const isMessagesConfirmedEmpty = !activeChatId || loadedMessagesByChat[activeChatId] !== false;
+  const isStartGifLocked = Boolean(startGifGate.isLocked && isMessagesConfirmedEmpty);
 
   // Smart scroll handler — never yanks user back down when scrolling up!
   const handleMessagesScroll = useCallback(() => {
@@ -1272,17 +1303,53 @@ export const ChatView: React.FC<ChatViewProps> = ({
                 <ChatSkeleton />
                 <ChatSkeleton />
               </>
-            ) : chatsList.length === 0 ? (
-              <div className="p-10 text-center space-y-3">
-                <div className="w-16 h-16 bg-white/[0.05] border border-white/[0.08] rounded-full flex items-center justify-center mx-auto">
-                  <MessageCircle className="w-8 h-8 text-zinc-500" />
-                </div>
-                <p className="text-xs text-zinc-400 font-medium">
-                  Hozircha xabarlar yo&apos;q. Nomzodlar bilan suhbatni boshlang!
-                </p>
-              </div>
             ) : (
-              chatsList.map((chat, idx) => {
+              <>
+                {!chatsList.some((c) => {
+                  const uidNow = effectiveUser?.uid || effectiveUser?.id;
+                  const partnerUid =
+                    c.participants?.find((p: string) => p !== uidNow) || c.partner?.uid || c.partner?.id;
+                  return partnerUid === ALOV_AI_USER.uid || c.id?.includes(ALOV_AI_USER.uid);
+                }) && (
+                  <button
+                    type="button"
+                    data-testid="pinned-alov-ai-chat-btn"
+                    onClick={() => handleOpenConversation(ALOV_AI_USER)}
+                    className="w-full text-left p-4 flex items-center space-x-3 cursor-pointer hover:bg-white/[0.04] transition-colors relative bg-rose-500/[0.06]"
+                  >
+                    <div className="relative shrink-0">
+                      <img
+                        src={ALOV_AI_USER.avatar}
+                        alt={ALOV_AI_USER.name}
+                        className="w-12 h-12 rounded-full object-cover border border-white/15"
+                      />
+                      <span className="absolute bottom-0 right-0 w-3 h-3 bg-emerald-500 border-2 border-[#11131C] rounded-full" />
+                    </div>
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-center justify-between gap-2">
+                        <div className="flex items-center space-x-1.5 min-w-0">
+                          <h3 className="font-bold text-sm text-white truncate">{ALOV_AI_USER.name}</h3>
+                          <span className="text-[10px] font-bold text-rose-400 shrink-0">· AI</span>
+                        </div>
+                        <span className="text-[10.5px] text-emerald-400 font-semibold shrink-0">Onlayn</span>
+                      </div>
+                      <p className="text-xs text-zinc-400 truncate mt-0.5">
+                        Samimiy suhbatdoshingiz
+                      </p>
+                    </div>
+                  </button>
+                )}
+                {chatsList.length === 0 ? (
+                  <div className="p-8 text-center space-y-3">
+                    <div className="w-14 h-14 bg-white/[0.05] border border-white/[0.08] rounded-full flex items-center justify-center mx-auto">
+                      <MessageCircle className="w-7 h-7 text-zinc-500" />
+                    </div>
+                    <p className="text-xs text-zinc-400 font-medium">
+                      Hozircha boshqa xabarlar yo&apos;q. Nomzodlar bilan suhbatni boshlang!
+                    </p>
+                  </div>
+                ) : (
+                  chatsList.map((chat, idx) => {
                 const uidNow = effectiveUser?.uid || effectiveUser?.id;
                 const partnerUid =
                   chat.participants?.find((p: string) => p !== uidNow) || chat.partner?.uid || chat.partner?.id;
@@ -1353,6 +1420,8 @@ export const ChatView: React.FC<ChatViewProps> = ({
                   </button>
                 );
               })
+                )}
+              </>
             )}
           </div>
         </div>
@@ -1624,11 +1693,122 @@ export const ChatView: React.FC<ChatViewProps> = ({
                       </span>
                     )}
                   </div>
+
+                  {!isMe && Array.isArray(msg.recommendedProfiles) && msg.recommendedProfiles.length > 0 && (
+                    <div
+                      data-testid="ai-recommended-profiles"
+                      className="mt-3 pt-2.5 border-t border-white/[0.08] space-y-2.5"
+                    >
+                      {msg.recommendedProfiles.map((profile: any, pIdx: number) => {
+                        const matchAvatar = resolveMediaOrAvatar(resolveEffectiveProfileAvatar(profile));
+                        const matchLocation = [profile.region, profile.district].filter(Boolean).join(', ');
+                        return (
+                          <div
+                            key={profile.uid || `match_${pIdx}`}
+                            data-testid="ai-recommended-profile-card"
+                            className="rounded-2xl bg-[#0D0F18] border border-white/10 p-3 space-y-2.5 shadow-sm"
+                          >
+                            <div className="flex items-center gap-2.5">
+                              {matchAvatar ? (
+                                <img
+                                  src={matchAvatar}
+                                  alt={profile.name || 'Nomzod'}
+                                  className="w-11 h-11 rounded-full object-cover border border-white/15 shrink-0"
+                                />
+                              ) : (
+                                <div className="w-11 h-11 rounded-full bg-rose-500/20 text-rose-300 font-bold text-sm flex items-center justify-center border border-rose-500/30 shrink-0">
+                                  {getSafeUserDisplayName(profile, 'F').charAt(0).toUpperCase()}
+                                </div>
+                              )}
+                              <div className="min-w-0 flex-1">
+                                <div className="flex items-center gap-1.5 flex-wrap">
+                                  <span className="font-bold text-xs text-white truncate">
+                                    {profile.name || 'Foydalanuvchi'}
+                                  </span>
+                                  {profile.age && (
+                                    <span className="text-[11px] font-semibold text-rose-300 tabular-nums">
+                                      · {profile.age} yosh
+                                    </span>
+                                  )}
+                                  {profile.isVerified && (
+                                    <ShieldCheck className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+                                  )}
+                                </div>
+                                {matchLocation && (
+                                  <p className="text-[10.5px] text-zinc-400 flex items-center gap-1 mt-0.5 truncate">
+                                    <MapPin className="w-3 h-3 text-rose-400 shrink-0" />
+                                    <span className="truncate">{matchLocation}</span>
+                                  </p>
+                                )}
+                              </div>
+                            </div>
+                            {profile.bio && (
+                              <p className="text-[11px] text-zinc-300 line-clamp-2 leading-relaxed">
+                                {profile.bio}
+                              </p>
+                            )}
+                            <div className="flex items-center gap-2 pt-0.5">
+                              <button
+                                type="button"
+                                data-testid="ai-match-open-chat-btn"
+                                onClick={() => handleOpenConversation(profile)}
+                                className="flex-1 py-2 px-3 rounded-xl bg-gradient-to-r from-[#E11D48] to-rose-600 hover:brightness-110 text-white font-bold text-[11px] flex items-center justify-center gap-1.5 transition cursor-pointer"
+                              >
+                                <MessageCircle className="w-3.5 h-3.5" />
+                                <span>Chatga kirish</span>
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => triggerOpenProfile(profile.uid, profile)}
+                                className="py-2 px-3 rounded-xl bg-white/[0.06] hover:bg-white/[0.12] border border-white/10 text-zinc-200 font-bold text-[11px] transition cursor-pointer"
+                              >
+                                Profil
+                              </button>
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
                 </div>
               )}
             </div>
           );
         })}
+
+        {isStartGifLocked && (
+          <div className="flex-1 min-h-[260px] flex items-center justify-center py-6">
+            <div
+              data-testid="start-gif-gate"
+              className="w-full max-w-[300px] rounded-[24px] bg-[#131622] border border-rose-500/30 p-4 text-center space-y-3 shadow-2xl"
+            >
+              <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-rose-500/15 border border-rose-500/25 text-rose-300 text-[10.5px] font-bold">
+                <Sparkles className="w-3.5 h-3.5" />
+                <span>Suhbatni boshlash GIFi</span>
+              </div>
+              <button
+                type="button"
+                data-testid="start-gif-send-btn"
+                onClick={() => void handleSendMessage('gif', startGifGate.startGifUrl, 'Start / Salomlashish GIF')}
+                className="group w-full rounded-2xl overflow-hidden border border-white/15 bg-black/40 hover:border-rose-400/60 transition cursor-pointer block"
+              >
+                <img
+                  src={startGifGate.startGifUrl}
+                  alt="Start GIF"
+                  className="w-full max-h-48 object-contain mx-auto bg-black/30"
+                />
+                <div className="py-2.5 px-3 bg-gradient-to-r from-[#E11D48] to-rose-600 text-white font-bold text-xs flex items-center justify-center gap-1.5 group-hover:brightness-110 transition">
+                  <Send className="w-3.5 h-3.5" />
+                  <span>Start / Salomlashish yuborish</span>
+                </div>
+              </button>
+              <p className="text-[11px] text-zinc-400 leading-relaxed">
+                {selectedChatUser?.name || 'Foydalanuvchi'} bilan suhbatni ochish uchun avval yuqoridagi GIFni bosing.
+              </p>
+            </div>
+          </div>
+        )}
+
         <div ref={chatBottomRef} />
 
         {(isOtherTyping || (otherUid === ALOV_AI_USER.uid && isAiTyping)) && (
@@ -1689,142 +1869,154 @@ export const ChatView: React.FC<ChatViewProps> = ({
 
       {/* Bottom Input / Media Picker / GIF Bar / Dictaphone */}
       <div className="shrink-0 z-20 px-3 pt-2 pb-2.5 bg-[#11131C] border-t border-white/[0.08] flex flex-col">
-        <Suspense fallback={null}>
-          <ChatMediaPicker
-            isOpen={showChatMediaPicker}
-            onToggleOpen={() => setShowChatMediaPicker((prev) => !prev)}
-            onSendMedia={handleSendPickedMedia}
-            isUploading={isUploadingChatMedia}
-            apiOrigin={apiOrigin}
-            currentUserUid={myUid}
-            showPrices={isSenderCharged}
-          />
-        </Suspense>
-
-        <ChatGifBar
-          query={inputMessage}
-          hideTrigger={gifBarHideTrigger}
-          apiOrigin={apiOrigin}
-          onSelectGif={handleSendGif}
-        />
-
-        {isRecording ? (
+        {isStartGifLocked ? (
           <div
-            data-testid="dictaphone-bar"
-            className="flex items-center gap-2.5 w-full bg-[#181B29] border border-rose-500/40 rounded-[22px] px-2.5 py-1.5"
+            data-testid="start-gif-locked-bar"
+            className="w-full py-2.5 px-3.5 rounded-2xl bg-[#181B29] border border-white/10 text-zinc-400 text-[11.5px] font-semibold flex items-center justify-center gap-2 text-center"
           >
-            <button
-              type="button"
-              onClick={() => finishRecording(true)}
-              data-testid="dictaphone-cancel-btn"
-              aria-label="Ovozli xabarni bekor qilish"
-              title="Bekor qilish"
-              className="p-2 rounded-full bg-rose-500/15 hover:bg-rose-500/30 text-rose-300 transition active:scale-90 cursor-pointer shrink-0"
-            >
-              <Trash2 className="w-4.5 h-4.5" />
-            </button>
-
-            <div className="flex items-center gap-2 shrink-0">
-              <span className="w-2.5 h-2.5 rounded-full bg-red-500 animate-pulse shrink-0" />
-              <span
-                data-testid="dictaphone-timer"
-                className="text-xs font-mono font-bold text-white tabular-nums"
-              >
-                {formatMediaDuration(recordingSeconds)}
-              </span>
-            </div>
-
-            <div className="flex-1 flex items-center justify-center gap-1 h-7 overflow-hidden px-1">
-              {recordingLevels.map((lvl, idx) => (
-                <span
-                  key={idx}
-                  style={{ height: `${lvl}%` }}
-                  className="w-1 rounded-full bg-rose-400/85 transition-all duration-100"
-                />
-              ))}
-            </div>
-
-            {isSenderCharged && (
-              <span className="text-[10px] font-bold text-amber-300 bg-amber-500/15 px-2 py-0.5 rounded-full border border-amber-500/25 shrink-0">
-                {VOICE_MESSAGE_COIN_COST} 🪙
-              </span>
-            )}
-
-            <button
-              type="button"
-              onClick={() => finishRecording(false)}
-              data-testid="dictaphone-send-btn"
-              aria-label="Ovozli xabarni yuborish"
-              title="Ovozli xabarni yuborish"
-              className="bg-[#E11D48] hover:bg-[#BE123C] text-white p-2.5 rounded-full shadow-lg transition active:scale-95 flex items-center justify-center cursor-pointer shrink-0"
-            >
-              <Send className="w-4.5 h-4.5" />
-            </button>
+            <Lock className="w-3.5 h-3.5 text-rose-400 shrink-0" />
+            <span>Suhbat qulflangan — avval yuqoridagi Start / Salomlashish GIFini yuboring</span>
           </div>
         ) : (
-          <div className="flex items-end space-x-2 w-full">
-            <button
-              type="button"
-              onClick={() => setShowChatMediaPicker((prev) => !prev)}
-              aria-label="Media yuklash"
-              data-testid="toggle-chat-media-picker"
-              className={`p-2.5 rounded-full transition active:scale-90 cursor-pointer shrink-0 ${
-                showChatMediaPicker
-                  ? 'bg-rose-500/20 text-rose-400'
-                  : 'text-zinc-400 hover:bg-white/[0.06] hover:text-zinc-200'
-              }`}
-            >
-              <Plus className={`w-5 h-5 transition-transform ${showChatMediaPicker ? 'rotate-45' : ''}`} />
-            </button>
-            <div className="flex-1 relative">
-              <textarea
-                placeholder="Xabar yozing..."
-                rows={1}
-                value={inputMessage}
-                onFocus={() => {
-                  if (isUserNearBottomRef.current) {
-                    setTimeout(() => {
-                      const el = chatMessagesContainerRef.current;
-                      if (el) el.scrollTop = el.scrollHeight;
-                    }, 120);
-                  }
-                }}
-                onChange={(e) => {
-                  setInputMessage(e.target.value);
-                  handleTyping();
-                }}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter' && !e.shiftKey) {
-                    e.preventDefault();
-                    void handleSendMessage();
-                  }
-                }}
-                className="w-full px-4 py-2.5 rounded-[20px] bg-[#181B29] border border-white/[0.08] text-[13px] text-white placeholder:text-zinc-500 focus:outline-none focus:border-rose-500 resize-none max-h-32"
+          <>
+            <Suspense fallback={null}>
+              <ChatMediaPicker
+                isOpen={showChatMediaPicker}
+                onToggleOpen={() => setShowChatMediaPicker((prev) => !prev)}
+                onSendMedia={handleSendPickedMedia}
+                isUploading={isUploadingChatMedia}
+                apiOrigin={apiOrigin}
+                currentUserUid={myUid}
+                showPrices={isSenderCharged}
               />
-            </div>
-            {inputMessage.trim() ? (
-              <button
-                type="button"
-                aria-label="Xabarni yuborish"
-                data-testid="chat-send-text-btn"
-                onClick={() => void handleSendMessage()}
-                className="bg-[#E11D48] text-white p-3 rounded-full shadow-lg hover:bg-[#BE123C] transition-all active:scale-95 flex items-center justify-center cursor-pointer shrink-0"
+            </Suspense>
+
+            <ChatGifBar
+              query={inputMessage}
+              hideTrigger={gifBarHideTrigger}
+              apiOrigin={apiOrigin}
+              onSelectGif={handleSendGif}
+            />
+
+            {isRecording ? (
+              <div
+                data-testid="dictaphone-bar"
+                className="flex items-center gap-2.5 w-full bg-[#181B29] border border-rose-500/40 rounded-[22px] px-2.5 py-1.5"
               >
-                <Send className="w-4.5 h-4.5" />
-              </button>
+                <button
+                  type="button"
+                  onClick={() => finishRecording(true)}
+                  data-testid="dictaphone-cancel-btn"
+                  aria-label="Ovozli xabarni bekor qilish"
+                  title="Bekor qilish"
+                  className="p-2 rounded-full bg-rose-500/15 hover:bg-rose-500/30 text-rose-300 transition active:scale-90 cursor-pointer shrink-0"
+                >
+                  <Trash2 className="w-4.5 h-4.5" />
+                </button>
+
+                <div className="flex items-center gap-2 shrink-0">
+                  <span className="w-2.5 h-2.5 rounded-full bg-red-500 animate-pulse shrink-0" />
+                  <span
+                    data-testid="dictaphone-timer"
+                    className="text-xs font-mono font-bold text-white tabular-nums"
+                  >
+                    {formatMediaDuration(recordingSeconds)}
+                  </span>
+                </div>
+
+                <div className="flex-1 flex items-center justify-center gap-1 h-7 overflow-hidden px-1">
+                  {recordingLevels.map((lvl, idx) => (
+                    <span
+                      key={idx}
+                      style={{ height: `${lvl}%` }}
+                      className="w-1 rounded-full bg-rose-400/85 transition-all duration-100"
+                    />
+                  ))}
+                </div>
+
+                {isSenderCharged && (
+                  <span className="text-[10px] font-bold text-amber-300 bg-amber-500/15 px-2 py-0.5 rounded-full border border-amber-500/25 shrink-0">
+                    {VOICE_MESSAGE_COIN_COST} 🪙
+                  </span>
+                )}
+
+                <button
+                  type="button"
+                  onClick={() => finishRecording(false)}
+                  data-testid="dictaphone-send-btn"
+                  aria-label="Ovozli xabarni yuborish"
+                  title="Ovozli xabarni yuborish"
+                  className="bg-[#E11D48] hover:bg-[#BE123C] text-white p-2.5 rounded-full shadow-lg transition active:scale-95 flex items-center justify-center cursor-pointer shrink-0"
+                >
+                  <Send className="w-4.5 h-4.5" />
+                </button>
+              </div>
             ) : (
-              <button
-                type="button"
-                aria-label="Ovozli xabar yozish (diktafon)"
-                title={isSenderCharged ? `Diktafon (${VOICE_MESSAGE_COIN_COST} moneta)` : 'Diktafon'}
-                data-testid="start-voice-recording-btn"
-                onClick={() => void startRecording()}
-                className="p-3 rounded-full transition-all active:scale-95 flex items-center justify-center cursor-pointer bg-white/[0.07] text-zinc-300 hover:bg-rose-500/20 hover:text-rose-300 shrink-0"
-              >
-                <Mic className="w-5 h-5" />
-              </button>
+              <div className="flex items-end space-x-2 w-full">
+                <button
+                  type="button"
+                  onClick={() => setShowChatMediaPicker((prev) => !prev)}
+                  aria-label="Media yuklash"
+                  data-testid="toggle-chat-media-picker"
+                  className={`p-2.5 rounded-full transition active:scale-90 cursor-pointer shrink-0 ${
+                    showChatMediaPicker
+                      ? 'bg-rose-500/20 text-rose-400'
+                      : 'text-zinc-400 hover:bg-white/[0.06] hover:text-zinc-200'
+                  }`}
+                >
+                  <Plus className={`w-5 h-5 transition-transform ${showChatMediaPicker ? 'rotate-45' : ''}`} />
+                </button>
+                <div className="flex-1 relative">
+                  <textarea
+                    placeholder="Xabar yozing..."
+                    rows={1}
+                    value={inputMessage}
+                    onFocus={() => {
+                      if (isUserNearBottomRef.current) {
+                        setTimeout(() => {
+                          const el = chatMessagesContainerRef.current;
+                          if (el) el.scrollTop = el.scrollHeight;
+                        }, 120);
+                      }
+                    }}
+                    onChange={(e) => {
+                      setInputMessage(e.target.value);
+                      handleTyping();
+                    }}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter' && !e.shiftKey) {
+                        e.preventDefault();
+                        void handleSendMessage();
+                      }
+                    }}
+                    className="w-full px-4 py-2.5 rounded-[20px] bg-[#181B29] border border-white/[0.08] text-[13px] text-white placeholder:text-zinc-500 focus:outline-none focus:border-rose-500 resize-none max-h-32"
+                  />
+                </div>
+                {inputMessage.trim() ? (
+                  <button
+                    type="button"
+                    aria-label="Xabarni yuborish"
+                    data-testid="chat-send-text-btn"
+                    onClick={() => void handleSendMessage()}
+                    className="bg-[#E11D48] text-white p-3 rounded-full shadow-lg hover:bg-[#BE123C] transition-all active:scale-95 flex items-center justify-center cursor-pointer shrink-0"
+                  >
+                    <Send className="w-4.5 h-4.5" />
+                  </button>
+                ) : (
+                  <button
+                    type="button"
+                    aria-label="Ovozli xabar yozish (diktafon)"
+                    title={isSenderCharged ? `Diktafon (${VOICE_MESSAGE_COIN_COST} moneta)` : 'Diktafon'}
+                    data-testid="start-voice-recording-btn"
+                    onClick={() => void startRecording()}
+                    className="p-3 rounded-full transition-all active:scale-95 flex items-center justify-center cursor-pointer bg-white/[0.07] text-zinc-300 hover:bg-rose-500/20 hover:text-rose-300 shrink-0"
+                  >
+                    <Mic className="w-5 h-5" />
+                  </button>
+                )}
+              </div>
             )}
-          </div>
+          </>
         )}
       </div>
 

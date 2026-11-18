@@ -121,3 +121,17 @@ export function isFramelessChatMediaType(
   if (msg.type === 'gif' || msg.type === 'image' || msg.type === 'video') return true;
   return isGifMessage(msg);
 }
+
+export function evaluateStartGifGate(params: {
+  isAIBotChat?: boolean;
+  partnerStartGifUrl?: string | null;
+  messages?: any[] | null;
+}): { isLocked: boolean; startGifUrl: string } {
+  const startGifUrl = String(params.partnerStartGifUrl || '').trim();
+  const hasMessages = Array.isArray(params.messages) && params.messages.length > 0;
+  if (params.isAIBotChat || !startGifUrl || hasMessages) {
+    return { isLocked: false, startGifUrl };
+  }
+  return { isLocked: true, startGifUrl };
+}
+

@@ -85,6 +85,7 @@ import {
   upsertUniqueUserInList,
   writeAuthoritativeUserCache,
 } from './utils/profileSync';
+import { parseGiphyGifItems, type GiphyGifItem } from './utils/giphy';
 import {
   DEFAULT_MANDATORY_SUBSCRIPTION_CONFIG,
   evaluateMandatorySubscriptionAccess,
@@ -379,6 +380,11 @@ export default function App() {
   const [regAvatar, setRegAvatar] = useState('');
   const [regBanner, setRegBanner] = useState('');
   const [regVideoUrl, setRegVideoUrl] = useState('');
+  const [regStartGifUrl, setRegStartGifUrl] = useState('');
+  const [startGifPickerOpen, setStartGifPickerOpen] = useState(false);
+  const [startGifSearchQuery, setStartGifSearchQuery] = useState('');
+  const [startGifResults, setStartGifResults] = useState<GiphyGifItem[]>([]);
+  const [isLoadingStartGifs, setIsLoadingStartGifs] = useState(false);
   const [isUploadingBanner, setIsUploadingBanner] = useState(false);
   const [isUploadingVideo, setIsUploadingVideo] = useState(false);
   const [isSavingProfile, setIsSavingProfile] = useState(false);
@@ -408,6 +414,33 @@ export default function App() {
       console.warn('Could not refresh posts from server:', err);
     }
   }, [currentUser?.uid, firebaseUser?.uid]);
+
+  // Fetch Klipy trending/search GIFs when user opens Start GIF picker inside Edit Profile
+  useEffect(() => {
+    if (!showProfileModal || !startGifPickerOpen) return;
+    let cancelled = false;
+    const delayMs = startGifSearchQuery.trim() ? 320 : 0;
+    const timer = window.setTimeout(async () => {
+      setIsLoadingStartGifs(true);
+      try {
+        const res = await safeFetchJson(
+          getApiUrl(`/api/gifs?q=${encodeURIComponent(startGifSearchQuery.trim())}&limit=12`)
+        );
+        if (cancelled) return;
+        const parsed = parseGiphyGifItems(res);
+        setStartGifResults(parsed);
+      } catch {
+        if (!cancelled) setStartGifResults([]);
+      } finally {
+        if (!cancelled) setIsLoadingStartGifs(false);
+      }
+    }, delayMs);
+
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [showProfileModal, startGifPickerOpen, startGifSearchQuery]);
 
   // Safety Liability Disclaimer Modal (10s Countdown)
   const [showLiabilityModal, setShowLiabilityModal] = useState(false);
@@ -1106,6 +1139,7 @@ export default function App() {
               setRegName(getSafeUserDisplayName(u, realName));
               setRegAvatar(resolveEffectiveProfileAvatar(u) || pickPreferredAvatar(tgUser.photo_url));
               setRegVideoUrl(u.videoUrl || '');
+              setRegStartGifUrl(u.startGifUrl || '');
               setCurrentUser(u);
               writeAuthoritativeUserCache(localStorage, u);
               setActiveTab('discover');
@@ -1194,6 +1228,7 @@ export default function App() {
       setRegAvatar(resolveEffectiveProfileAvatar(userData));
       setRegBanner(userData.banner || '');
       setRegVideoUrl(userData.videoUrl || '');
+      setRegStartGifUrl(userData.startGifUrl || '');
       setRegLocationVisibility(userData.locationVisibility || 'everyone');
       setIsLocationEnabled(userData.isLocationEnabled !== false);
 
@@ -2262,6 +2297,7 @@ export default function App() {
       const normalizedTelegram = trimmedTelegram ? (normalizeTelegramUrl(trimmedTelegram) || trimmedTelegram) : '';
       const resolvedBannerValue = showProfileModal ? regBanner : (regBanner || currentUser?.banner || '');
       const resolvedVideoValue = showProfileModal ? regVideoUrl.trim() : (regVideoUrl.trim() || currentUser?.videoUrl || '');
+      const resolvedStartGifValue = showProfileModal ? regStartGifUrl.trim() : (regStartGifUrl.trim() || currentUser?.startGifUrl || '');
       const newUserData = {
         ...currentUser,
         id: currentUser?.id || `ALOV-${activeUid.slice(0, 5).toUpperCase()}`,
@@ -2284,8 +2320,10 @@ export default function App() {
         bio: regBio.trim(),
         hasCustomAvatar,
         avatar: resolvedSavedAvatar,
+        photoURL: resolvedSavedAvatar && !resolvedSavedAvatar.startsWith('data:') ? resolvedSavedAvatar : '',
         banner: resolvedBannerValue,
         videoUrl: resolvedVideoValue,
+        startGifUrl: resolvedStartGifValue,
         followersCount: currentUser?.followersCount ?? 0,
         followingCount: currentUser?.followingCount ?? 0,
         likesCount: currentUser?.likesCount ?? 0,
@@ -2337,6 +2375,8 @@ export default function App() {
       setRegNeighborhood(savedUser.neighborhood || '');
       setRegBanner(savedUser.banner || '');
       setRegVideoUrl(savedUser.videoUrl || '');
+      setRegStartGifUrl(savedUser.startGifUrl || '');
+      setStartGifPickerOpen(false);
       setRegAvatar(resolveEffectiveProfileAvatar(savedUser));
       setUsersList(prev => upsertUniqueUserInList(prev, savedUser));
       setPostsList(prev =>
@@ -2417,6 +2457,7 @@ export default function App() {
     setRegAvatar(clean.regAvatar);
     setRegBanner(clean.regBanner);
     setRegVideoUrl('');
+    setRegStartGifUrl('');
   };
 
   const openAuthModalClean = (mode: 'login' | 'register' | 'telegram' = 'login') => {
@@ -2473,6 +2514,10 @@ export default function App() {
         return;
       }
 
+      // Token was consumed on /api/auth/login; reset Turnstile so retry gets a fresh single-use token
+      setTurnstileToken(null);
+      setTurnstileResetTick((t) => t + 1);
+
       // Fallback: Firebase Sign In if input was formatted as an email
       if (authEmail.includes('@') && !authEmail.startsWith('@')) {
         const userCredential = await signInWithEmailAndPassword(auth, authEmail.trim(), authPassword.trim());
@@ -2489,6 +2534,8 @@ export default function App() {
 
       setErrorMsg(serverLoginRes?.error || "Username, Email yoki parol xato.");
     } catch (err: any) {
+      setTurnstileToken(null);
+      setTurnstileResetTick((t) => t + 1);
       setErrorMsg(formatAuthErrorMessage(err, 'login'));
     } finally {
       setIsLoggingIn(false);
@@ -2517,7 +2564,7 @@ export default function App() {
       const captchaVerify = await safeFetchJson(getApiUrl('/api/auth/verify-turnstile'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ turnstileToken }),
+        body: JSON.stringify({ turnstileToken, action: 'register' }),
       });
       if (!captchaVerify?.success) {
         setTurnstileToken(null);
@@ -2544,6 +2591,8 @@ export default function App() {
             }),
           });
           if (lookupRes?.success && lookupRes?.exists && lookupRes?.user) {
+            setTurnstileToken(null);
+            setTurnstileResetTick((t) => t + 1);
             setErrorMsg("Bu email allaqachon ro'yxatdan o'tgan. Iltimos, 'Kirish' bo'limidan kiring!");
             setIsLoggingIn(false);
             return;
@@ -2562,6 +2611,8 @@ export default function App() {
         setAuthMode('register_face_id');
       }
     } catch (err: any) {
+      setTurnstileToken(null);
+      setTurnstileResetTick((t) => t + 1);
       setErrorMsg(formatAuthErrorMessage(err, 'register'));
     } finally {
       setIsLoggingIn(false);
@@ -2580,7 +2631,10 @@ export default function App() {
       const captchaVerify = await safeFetchJson(getApiUrl('/api/auth/verify-turnstile'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ turnstileToken }),
+        body: JSON.stringify({
+          turnstileToken,
+          action: authMode === 'register' ? 'register' : 'login',
+        }),
       });
       if (!captchaVerify?.success) {
         setTurnstileToken(null);
@@ -2634,6 +2688,8 @@ export default function App() {
         setIsLoggingIn(false);
       }
     } catch (popupErr: any) {
+      setTurnstileToken(null);
+      setTurnstileResetTick((t) => t + 1);
       if (popupErr.code === 'auth/popup-closed-by-user' || popupErr.code === 'auth/cancelled-popup-request') {
         setIsLoggingIn(false);
         return;
@@ -2849,20 +2905,18 @@ export default function App() {
           localStorage.setItem('alov_tg_started_' + cleanKey, 'true');
         } catch (e) {}
       } else if (data && data.hasStartedBot === false) {
-        if (data?.error && /captcha|cloudflare/i.test(String(data.error))) {
-          setTurnstileToken(null);
-          setTurnstileResetTick((t) => t + 1);
-        }
+        setTurnstileToken(null);
+        setTurnstileResetTick((t) => t + 1);
         setHasStartedBotError(true);
         setErrorMsg(data.error || "Botimiz ro'yxatida topilmadingiz! Iltimos, avval @alovuz_bot ga kirib /start tugmasini bir marta bosing.");
       } else {
-        if (data?.error && /captcha|cloudflare/i.test(String(data.error))) {
-          setTurnstileToken(null);
-          setTurnstileResetTick((t) => t + 1);
-        }
+        setTurnstileToken(null);
+        setTurnstileResetTick((t) => t + 1);
         setErrorMsg(data?.error || "Kod yuborishda xatolik.");
       }
     } catch (err: any) {
+      setTurnstileToken(null);
+      setTurnstileResetTick((t) => t + 1);
       setErrorMsg(err.message || "Tarmoq xatoligi.");
     } finally {
       setIsLoggingIn(false);
@@ -3847,6 +3901,9 @@ export default function App() {
                   setRegAvatar(resolveEffectiveProfileAvatar(currentUser));
                   setRegBanner(currentUser?.banner || '');
                   setRegVideoUrl(currentUser?.videoUrl || '');
+                  setRegStartGifUrl(currentUser?.startGifUrl || '');
+                  setStartGifSearchQuery('');
+                  setStartGifPickerOpen(false);
                   setRegLocationVisibility(currentUser?.locationVisibility || 'everyone');
                   setShowProfileModal(true);
                 };
@@ -5416,19 +5473,13 @@ export default function App() {
                     />
                   </div>
 
-                  {!turnstileToken ? (
-                    <Suspense fallback={<div className="h-[66px] rounded-xl bg-white/[0.04] animate-pulse" />}>
-                      <TurnstileWidget
-                        onTokenChange={setTurnstileToken}
-                        resetSignal={turnstileResetTick}
-                      />
-                    </Suspense>
-                  ) : (
-                    <div className="px-3 py-2 rounded-xl bg-emerald-500/10 border border-emerald-500/25 text-emerald-300 text-[11px] font-semibold flex items-center justify-center gap-1.5">
-                      <CheckCircle2 className="w-3.5 h-3.5" />
-                      <span>Cloudflare xavfsizlik tekshiruvi tasdiqlandi</span>
-                    </div>
-                  )}
+                  <Suspense fallback={<div className="h-[66px] rounded-xl bg-white/[0.04] animate-pulse" />}>
+                    <TurnstileWidget
+                      action="telegram_auth"
+                      onTokenChange={setTurnstileToken}
+                      resetSignal={turnstileResetTick}
+                    />
+                  </Suspense>
 
                   <button 
                     type="submit"
@@ -5900,6 +5951,7 @@ export default function App() {
                       </div>
                       <Suspense fallback={<div className="h-[66px] rounded-xl bg-white/[0.04] animate-pulse" />}>
                         <TurnstileWidget
+                          action="login"
                           onTokenChange={setTurnstileToken}
                           resetSignal={turnstileResetTick}
                         />
@@ -5997,6 +6049,7 @@ export default function App() {
 
                       <Suspense fallback={<div className="h-[66px] rounded-xl bg-white/[0.04] animate-pulse" />}>
                         <TurnstileWidget
+                          action="register"
                           onTokenChange={setTurnstileToken}
                           resetSignal={turnstileResetTick}
                         />
@@ -6394,6 +6447,119 @@ export default function App() {
                         />
                       </label>
                     </div>
+                  </div>
+                  {/* Mandatory Start GIF Picker (Klipy API) */}
+                  <div
+                    data-testid="profile-start-gif-picker"
+                    className="bg-[#171A26] rounded-2xl border border-white/[0.08] p-3.5 space-y-3"
+                  >
+                    <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                      <div className="flex items-center gap-3 min-w-0">
+                        <div className="w-16 h-12 rounded-xl overflow-hidden bg-[#0E1018] border border-white/[0.08] flex items-center justify-center shrink-0">
+                          {regStartGifUrl ? (
+                            <img
+                              src={regStartGifUrl}
+                              alt="Start GIF"
+                              className="w-full h-full object-cover"
+                            />
+                          ) : (
+                            <Sparkles className="w-4 h-4 text-rose-400" />
+                          )}
+                        </div>
+                        <div className="min-w-0">
+                          <p className="text-xs font-bold text-white truncate">
+                            Suhbat boshlash uchun GIF tanlash
+                          </p>
+                          <p className="text-[11px] text-zinc-400 truncate">
+                            {regStartGifUrl
+                              ? "Yangi chat ochilganda suhbatdosh avval shu GIFni yuborishi shart bo'ladi"
+                              : "Ixtiyoriy — sizga birinchi marta yozadiganlar avval shu GIFni yuboradi"}
+                          </p>
+                        </div>
+                      </div>
+
+                      <div className="flex items-center gap-2 shrink-0">
+                        {regStartGifUrl && (
+                          <button
+                            type="button"
+                            onClick={() => setRegStartGifUrl('')}
+                            data-testid="remove-start-gif-btn"
+                            className="px-2.5 py-1.5 rounded-lg bg-rose-500/15 hover:bg-rose-500/25 text-[11px] font-bold text-rose-300 border border-rose-500/25 transition cursor-pointer"
+                          >
+                            Olib tashlash
+                          </button>
+                        )}
+                        <button
+                          type="button"
+                          data-testid="toggle-start-gif-picker-btn"
+                          onClick={() => setStartGifPickerOpen((prev) => !prev)}
+                          className="px-3 py-1.5 rounded-lg bg-white/[0.08] hover:bg-white/[0.14] border border-white/10 text-zinc-100 text-[11px] font-bold transition inline-flex items-center gap-1.5 cursor-pointer"
+                        >
+                          <Sparkles className="w-3.5 h-3.5 text-rose-400" />
+                          <span>{startGifPickerOpen ? 'Yopish' : regStartGifUrl ? 'Almashtirish' : 'GIF tanlash'}</span>
+                        </button>
+                      </div>
+                    </div>
+
+                    {startGifPickerOpen && (
+                      <div className="pt-2 border-t border-white/[0.08] space-y-2.5">
+                        <input
+                          type="text"
+                          value={startGifSearchQuery}
+                          onChange={(e) => setStartGifSearchQuery(e.target.value)}
+                          data-testid="start-gif-search-input"
+                          placeholder="GIF qidirish (masalan: salom, kulgu, yurak)..."
+                          className="w-full px-3.5 py-2 rounded-xl bg-[#11131C] border border-white/10 text-xs text-white placeholder:text-zinc-500 focus:border-rose-500 outline-none"
+                        />
+                        {isLoadingStartGifs ? (
+                          <div className="grid grid-cols-3 sm:grid-cols-4 gap-2">
+                            {Array.from({ length: 8 }).map((_, i) => (
+                              <div key={i} className="h-20 rounded-xl bg-white/[0.05] animate-pulse" />
+                            ))}
+                          </div>
+                        ) : startGifResults.length === 0 ? (
+                          <p className="text-[11px] text-zinc-500 text-center py-4">
+                            GIF topilmadi. Boshqa so&apos;z yozib ko&apos;ring.
+                          </p>
+                        ) : (
+                          <div className="grid grid-cols-3 sm:grid-cols-4 gap-2 max-h-56 overflow-y-auto pr-1">
+                            {startGifResults.map((gif) => {
+                              const thumb = gif.images?.fixed_height_small?.url || gif.previewUrl;
+                              const full = gif.images?.original?.url || gif.sendUrl;
+                              const isSelected = regStartGifUrl === full;
+                              return (
+                                <button
+                                  type="button"
+                                  key={gif.id}
+                                  data-testid="start-gif-option-btn"
+                                  onClick={() => {
+                                    setRegStartGifUrl(full);
+                                    setStartGifPickerOpen(false);
+                                  }}
+                                  className={`relative h-20 rounded-xl overflow-hidden border transition cursor-pointer bg-black/40 ${
+                                    isSelected
+                                      ? 'border-rose-500 ring-2 ring-rose-500/40'
+                                      : 'border-white/10 hover:border-rose-400/60'
+                                  }`}
+                                >
+                                  <img
+                                    src={thumb}
+                                    alt={gif.title || 'GIF'}
+                                    loading="lazy"
+                                    className="w-full h-full object-cover"
+                                  />
+                                  {isSelected && (
+                                    <span className="absolute top-1 right-1 w-5 h-5 rounded-full bg-rose-600 text-white flex items-center justify-center shadow">
+                                      <Check className="w-3 h-3" />
+                                    </span>
+                                  )}
+                                </button>
+                              );
+                            })}
+                          </div>
+                        )}
+                      </div>
+                    )}
                   </div>
                 </div>
 

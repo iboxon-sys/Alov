@@ -17,12 +17,14 @@ export const TURNSTILE_SITE_KEY =
 interface TurnstileWidgetProps {
   onTokenChange: (token: string | null) => void;
   resetSignal?: number;
+  action?: string;
   className?: string;
 }
 
 export const TurnstileWidget: React.FC<TurnstileWidgetProps> = ({
   onTokenChange,
   resetSignal = 0,
+  action,
   className = '',
 }) => {
   const containerRef = useRef<HTMLDivElement | null>(null);
@@ -77,6 +79,7 @@ export const TurnstileWidget: React.FC<TurnstileWidgetProps> = ({
           sitekey: TURNSTILE_SITE_KEY,
           theme: 'dark',
           language: 'auto',
+          ...(action ? { action } : {}),
           callback: (token: string) => {
             if (cancelled) return;
             setStatus('verified');
@@ -84,6 +87,11 @@ export const TurnstileWidget: React.FC<TurnstileWidgetProps> = ({
             onTokenRef.current(token);
           },
           'expired-callback': () => {
+            if (cancelled) return;
+            setStatus('ready');
+            onTokenRef.current(null);
+          },
+          'timeout-callback': () => {
             if (cancelled) return;
             setStatus('ready');
             onTokenRef.current(null);

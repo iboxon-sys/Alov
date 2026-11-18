@@ -1,1 +1,14 @@
-[]
+[
+  {
+    "id": "tx_msg_msg_1794991616979_1_56854328",
+    "sender": "u_verify_2",
+    "receiver": "u_verify_1",
+    "type": "message_paid",
+    "messageType": "gif",
+    "coinAmount": 10,
+    "diamondAmount": 2.5,
+    "status": "pending",
+    "note": "Xabar uchun to'lov (10 moneta — javob kutilmoqda)",
+    "createdAt": "2026-11-18T08:46:56.996Z"
+  }
+]

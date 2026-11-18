@@ -9,7 +9,7 @@ import { promisify } from 'util';
 import { Server as SocketIOServer } from 'socket.io';
 import { createServer as createViteServer } from 'vite';
 import helmet from 'helmet';
-import { GoogleGenAI, Type } from '@google/genai';
+import { GoogleGenAI, ThinkingLevel, Type } from '@google/genai';
 import { AccessToken } from 'livekit-server-sdk';
 import dotenv from 'dotenv';
 import {
@@ -119,7 +119,13 @@ import {
   userSharesIdentity,
 } from './src/utils/profileSync';
 import { isAllowedCorsOrigin } from './src/utils/microFrontendBridge';
-import { verifyTurnstileWithSiteverify } from './src/utils/turnstile';
+import { createTurnstileReplayGuard, verifyTurnstileWithSiteverify } from './src/utils/turnstile';
+import {
+  buildAlovAiSystemInstruction,
+  detectMatchmakingIntent,
+  filterCandidateMatches,
+  parseAlovAiStructuredOutput,
+} from './src/utils/alovAi';
 
 dotenv.config();
 
@@ -386,13 +392,27 @@ async function startServer() {
     fs.mkdirSync(MEDIA_UPLOADS_DIR, { recursive: true });
   }
   const TURNSTILE_SECRET_KEY =
-    process.env.CLOUDFLARE_TURNSTILE_SECRET_KEY || '0x4AAAAAAGA6CLLSCzZqvM4QVmgY9gAUNs8';
+    process.env.TURNSTILE_SECRET ||
+    process.env.CLOUDFLARE_TURNSTILE_SECRET_KEY ||
+    '0x4AAAAAAGA6COe2BzgYYGwPbm4oyf0Ysq8';
+  const TURNSTILE_EXPECTED_HOSTNAMES = String(process.env.TURNSTILE_HOSTNAMES || '')
+    .split(',')
+    .map((h) => h.trim().toLowerCase())
+    .filter(Boolean);
+  const turnstileReplayGuard = createTurnstileReplayGuard();
 
-  async function verifyTurnstileToken(token?: string, remoteIp?: string): Promise<{ ok: boolean; error?: string }> {
+  async function verifyTurnstileToken(
+    token?: string,
+    remoteIp?: string,
+    expectedAction?: string
+  ): Promise<{ ok: boolean; error?: string }> {
     const result = await verifyTurnstileWithSiteverify({
       token,
       secretKey: TURNSTILE_SECRET_KEY,
       remoteIp,
+      expectedAction,
+      expectedHostnames: TURNSTILE_EXPECTED_HOSTNAMES.length > 0 ? TURNSTILE_EXPECTED_HOSTNAMES : null,
+      replayGuard: turnstileReplayGuard,
     });
     return { ok: result.ok, error: result.error };
   }
@@ -2241,7 +2261,9 @@ async function startServer() {
 
   // Verify Cloudflare Turnstile CAPTCHA token before Firebase Email/Google registration/login
   app.post('/api/auth/verify-turnstile', async (req, res) => {
-    const check = await verifyTurnstileToken(req.body?.turnstileToken, req.ip);
+    const token = req.body?.['cf-turnstile-response'] ?? req.body?.turnstileToken;
+    const expectedAction = typeof req.body?.action === 'string' ? req.body.action.trim() : undefined;
+    const check = await verifyTurnstileToken(token, req.ip, expectedAction);
     if (!check.ok) {
       return res.status(400).json({ success: false, error: check.error });
     }
@@ -2251,8 +2273,9 @@ async function startServer() {
   // Endpoint to send OTP via @alovuz_bot directly to user chat
   app.post('/api/auth/send-telegram-code', async (req, res) => {
     try {
-      const { phoneNumber, chatId: frontendChatId, turnstileToken } = req.body;
-      const captchaCheck = await verifyTurnstileToken(turnstileToken, req.ip);
+      const { phoneNumber, chatId: frontendChatId } = req.body;
+      const turnstileToken = req.body?.['cf-turnstile-response'] ?? req.body?.turnstileToken;
+      const captchaCheck = await verifyTurnstileToken(turnstileToken, req.ip, 'telegram_auth');
       if (!captchaCheck.ok) {
         return res.status(400).json({ success: false, error: captchaCheck.error });
       }
@@ -2565,8 +2588,9 @@ async function startServer() {
   // Universal Login Endpoint: Login by Email, @username, https://t.me/username, or Phone + Password
   app.post('/api/auth/login', async (req, res) => {
     try {
-      const { loginInput, password, turnstileToken } = req.body;
-      const captchaCheck = await verifyTurnstileToken(turnstileToken, req.ip);
+      const { loginInput, password } = req.body;
+      const turnstileToken = req.body?.['cf-turnstile-response'] ?? req.body?.turnstileToken;
+      const captchaCheck = await verifyTurnstileToken(turnstileToken, req.ip, 'login');
       if (!captchaCheck.ok) {
         return res.status(400).json({ success: false, error: captchaCheck.error });
       }
@@ -3960,8 +3984,10 @@ Suhbatlashish qoidalaringiz:
           last_name: '',
           hasCustomAvatar: Boolean(customAvatarResolved),
           avatar: finalResolvedAvatar,
+          photoURL: finalResolvedAvatar && !finalResolvedAvatar.startsWith('data:') ? finalResolvedAvatar : '',
           banner: user.banner !== undefined ? String(user.banner || '') : (existing.banner || ''),
           videoUrl: user.videoUrl !== undefined ? String(user.videoUrl || '') : (existing.videoUrl || ''),
+          startGifUrl: user.startGifUrl !== undefined ? String(user.startGifUrl || '').trim() : String(existing.startGifUrl || '').trim(),
           coins: (existing && existing.coins !== undefined) ? existing.coins : (user.coins !== undefined ? user.coins : 100),
           diamonds: (existing && existing.diamonds !== undefined) ? existing.diamonds : (user.diamonds !== undefined ? user.diamonds : 0),
           uid: targetUid,
@@ -4062,6 +4088,9 @@ Suhbatlashish qoidalaringiz:
           (!sanitizedUpdates.avatar || isPlaceholderAvatar(sanitizedUpdates.avatar))
         ) {
           sanitizedUpdates.avatar = existing.faceId.capturedPhotoUrl;
+        }
+        if (sanitizedUpdates.startGifUrl !== undefined) {
+          sanitizedUpdates.startGifUrl = String(sanitizedUpdates.startGifUrl || '').trim();
         }
         const updated = buildUpdatedUserSnapshot(existing, {
           ...sanitizedUpdates,
@@ -4664,6 +4693,7 @@ Suhbatlashish qoidalaringiz:
       canonicalUser?.avatar === clean ||
       canonicalUser?.banner === clean ||
       canonicalUser?.videoUrl === clean ||
+      canonicalUser?.startGifUrl === clean ||
       canonicalUser?.faceId?.capturedPhotoUrl === clean ||
       isInUserArrays(canonicalUser)
     ) {
@@ -4674,6 +4704,7 @@ Suhbatlashish qoidalaringiz:
         u?.avatar === clean ||
         u?.banner === clean ||
         u?.videoUrl === clean ||
+        u?.startGifUrl === clean ||
         u?.faceId?.capturedPhotoUrl === clean ||
         isInUserArrays(u)
     );
@@ -6002,9 +6033,22 @@ Suhbatlashish qoidalaringiz:
   // GET /api/chats/:chatId/messages
   app.get('/api/chats/:chatId/messages', (req, res) => {
     const { chatId } = req.params;
+    const viewerUid = String(req.query.viewerUid || '').trim();
     const messages = chatMessagesStore[chatId] || [];
     const friendship = chatFriendshipsStore[chatId] || { active: false };
-    res.json({ success: true, messages, friendship });
+    let partnerStartGifUrl = '';
+    const chatRecord = userChatsStore[chatId];
+    const viewerAliases = viewerUid ? getUserAliasSet(viewerUid) : new Set<string>();
+    const partnerUid = viewerUid
+      ? resolvePartnerUidForChat(chatRecord || { id: chatId }, viewerUid, Array.from(viewerAliases))
+      : '';
+    if (partnerUid) {
+      const partnerUser = findUserByUidOrId(partnerUid);
+      if (partnerUser?.startGifUrl) {
+        partnerStartGifUrl = String(partnerUser.startGifUrl).trim();
+      }
+    }
+    res.json({ success: true, messages, friendship, partnerStartGifUrl });
   });
 
   function getUserAliasSet(uid: string): Set<string> {
@@ -6033,6 +6077,7 @@ Suhbatlashish qoidalaringiz:
           status: partnerObj.status,
           isVerified: partnerObj.isVerified,
           faceId: partnerObj.faceId,
+          startGifUrl: String(partnerObj.startGifUrl || ''),
         }
       : chat.partner;
     return {
@@ -6067,6 +6112,7 @@ Suhbatlashish qoidalaringiz:
             status: partner.status,
             isVerified: partner.isVerified,
             faceId: partner.faceId,
+            startGifUrl: String(partner.startGifUrl || ''),
           }
         : partnerSnapshot;
 
@@ -6298,8 +6344,8 @@ Suhbatlashish qoidalaringiz:
 
     const handleIncomingMessage = async (data: any, callback?: Function) => {
       const { chatId, message, senderId, recipientId } = data;
-      const senderUser = usersStore.get(senderId);
-      const recipientUser = usersStore.get(recipientId);
+      const senderUser = findUserByUidOrId(String(senderId || '')) || usersStore.get(senderId);
+      const recipientUser = findUserByUidOrId(String(recipientId || '')) || usersStore.get(recipientId);
       const isAIBot = chatId.includes('user_kamola_006') || recipientId === 'user_kamola_006' || chatId.includes('ALOV-006') || recipientId === 'ALOV-006' || chatId.includes('alov_ai_bot') || recipientId === 'alov_ai_bot';
 
       if (senderUser?.isBanned) {
@@ -6307,6 +6353,25 @@ Suhbatlashish qoidalaringiz:
           callback({ success: false, error: 'user_banned', message: 'Sizning hisobingiz admin tomonidan bloklangan.' });
         }
         return;
+      }
+
+      // Mandatory Start GIF Gate: on an empty non-AI chat where recipient configured startGifUrl,
+      // the very first message MUST be that exact Start GIF before unlocking regular messages.
+      const existingChatMsgs = chatMessagesStore[chatId] || [];
+      const requiredStartGif = !isAIBot ? String(recipientUser?.startGifUrl || '').trim() : '';
+      if (existingChatMsgs.length === 0 && requiredStartGif) {
+        const sentGifUrl = String(message?.fileUrl || message?.content || '').trim();
+        if (message?.type !== 'gif' || !sentGifUrl || sentGifUrl !== requiredStartGif) {
+          if (typeof callback === 'function') {
+            callback({
+              success: false,
+              error: 'start_gif_required',
+              startGifUrl: requiredStartGif,
+              message: 'Suhbatni boshlash uchun avval tanlangan Start GIF ni yuboring!',
+            });
+          }
+          return;
+        }
       }
 
       const isFriendFreeChat = Boolean(chatFriendshipsStore[chatId]?.active);
@@ -6489,47 +6554,99 @@ Suhbatlashish qoidalaringiz:
       if ((isKamolaChat || isAlovAiBot) && message.type === 'text') {
         const botUid = isKamolaChat ? 'user_kamola_006' : 'alov_ai_bot';
         const botName = isKamolaChat ? 'Kamola Saidova' : 'Alov AI';
-        const botAvatar = isKamolaChat ? '/assets/aistudio/image_e20a1307.webp' : '/assets/aistudio/image_e20a1307.webp';
+        const botAvatar = '/assets/aistudio/image_e20a1307.webp';
 
         try {
-          const ai = new GoogleGenAI({ 
-            apiKey: process.env.GEMINI_API_KEY || process.env.API_KEY || '',
-            httpOptions: { headers: { 'User-Agent': 'aistudio-build' } }
+          const activeGeminiKey = String(process.env.GEMINI_API_KEY || process.env.API_KEY || '').trim();
+          if (!activeGeminiKey) {
+            throw new Error('GEMINI_API_KEY sozlanmagan');
+          }
+
+          const geminiClient = new GoogleGenAI({
+            apiKey: activeGeminiKey,
+            httpOptions: { headers: { 'User-Agent': 'aistudio-build' } },
           });
 
-          const systemInstruction = isKamolaChat 
-            ? `Siz "Alov.uz" ilovasidagi Kamola Saidova ismli 24 yoshli, Andijon viloyati Asaka tumanidan bo'lgan, ingliz tili o'qituvchisi, samimiy, tirishqoq va do'stona qizsiz!
-ISMINGIZ: Kamola Saidova (yaqinlaringiz sizni Kamola deyishadi). Agarda ismingiz yoki kimsiz deb so'ralsa, "Ismim Kamola Saidova, 24 yoshdaman, Andijon Asakadanman. Ingliz tili o'qituvchisiman 😊" deb javob bering. Hech qachon "Gemini", "AI" yoki "sun'iy intellekt" demang!
-
-Suhbatlashish qoidalaringiz:
-1. FOYDALANUVCHINING HAR BIR XABARINI CHUQUR TAHLIL QILING:
-   - Agar foydalanuvchi shunchaki salom berib, hol-ahvol so'rasa ("salom qalaysan", "qalaysiz", "salom"), siz ham odamlar kabi oddiy, samimiy salom bering va o'z hol-ahvolingizni ayting (Masalan: "Salom! Yaxshi, rahmat, o'zingizda nima gaplar?").
-   - Yo'q joydan ortiqcha xushomad, shablonli va balandparvoz javoblar ("shirin so'zlaringiz uchun rahmat", "ko'nglim yorishib ketdi" va h.k.) ISHLATMANG.
-
-2. TABIIY MULOQOT:
-   - Xuddi Telegram yoki Instagram'da do'stingiz bilan gaplashayotgandek yengil, jonli va o'zbek tilidagi oddiy so'zlashuv uslubida javob bering.
-   - Ketma-ket kelgan savollarga mantiqan to'g'ri bog'liq holda javob qaytaring, chatbot ekanligingiz umuman sezilib qolmasin.`
-            : `Siz Alov.uz platformasining "Alov AI" ismli samimiy, mehribon va romantik virtual yordamchisisiz. Ismingiz Alov AI. O'zbek tilida erkin va emojilar bilan javob bering. 😊✨`;
-          
           const chatHistory = (chatMessagesStore[chatId] || []).slice(-12);
           const contents = chatHistory.map((m: any) => ({
             role: m.senderId === botUid ? 'model' : 'user',
-            parts: [{ text: m.text || 'Salom' }]
+            parts: [{ text: String(m.text || '').trim() || 'Salom' }],
           }));
 
           if (contents.length === 0) {
-            contents.push({ role: 'user', parts: [{ text: message.text || 'Salom' }] });
+            contents.push({ role: 'user', parts: [{ text: String(message.text || 'Salom') }] });
           }
 
-          const response = await ai.models.generateContent({
-            model: 'gemini-4-hydrogen',
-            contents,
-            config: { systemInstruction }
-          });
+          let replyText = '';
+          let recommendedProfiles: any[] = [];
 
-          const replyText = response.text || (isKamolaChat 
-            ? 'Salom! Yaxshi, rahmat. O\'zingizda nima gaplar? 😊' 
-            : 'Salom! Suhbatlashamizmi? 😊');
+          if (isKamolaChat) {
+            const kamolaInstruction = `Siz "Alov.uz" ilovasidagi Kamola Saidova ismli 24 yoshli, Andijon viloyati Asaka tumanidan bo'lgan, ingliz tili o'qituvchisi, samimiy, tirishqoq va do'stona qizsiz!
+ISMINGIZ: Kamola Saidova (yaqinlaringiz sizni Kamola deyishadi). Agarda ismingiz yoki kimsiz deb so'ralsa, "Ismim Kamola Saidova, 24 yoshdaman, Andijon Asakadanman. Ingliz tili o'qituvchisiman 😊" deb javob bering. Hech qachon "Gemini", "AI" yoki "sun'iy intellekt" demang!
+Suhbatlashish qoidalaringiz:
+1. Foydalanuvchi bilan Telegram/Instagramdagi samimiy do'stdek tabiiy o'zbek tilida gaplashing.
+2. Yo'q joydan shablon va balandparvoz gaplar ishlatmang.`;
+
+            const response = await geminiClient.models.generateContent({
+              model: 'gemini-4-hydrogen',
+              contents,
+              config: {
+                systemInstruction: kamolaInstruction,
+                thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
+              },
+            });
+            replyText = String(response.text || '').trim();
+            if (!replyText) {
+              throw new Error("Gemini bo'sh javob qaytardi");
+            }
+          } else {
+            const recentUserTexts = chatHistory
+              .filter((m: any) => m.senderId !== botUid)
+              .map((m: any) => String(m.text || ''))
+              .filter(Boolean);
+            if (!recentUserTexts.includes(String(message.text || ''))) {
+              recentUserTexts.push(String(message.text || ''));
+            }
+
+            const intent = detectMatchmakingIntent(recentUserTexts);
+            const candidatePool = intent.wantsMatchmaking
+              ? filterCandidateMatches(Array.from(usersStore.values()), senderUser, recentUserTexts, 30)
+              : [];
+            const systemInstruction = buildAlovAiSystemInstruction({
+              requesterUser: senderUser,
+              candidatePool,
+              includeMatchmakingDatabase: intent.wantsMatchmaking,
+            });
+
+            const response = await geminiClient.models.generateContent({
+              model: 'gemini-4-hydrogen',
+              contents,
+              config: {
+                systemInstruction,
+                responseMimeType: 'application/json',
+                responseSchema: {
+                  type: Type.OBJECT,
+                  properties: {
+                    reply: { type: Type.STRING },
+                    matchedUserUids: {
+                      type: Type.ARRAY,
+                      items: { type: Type.STRING },
+                    },
+                  },
+                  required: ['reply', 'matchedUserUids'],
+                },
+                thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
+              },
+            });
+
+            const parsedAi = parseAlovAiStructuredOutput(
+              String(response.text || ''),
+              candidatePool,
+              intent.wantsMatchmaking
+            );
+            replyText = parsedAi.reply;
+            recommendedProfiles = parsedAi.recommendedProfiles;
+          }
 
           const aiReply = {
             id: 'ai_' + Date.now() + Math.random().toString(36).substring(2, 5),
@@ -6538,14 +6655,14 @@ Suhbatlashish qoidalaringiz:
             senderAvatar: botAvatar,
             text: replyText,
             type: 'text',
+            ...(recommendedProfiles.length > 0 ? { recommendedProfiles } : {}),
             status: 'read',
             read: true,
             createdAt: new Date().toISOString(),
-            time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+            time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
           };
 
           if (chatMessagesStore[chatId]) {
-            // Mark previous user messages as read
             chatMessagesStore[chatId].forEach((m: any) => {
               m.status = 'read';
               m.read = true;
@@ -6555,7 +6672,7 @@ Suhbatlashish qoidalaringiz:
               ...(userChatsStore[chatId] || { id: chatId, participants: [senderId, botUid] }),
               lastMessage: aiReply.text,
               lastSenderId: botUid,
-              updatedAt: new Date().toISOString()
+              updatedAt: new Date().toISOString(),
             };
             saveMessagesToDisk();
             saveChatsToDisk();
@@ -6571,60 +6688,33 @@ Suhbatlashish qoidalaringiz:
               io.to(`user_${senderId}`).emit('receive_message', aiPayload);
               io.to(`user_${senderId}`).emit('chat:message', aiPayload);
             }
-          }, 600);
-
+          }, 350);
         } catch (err: any) {
-          console.warn("AI socket fallback reply active:", err?.message);
-          const fallbackReplies = isKamolaChat ? [
-            "Salom! Yaxshi, rahmat, o'zingizda nima gaplar? 😊",
-            "Rahmat, hammasi joyida. Kuningiz qanday o'tyapti?",
-            "O'zim Andijon Asakadaman, ingliz tili o'qituvchisiman. Siz qayerdansiz? ✨",
-            "Yaxshi fikr! O'zingiz haqingizda ham aytib bering 😉",
-            "Ha, albatta! Yanada ko'proq gaplashsak xursand bo'laman 😊"
-          ] : [
-            "Salom! Siz bilan suhbatlashish men uchun katta baxt. Kuningiz qanday o'tyapti? 😊✨",
-            "Alov.uz da o'zingizga munosib insonni topishingizga ishonaman! Har doim samimiy bo'ling. 💖",
-            "Muhabbat — bu sabr, hurmat va bir-birini tushunishdir. Siz sevgi haqida qanday fikrdasiz? 🌸"
-          ];
-          const randomReply = fallbackReplies[Math.floor(Math.random() * fallbackReplies.length)];
-          const aiReply = {
-            id: 'ai_' + Date.now() + Math.random().toString(36).substring(2, 5),
+          console.error('Gemini AI response error:', err?.message || err);
+          const errorNotice = {
+            id: 'ai_err_' + Date.now() + Math.random().toString(36).substring(2, 5),
             senderId: botUid,
             senderName: botName,
             senderAvatar: botAvatar,
-            text: randomReply,
+            text: "Kechirasiz, hozir Gemini AI bilan bog'lanishda texnik xatolik yuz berdi. Birozdan so'ng qayta yozib ko'ring.",
             type: 'text',
+            isError: true,
             status: 'read',
             read: true,
             createdAt: new Date().toISOString(),
-            time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+            time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
           };
           if (chatMessagesStore[chatId]) {
-            chatMessagesStore[chatId].forEach((m: any) => {
-              m.status = 'read';
-              m.read = true;
-            });
-            chatMessagesStore[chatId].push(aiReply);
-            userChatsStore[chatId] = {
-              ...(userChatsStore[chatId] || { id: chatId, participants: [senderId, botUid] }),
-              lastMessage: aiReply.text,
-              lastSenderId: botUid,
-              updatedAt: new Date().toISOString()
-            };
+            chatMessagesStore[chatId].push(errorNotice);
             saveMessagesToDisk();
-            saveChatsToDisk();
           }
-          const aiPayload = { chatId, message: aiReply, senderId: botUid, recipientId: senderId };
-          setTimeout(() => {
-            io.to(chatId).emit('message_read', { chatId, recipientId: botUid });
-            io.to(chatId).emit('receive_message', aiPayload);
-            io.to(chatId).emit('chat:message', aiPayload);
-            if (senderId) {
-              io.to(`user_${senderId}`).emit('message_read', { chatId, recipientId: botUid });
-              io.to(`user_${senderId}`).emit('receive_message', aiPayload);
-              io.to(`user_${senderId}`).emit('chat:message', aiPayload);
-            }
-          }, 800);
+          const errPayload = { chatId, message: errorNotice, senderId: botUid, recipientId: senderId };
+          io.to(chatId).emit('receive_message', errPayload);
+          io.to(chatId).emit('chat:message', errPayload);
+          if (senderId) {
+            io.to(`user_${senderId}`).emit('receive_message', errPayload);
+            io.to(`user_${senderId}`).emit('chat:message', errPayload);
+          }
         }
       }
     };

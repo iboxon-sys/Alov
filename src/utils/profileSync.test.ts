@@ -260,17 +260,18 @@ describe('Profile persistence, identity deduplication & DB propagation', () => {
     assert.equal('staleExtra' in mergedAuth, false);
   });
 
-  it('clears stale browser profile/chat/post caches on app version bump while keeping login identity', () => {
+  it('clears ONLY stale profile caches on app version bump while strictly preserving chats, messages, posts, and login identity', () => {
     const storage = createMemoryStorage({
       alov_app_version: '1.1.1',
       alov_user_id: 'tg_777',
       userId: 'tg_777',
       alov_auth_token: 'alov_session_tg_777',
       alov_tg_chat_salikh: '777',
-      alov_current_user: JSON.stringify({ uid: 'tg_777', name: 'Eski Kesh Ism' }),
-      alov_user_tg_777: JSON.stringify({ uid: 'tg_777', name: 'Eski Kesh Ism' }),
+      alov_current_user: JSON.stringify({ uid: 'tg_777', name: 'Eski Kesh Ism', avatar: '/api/media/old.jpg' }),
+      alov_user_tg_777: JSON.stringify({ uid: 'tg_777', name: 'Eski Kesh Ism', avatar: '/api/media/old.jpg' }),
       alov_user_old_alias: JSON.stringify({ uid: 'old_alias', name: 'Alias' }),
       alov_chats_tg_777: '[{"id":"c1"}]',
+      alov_msgs_tg_777_u2: '[{"id":"m1","text":"Salom"}]',
       alov_posts_feed: '[{"id":"p1"}]',
     });
 
@@ -283,18 +284,27 @@ describe('Profile persistence, identity deduplication & DB propagation', () => {
     assert.equal(storage.getItem('alov_app_version'), '1.1.2');
     assert.equal(storage.getItem('alov_current_user'), null);
     assert.equal(storage.getItem('alov_user_tg_777'), null);
-    assert.equal(storage.getItem('alov_chats_tg_777'), null);
-    assert.equal(storage.getItem('alov_posts_feed'), null);
+    assert.equal(storage.getItem('alov_user_old_alias'), null);
+    // Chats, messages, posts, and auth identity MUST NEVER be wiped on version update
+    assert.equal(storage.getItem('alov_chats_tg_777'), '[{"id":"c1"}]');
+    assert.equal(storage.getItem('alov_msgs_tg_777_u2'), '[{"id":"m1","text":"Salom"}]');
+    assert.equal(storage.getItem('alov_posts_feed'), '[{"id":"p1"}]');
     assert.equal(storage.getItem('alov_user_id'), 'tg_777');
     assert.equal(storage.getItem('alov_auth_token'), 'alov_session_tg_777');
     assert.equal(storage.getItem('alov_tg_chat_salikh'), '777');
 
     // Second boot on same version should NOT clear fresh cache
-    writeAuthoritativeUserCache(storage, { uid: 'tg_777', name: 'Yangi Server Ism' });
-    assert.equal(storage.getItem('alov_user_old_alias'), null);
+    writeAuthoritativeUserCache(storage, {
+      uid: 'tg_777',
+      name: 'Yangi Server Ism',
+      avatar: '/api/media/new.jpg',
+      startGifUrl: 'https://static.klipy.com/start.gif',
+    });
     const sameVersion = reconcileAppVersionCache(storage, '1.1.2');
     assert.equal(sameVersion.versionChanged, false);
     assert.ok(storage.getItem('alov_current_user')?.includes('Yangi Server Ism'));
+    assert.ok(storage.getItem('alov_current_user')?.includes('/api/media/new.jpg'));
+    assert.ok(!storage.getItem('alov_current_user')?.includes('/api/media/old.jpg'));
   });
 });
 

@@ -261,21 +261,30 @@ export function shouldUseVercelIframeForSection(params: {
   if (isInIframe) return false;
   if (isVercelHost(hostname)) return false;
 
-  if (section === 'chatroulette' || section === 'chat') {
+  const qs = String(search || '');
+  let explicitFlag: string | null = null;
+  let inlineFlag: string | null = null;
+  try {
+    const sp = new URLSearchParams(qs.startsWith('?') ? qs.slice(1) : qs);
+    explicitFlag = sp.get('microfrontend');
+    inlineFlag = sp.get('inline');
+  } catch {
+    // ignore
+  }
+
+  if (explicitFlag === '0' || inlineFlag === '1') {
+    return false;
+  }
+  if (explicitFlag === '1') {
     return true;
   }
 
-  const qs = String(search || '');
-  try {
-    const sp = new URLSearchParams(qs.startsWith('?') ? qs.slice(1) : qs);
-    if (sp.get('microfrontend') === '0' || sp.get('inline') === '1') {
-      return false;
-    }
-    if (sp.get('microfrontend') === '1') {
-      return true;
-    }
-  } catch {
-    // ignore
+  if (section === 'chatroulette') {
+    return true;
+  }
+
+  if (section === 'chat' && isDevPreviewHost(hostname) && !(envEnabled === true || envEnabled === 'true')) {
+    return false;
   }
 
   if (envEnabled === true || envEnabled === 'true') {

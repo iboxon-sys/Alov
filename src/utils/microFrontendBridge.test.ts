@@ -118,7 +118,15 @@ test('shouldUseVercelIframeForSection activates seamlessly and forces Chat & Cha
   );
   assert.equal(
     shouldUseVercelIframeForSection({ hostname: 'localhost', section: 'chat', isInIframe: false }),
+    false
+  );
+  assert.equal(
+    shouldUseVercelIframeForSection({ hostname: 'localhost', section: 'chat', isInIframe: false, search: '?microfrontend=1' }),
     true
+  );
+  assert.equal(
+    shouldUseVercelIframeForSection({ hostname: 'alov.onrender.com', section: 'chat', isInIframe: false, search: '?microfrontend=0' }),
+    false
   );
   assert.equal(
     shouldUseVercelIframeForSection({ hostname: 'alov-mu.vercel.app', section: 'chat', isInIframe: true }),

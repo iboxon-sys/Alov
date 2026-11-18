@@ -26,7 +26,18 @@ describe('Alov AI persona, matchmaking gating & structured DB profile matching',
       includeMatchmakingDatabase: false,
     });
     assert.ok(instruction.includes('QIZ BOLA'));
+    assert.ok(instruction.includes('XUDDI TIRIK ODAMDEK'));
     assert.ok(!instruction.includes('u_girl'));
+  });
+
+  it('strips <think> blocks cleanly from LLM outputs while parsing JSON', () => {
+    const output = parseAlovAiStructuredOutput(
+      `<think>internal reasoning</think>\n{"reply": "Voy yaxshi-ku, ishlaringiz zo'r bo'lsin 😊", "matchedUserUids": []}`,
+      [],
+      false
+    );
+    assert.equal(output.reply, "Voy yaxshi-ku, ishlaringiz zo'r bo'lsin 😊");
+    assert.equal(output.recommendedProfiles.length, 0);
   });
 
   it('triggers matchmaking and filters DB candidates accurately when user asks for a girl or boy', () => {

@@ -8,7 +8,6 @@ import {
   Navigation,
   UserPlus,
   UserCheck,
-  Crown,
   Sparkles,
   Image as ImageIcon,
 } from 'lucide-react';
@@ -19,6 +18,8 @@ import { formatUsernameDisplay } from '../utils/username';
 import { resolveEffectiveProfileAvatar } from '../utils/faceId';
 import { getSafeUserDisplayName } from '../utils/telegramProfile';
 import { PostsFeed } from './PostsFeed';
+import { AdminBadge } from './AdminBadge';
+import { isAdminTelegramUser } from '../utils/tokenomics';
 import { resolveApiMediaUrl } from '../config/api';
 
 interface PublicProfileModalProps {
@@ -65,9 +66,7 @@ export const PublicProfileModal: React.FC<PublicProfileModalProps> = ({
 
   const isOnline = isUserOnlineStrict(liveProfile, onlineUserIds);
   const presenceLabel = isOnline ? 'Onlayn' : formatLastSeenUz(liveProfile.lastSeen, false);
-  const isAdmin = Boolean(
-    liveProfile.role === 'admin' || liveProfile.isAdmin || liveProfile.id === 'ALOV-ADMIN'
-  );
+  const isAdmin = isAdminTelegramUser(liveProfile);
   const isFaceVerified = Boolean(liveProfile.faceId?.verified || liveProfile.isVerified);
   const followersCount = Array.isArray(liveProfile.followers) ? liveProfile.followers.length : 0;
   const followingCount = Array.isArray(liveProfile.following) ? liveProfile.following.length : 0;
@@ -254,9 +253,7 @@ export const PublicProfileModal: React.FC<PublicProfileModalProps> = ({
                 </h2>
 
                 {isAdmin && (
-                  <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-lg bg-amber-500/15 border border-amber-400/30 text-amber-300 text-[11px] font-bold">
-                    <Crown className="w-3 h-3" /> Admin
-                  </span>
+                  <AdminBadge user={liveProfile} size="md" testId="public-profile-admin-badge" />
                 )}
                 {isFaceVerified && (
                   <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-lg bg-emerald-500/15 border border-emerald-500/30 text-emerald-300 text-[11px] font-bold">

@@ -42,5 +42,51 @@
         "verified": true
       }
     }
+  },
+  "pw_user_jasur_tg_salikh_07": {
+    "id": "pw_user_jasur_tg_salikh_07",
+    "participants": [
+      "pw_user_jasur",
+      "tg_salikh_07"
+    ],
+    "lastMessage": "Rahmat bosh admin!",
+    "lastSenderId": "pw_user_jasur",
+    "updatedAt": "2026-11-18T09:20:28.637Z",
+    "partner": {
+      "uid": "tg_salikh_07",
+      "id": "tg_salikh_07",
+      "name": "Salikh",
+      "username": "Salikh_07",
+      "avatar": "/api/telegram/avatar/6621230534",
+      "gender": "male",
+      "isOnline": false,
+      "status": "offline",
+      "isVerified": true,
+      "role": "admin",
+      "isAdmin": true,
+      "faceId": {
+        "verified": true
+      },
+      "startGifUrl": ""
+    }
+  },
+  "alov_ai_bot_pw_user_jasur": {
+    "id": "alov_ai_bot_pw_user_jasur",
+    "participants": [
+      "pw_user_jasur",
+      "alov_ai_bot"
+    ],
+    "lastMessage": "Zo'r! Mana bir qiz tavsiya: Madina, 22 yosh, Chilonzor, musiqa va kitoblar bilan shug'ullanadi. 😊",
+    "lastSenderId": "alov_ai_bot",
+    "updatedAt": "2026-11-18T09:20:30.901Z",
+    "partner": {
+      "uid": "alov_ai_bot",
+      "id": "ALOV-AI",
+      "name": "Alov AI",
+      "avatar": "/assets/aistudio/image_e20a1307.webp",
+      "bio": "Samimiy do'st va hayotiy suhbatdosh.",
+      "status": "online",
+      "isAI": true
+    }
   }
 }

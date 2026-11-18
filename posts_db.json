@@ -1,1 +1,20 @@
-[]
+[
+  {
+    "id": "post_1794993628507_kze12",
+    "authorUid": "pw_user_jasur",
+    "authorId": "ALOV-JB01",
+    "authorName": "Jasur",
+    "authorUsername": "jasur_dev",
+    "authorAvatar": "",
+    "authorGender": "male",
+    "authorVerified": true,
+    "authorRole": "admin",
+    "authorIsAdmin": true,
+    "type": "text",
+    "caption": "Bugun ob-havo juda zo'r ekan!",
+    "isVerticalVideo": false,
+    "likes": [],
+    "comments": [],
+    "createdAt": "2026-11-18T09:20:28.507Z"
+  }
+]

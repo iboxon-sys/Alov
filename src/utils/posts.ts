@@ -39,6 +39,8 @@ export interface PostItem {
   authorAvatar?: string;
   authorGender?: 'male' | 'female';
   authorVerified?: boolean;
+  authorRole?: string;
+  authorIsAdmin?: boolean;
   type: PostMediaType;
   caption: string;
   mediaUrl?: string;

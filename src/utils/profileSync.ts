@@ -148,6 +148,13 @@ export function propagateProfileUpdateAcrossStores(
         nextPost.authorVerified = isVerified;
         changed = true;
       }
+      const nextAuthorIsAdmin = Boolean(updatedUser.role === 'admin' || updatedUser.isAdmin);
+      const nextAuthorRole = nextAuthorIsAdmin ? 'admin' : 'user';
+      if (Boolean(nextPost.authorIsAdmin) !== nextAuthorIsAdmin || nextPost.authorRole !== nextAuthorRole) {
+        nextPost.authorIsAdmin = nextAuthorIsAdmin;
+        nextPost.authorRole = nextAuthorRole;
+        changed = true;
+      }
     }
     if (Array.isArray(p.comments)) {
       const nextComments = p.comments.map((c: any) => {
@@ -198,6 +205,7 @@ export function propagateProfileUpdateAcrossStores(
       }
     }
     if (chat.partner && (aliases.has(String(chat.partner.uid || '')) || aliases.has(String(chat.partner.id || '')))) {
+      const partnerIsAdmin = Boolean(updatedUser.role === 'admin' || updatedUser.isAdmin);
       chat.partner = {
         ...chat.partner,
         uid: updatedUser.uid,
@@ -207,6 +215,8 @@ export function propagateProfileUpdateAcrossStores(
         avatar: newAvatar !== undefined ? newAvatar : chat.partner.avatar,
         startGifUrl: updatedUser.startGifUrl !== undefined ? String(updatedUser.startGifUrl || '') : (chat.partner.startGifUrl || ''),
         isVerified,
+        role: partnerIsAdmin ? 'admin' : 'user',
+        isAdmin: partnerIsAdmin,
         faceId: updatedUser.faceId ?? chat.partner.faceId,
       };
       changed = true;

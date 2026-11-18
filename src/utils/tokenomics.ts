@@ -90,16 +90,117 @@ export function calculateCallMinuteBilling(callType: 'audio' | 'video'): {
   };
 }
 
+export type AdminActionName =
+  | 'set_balances'
+  | 'unlock_pending_diamonds'
+  | 'toggle_verify'
+  | 'toggle_ban'
+  | 'toggle_admin'
+  | 'delete_user';
+
+export function isPrimaryAdminUser(user: {
+  uid?: string | null;
+  id?: string | null;
+  telegram?: string | null;
+  username?: string | null;
+} | null | undefined): boolean {
+  if (!user) return false;
+  if (String(user.id || '').trim() === 'ALOV-ADMIN' || String(user.uid || '').trim() === 'tg_salikh_07') {
+    return true;
+  }
+  const tgHandle = normalizeTelegramHandle(user.telegram || user.username || '');
+  return (ADMIN_TELEGRAM_HANDLES as readonly string[]).includes(tgHandle);
+}
+
 export function isAdminTelegramUser(user: {
+  uid?: string | null;
+  id?: string | null;
   telegram?: string | null;
   username?: string | null;
   role?: string | null;
   isAdmin?: boolean | null;
 } | null | undefined): boolean {
   if (!user) return false;
-  if (user.role === 'admin' || user.isAdmin === true) return true;
-  const tgHandle = normalizeTelegramHandle(user.telegram || user.username || '');
-  return (ADMIN_TELEGRAM_HANDLES as readonly string[]).includes(tgHandle);
+  if (isPrimaryAdminUser(user)) return true;
+  return user.role === 'admin' || user.isAdmin === true;
+}
+
+export function canManageAdminRoles(user: {
+  uid?: string | null;
+  id?: string | null;
+  telegram?: string | null;
+  username?: string | null;
+} | null | undefined): boolean {
+  return isPrimaryAdminUser(user);
+}
+
+export function getAdminBadgeLabel(user: {
+  uid?: string | null;
+  id?: string | null;
+  telegram?: string | null;
+  username?: string | null;
+  role?: string | null;
+  isAdmin?: boolean | null;
+} | null | undefined): 'Bosh Admin' | 'Admin' | null {
+  if (!isAdminTelegramUser(user)) return null;
+  return isPrimaryAdminUser(user) ? 'Bosh Admin' : 'Admin';
+}
+
+export function canActorExecuteAdminAction(
+  actorUser: {
+    uid?: string | null;
+    id?: string | null;
+    telegram?: string | null;
+    username?: string | null;
+    role?: string | null;
+    isAdmin?: boolean | null;
+  } | null | undefined,
+  targetUser: {
+    uid?: string | null;
+    id?: string | null;
+    telegram?: string | null;
+    username?: string | null;
+    role?: string | null;
+    isAdmin?: boolean | null;
+  } | null | undefined,
+  action: AdminActionName | string
+): { allowed: boolean; reason?: string } {
+  if (!isAdminTelegramUser(actorUser)) {
+    return { allowed: false, reason: 'Admin huquqi talab qilinadi' };
+  }
+  if (!targetUser) {
+    return { allowed: false, reason: 'Foydalanuvchi topilmadi' };
+  }
+
+  if (action === 'toggle_admin') {
+    if (!canManageAdminRoles(actorUser)) {
+      return {
+        allowed: false,
+        reason: "Faqat Bosh Admin (@Salikh_07) boshqa foydalanuvchilarga adminlik bera oladi!",
+      };
+    }
+    if (isPrimaryAdminUser(targetUser)) {
+      return { allowed: false, reason: "Asosiy bosh admin maqomini olib bo'lmaydi" };
+    }
+    return { allowed: true };
+  }
+
+  if (action === 'toggle_ban' || action === 'delete_user') {
+    if (isPrimaryAdminUser(targetUser)) {
+      return { allowed: false, reason: "Bosh Adminni bloklash yoki o'chirish mumkin emas" };
+    }
+    if (action === 'delete_user' && actorUser?.uid && targetUser?.uid && actorUser.uid === targetUser.uid) {
+      return { allowed: false, reason: "Admin o'zini o'chirib yubora olmaydi" };
+    }
+    if (isAdminTelegramUser(targetUser) && !isPrimaryAdminUser(actorUser)) {
+      return {
+        allowed: false,
+        reason: "Tayinlangan admin boshqa adminni bloklashi yoki o'chirishi mumkin emas",
+      };
+    }
+  }
+
+  return { allowed: true };
 }
 
 export function canChargeForMessage(params: {

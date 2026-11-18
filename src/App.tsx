@@ -45,11 +45,20 @@ import {
   calculateDiamondsToUzs,
   formatDiamondsDisplay,
   isAdminTelegramUser,
+  isPrimaryAdminUser,
   getDiamondProgressPercent,
   getPendingDiamondsTotal,
   getNextUnlockTimestamp,
   computeCountdownParts
 } from './utils/tokenomics';
+import { AdminBadge } from './components/AdminBadge';
+import {
+  MAP_TILE_PROVIDERS,
+  getRegionFallbackCoords,
+  pickNextTileProviderIndex,
+  resolveEffectiveOriginCoords,
+  shouldShowBlockingGpsBanner,
+} from './utils/mapHelpers';
 import {
   requiresFaceIdForUser,
   resolveEffectiveProfileAvatar,
@@ -470,10 +479,12 @@ export default function App() {
 
   // OSRM Street Routing State
   const [activeRouteUser, setActiveRouteUser] = useState<any | null>(null);
-  const [routeInfo, setRouteInfo] = useState<{ distanceKm: string; durationMin: number; isFallback?: boolean } | null>(null);
+  const [routeInfo, setRouteInfo] = useState<{ distanceKm: string; durationMin: number; isFallback?: boolean; originLabel?: string } | null>(null);
   const [isCalculatingRoute, setIsCalculatingRoute] = useState<boolean>(false);
   const mapPolylineRef = useRef<any>(null);
   const mapInstanceRef = useRef<any>(null);
+  const mapTileLayerRef = useRef<any>(null);
+  const mapTileProviderIdxRef = useRef<number>(0);
   const mapContainerRef = useRef<HTMLDivElement>(null);
   const markersRef = useRef<Record<string, any>>({});
   const hasCenteredMapRef = useRef<boolean>(false);
@@ -1527,6 +1538,23 @@ export default function App() {
       }).catch(() => {});
     };
 
+    const tgLocMgr = (window as any).Telegram?.WebApp?.LocationManager;
+    if (tgLocMgr && typeof tgLocMgr.init === 'function' && typeof tgLocMgr.getLocation === 'function') {
+      try {
+        tgLocMgr.init(() => {
+          tgLocMgr.getLocation((loc: any) => {
+            if (loc && typeof loc.latitude === 'number' && typeof loc.longitude === 'number') {
+              const coords = { lat: loc.latitude, lng: loc.longitude, accuracy: 25 };
+              setUserCoords(coords);
+              setIsLocationEnabled(true);
+              setGpsStatusMsg('');
+              emitCoords(coords);
+            }
+          });
+        });
+      } catch {}
+    }
+
     if (navigator.geolocation) {
       navigator.geolocation.getCurrentPosition(
         (pos) => {
@@ -1541,8 +1569,10 @@ export default function App() {
           emitCoords(coords);
         },
         (err) => {
-          console.warn("GPS detection error:", err);
-          setGpsStatusMsg(getGpsErrorMessage(err));
+          console.warn("Passive GPS detection skipped:", err?.message || err);
+          if (shouldShowBlockingGpsBanner(err?.code, false)) {
+            setGpsStatusMsg(getGpsErrorMessage(err));
+          }
         },
         GPS_OPTIONS
       );
@@ -1556,27 +1586,21 @@ export default function App() {
           };
           setUserCoords(coords);
           setIsLocationEnabled(true);
+          setGpsStatusMsg('');
           emitCoords(coords);
         },
         (err) => {
-          console.warn("GPS watch error:", err);
+          console.warn("GPS watch error:", err?.message || err);
         },
         GPS_OPTIONS
       );
       return () => navigator.geolocation.clearWatch(watchId);
-    } else {
-      setGpsStatusMsg("Qurilmangiz geolokatsiyani (GPS) qo'llab-quvvatlamaydi.");
     }
   }, [firebaseUser?.uid, currentUser?.uid]);
 
 
-  // Handle Privacy-Protected Route Calculation to a target user
+  // Handle Privacy-Protected Route Calculation to a target user (works smoothly even without physical GPS using region fallback)
   const handleDrawRouteToUser = (targetUser: any) => {
-    if (!userCoords?.lat || !userCoords?.lng) {
-      showToast("Marshrut chizish uchun avval GPS lokatsiyangizni yoqing!");
-      setActiveTab('map');
-      return;
-    }
     if (!targetUser || !targetUser.location?.lat || !targetUser.location?.lng) {
       showToast("Ushbu foydalanuvchining lokatsiyasi mavjud emas.");
       return;
@@ -1667,15 +1691,13 @@ export default function App() {
     };
   }, [usersList, followingIds, userCoords, isLocationEnabled]);
 
-  // OSRM Real Street Polyline Generator on Leaflet Map (with Haversine fallback)
+  // OSRM Real Street Polyline Generator on Leaflet Map (with Haversine & Region Center fallback)
   useEffect(() => {
     if (
       activeTab !== 'map' ||
       !activeRouteUser ||
       activeRouteUser.location?.lat == null ||
       activeRouteUser.location?.lng == null ||
-      userCoords?.lat == null ||
-      userCoords?.lng == null ||
       !mapInstanceRef.current
     ) {
       return;
@@ -1689,8 +1711,13 @@ export default function App() {
       mapPolylineRef.current = null;
     }
 
-    const originLng = Number(userCoords.lng);
-    const originLat = Number(userCoords.lat);
+    const originResolved = resolveEffectiveOriginCoords(
+      isLocationEnabled ? userCoords : null,
+      currentUser,
+      filterRegion
+    );
+    const originLng = Number(originResolved.coords.lng);
+    const originLat = Number(originResolved.coords.lat);
     const destLng = Number(activeRouteUser.location.lng);
     const destLat = Number(activeRouteUser.location.lat);
     if ([originLng, originLat, destLng, destLat].some((v) => Number.isNaN(v))) return;
@@ -1719,7 +1746,12 @@ export default function App() {
 
           const distKm = (route.distance / 1000).toFixed(1);
           const durationMin = Math.max(1, Math.round(route.duration / 60));
-          setRouteInfo({ distanceKm: distKm, durationMin, isFallback: false });
+          setRouteInfo({
+            distanceKm: distKm,
+            durationMin,
+            isFallback: originResolved.isFallback,
+            originLabel: originResolved.isFallback ? originResolved.label : undefined,
+          });
           return;
         }
         throw new Error('No routes found');
@@ -1745,6 +1777,7 @@ export default function App() {
           distanceKm: straightKm.toFixed(1),
           durationMin: Math.max(2, Math.round((straightKm / 35) * 60)),
           isFallback: true,
+          originLabel: originResolved.isFallback ? originResolved.label : undefined,
         });
       })
       .finally(() => {
@@ -1754,14 +1787,15 @@ export default function App() {
     return () => {
       cancelled = true;
     };
-  }, [activeTab, activeRouteUser, userCoords, mapReadyTick]);
+  }, [activeTab, activeRouteUser, userCoords, isLocationEnabled, currentUser?.region, filterRegion, mapReadyTick]);
 
-  // Initialize Unified Standard Leaflet Map cleanly when Map tab opens
+  // Initialize Unified Standard Leaflet Map cleanly when Map tab opens (with automatic tile failover)
   useEffect(() => {
     if (activeTab !== 'map') {
       if (mapInstanceRef.current) {
         mapInstanceRef.current.remove();
         mapInstanceRef.current = null;
+        mapTileLayerRef.current = null;
         markersRef.current = {};
         hasCenteredMapRef.current = false;
       }
@@ -1795,21 +1829,61 @@ export default function App() {
           if (cancelled || !mapContainerRef.current || mapInstanceRef.current) return;
           const L = (LMod as any).default || LMod;
           (window as any).L = L;
-          const initialLat = userCoords?.lat || currentUser?.location?.lat || 41.2995;
-          const initialLng = userCoords?.lng || currentUser?.location?.lng || 69.2401;
-          const map = L.map(mapContainerRef.current, { zoomControl: true }).setView([initialLat, initialLng], 12);
+          const initialOrigin = resolveEffectiveOriginCoords(
+            isLocationEnabled ? userCoords : null,
+            currentUser,
+            filterRegion
+          );
+          const map = L.map(mapContainerRef.current, { zoomControl: true }).setView(
+            [initialOrigin.coords.lat, initialOrigin.coords.lng],
+            12
+          );
           mapInstanceRef.current = map;
           hasCenteredMapRef.current = true;
-          L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-            maxZoom: 19,
-            attribution: '© OpenStreetMap Alov.uz GPS',
-          }).addTo(map);
+
+          const attachTileLayer = (providerIdx: number) => {
+            if (cancelled || !mapInstanceRef.current) return;
+            const provider = MAP_TILE_PROVIDERS[providerIdx];
+            if (!provider) return;
+            mapTileProviderIdxRef.current = providerIdx;
+            if (mapTileLayerRef.current) {
+              try {
+                map.removeLayer(mapTileLayerRef.current);
+              } catch {}
+              mapTileLayerRef.current = null;
+            }
+            let errorCount = 0;
+            let loadedAnyTile = false;
+            const layer = L.tileLayer(provider.url, {
+              maxZoom: provider.maxZoom,
+              attribution: provider.attribution,
+              subdomains: provider.subdomains || 'abc',
+              referrerPolicy: 'no-referrer-when-downgrade',
+              crossOrigin: true,
+            });
+            layer.on('tileload', () => {
+              loadedAnyTile = true;
+            });
+            layer.on('tileerror', () => {
+              errorCount += 1;
+              if (!loadedAnyTile && errorCount >= 4) {
+                const nextIdx = pickNextTileProviderIndex(providerIdx);
+                if (nextIdx !== null) {
+                  attachTileLayer(nextIdx);
+                }
+              }
+            });
+            layer.addTo(map);
+            mapTileLayerRef.current = layer;
+          };
+
+          attachTileLayer(0);
           setMapReadyTick((t) => t + 1);
           setTimeout(() => {
             if (!cancelled && mapInstanceRef.current) {
               mapInstanceRef.current.invalidateSize();
             }
-          }, 120);
+          }, 140);
           if (typeof ResizeObserver !== 'undefined' && mapContainerRef.current) {
             resizeObserver = new ResizeObserver(() => {
               mapInstanceRef.current?.invalidateSize();
@@ -1828,6 +1902,15 @@ export default function App() {
       resizeObserver?.disconnect();
     };
   }, [activeTab]);
+
+  // Smoothly pan map when user changes region filter
+  useEffect(() => {
+    if (activeTab !== 'map' || activeRouteUser || !mapInstanceRef.current) return;
+    if (filterRegion && filterRegion !== 'Barchasi') {
+      const targetCoords = getRegionFallbackCoords(filterRegion);
+      mapInstanceRef.current.setView([targetCoords.lat, targetCoords.lng], 11, { animate: true });
+    }
+  }, [activeTab, filterRegion, activeRouteUser]);
 
   // Real-time Leaflet Map Marker Sync Effect (Unified Shared Map + Smooth In-Bounds Markers)
   useEffect(() => {
@@ -2144,7 +2227,27 @@ export default function App() {
     };
 
     if (enabled) {
+      const tgLocMgr = (window as any).Telegram?.WebApp?.LocationManager;
       if (!navigator.geolocation) {
+        if (tgLocMgr && typeof tgLocMgr.init === 'function' && typeof tgLocMgr.getLocation === 'function') {
+          tgLocMgr.init(() => {
+            tgLocMgr.getLocation(async (loc: any) => {
+              if (loc && typeof loc.latitude === 'number' && typeof loc.longitude === 'number') {
+                const coords = { lat: loc.latitude, lng: loc.longitude, accuracy: 25 };
+                setUserCoords(coords);
+                setIsLocationEnabled(true);
+                setGpsStatusMsg('');
+                await syncLocToServer({ isLocationEnabled: true, locationVisibility: regLocationVisibility, location: coords });
+                return;
+              }
+              const msg = "Telegram lokatsiya ruxsati berilmadi.";
+              setGpsStatusMsg(msg);
+              showToast(msg);
+              setIsLocationEnabled(false);
+            });
+          });
+          return;
+        }
         const msg = "Qurilmangiz geolokatsiyani (GPS) qo'llab-quvvatlamaydi.";
         setGpsStatusMsg(msg);
         showToast(msg);
@@ -2187,7 +2290,7 @@ export default function App() {
                 location: updatedCoords
               });
             },
-            (err) => console.warn("Watch position error:", err),
+            (err) => console.warn("Watch position error:", err?.message || err),
             GPS_OPTIONS
           );
           setGeoWatchId(watchId);
@@ -2195,7 +2298,9 @@ export default function App() {
         (err) => {
           const errMsg = getGpsErrorMessage(err);
           setIsLocationEnabled(false);
-          setGpsStatusMsg(errMsg);
+          if (shouldShowBlockingGpsBanner(err?.code, true)) {
+            setGpsStatusMsg(errMsg);
+          }
           showToast(errMsg);
           syncLocToServer({ isLocationEnabled: false });
         },
@@ -3510,7 +3615,7 @@ export default function App() {
               className="flex items-center gap-1 bg-[#1B1E2B] hover:bg-[#252A3C] text-amber-300 py-1 px-2.5 rounded-full text-[10.5px] font-bold border border-amber-400/30 transition active:scale-95 whitespace-nowrap shrink-0 cursor-pointer"
             >
               <Crown className="w-3 h-3 shrink-0" />
-              <span>Admin</span>
+              <span>{isPrimaryAdminUser(currentUser) ? 'Bosh Admin' : 'Admin'}</span>
             </button>
           )}
 
@@ -3776,9 +3881,12 @@ export default function App() {
                               <h3 className="text-[14px] font-bold font-editorial text-white truncate">
                                 {candidateName}, {ageVal}
                               </h3>
-                              {faceVerified && (
-                                <ShieldCheck className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
-                              )}
+                              <div className="flex items-center gap-1 shrink-0">
+                                <AdminBadge user={user} size="xs" testId={`discover-admin-badge-${user.uid}`} />
+                                {faceVerified && (
+                                  <ShieldCheck className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+                                )}
+                              </div>
                             </div>
                             <p className="text-[11px] text-zinc-400 truncate">
                               {[user.district || user.region, genderLabel, faceVerified ? `${user.faceId?.confidence ?? 95}%` : null]
@@ -4007,10 +4115,7 @@ export default function App() {
                                 </span>
                               )}
                               {isAdmin ? (
-                                <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full bg-amber-500/15 text-amber-300 border border-amber-400/25 text-[10px] font-bold shrink-0">
-                                  <Crown className="w-3 h-3" />
-                                  <span>Admin</span>
-                                </span>
+                                <AdminBadge user={currentUser} size="md" testId="profile-admin-badge" />
                               ) : currentUser?.faceId?.verified ? (
                                 <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-emerald-500/15 text-emerald-300 border border-emerald-400/25 text-[10px] font-semibold shrink-0">
                                   <ShieldCheck className="w-3 h-3" />
@@ -4209,10 +4314,15 @@ export default function App() {
                           <button
                             type="button"
                             onClick={() => setShowAdminPanel(true)}
+                            data-testid="profile-open-admin-panel-btn"
                             className="w-full py-2.5 px-4 rounded-xl bg-amber-500/15 hover:bg-amber-500/25 border border-amber-400/30 text-amber-200 font-bold text-xs flex items-center justify-center gap-2 transition active:scale-[0.98] cursor-pointer"
                           >
                             <Crown className="w-3.5 h-3.5" />
-                            <span>Admin Panelni Ochish (@Salikh_07)</span>
+                            <span>
+                              {isPrimaryAdminUser(currentUser)
+                                ? 'Admin Panelni Ochish (@Salikh_07)'
+                                : 'Admin Panelni Ochish'}
+                            </span>
                           </button>
                         )}
                       </div>
@@ -4526,36 +4636,54 @@ export default function App() {
         {/* --- MAP / XARITA TAB (Unified Standard Map + Fixed Routing & Dark Glass Overlays) --- */}
         {activeTab === 'map' && (
           <div className="absolute inset-0 z-30 bg-[#0B0D13] flex flex-col overflow-hidden" data-testid="map-view-container">
-            {!isLocationEnabled && !activeRouteUser && (
-              <div className="bg-[#151824] border-b border-amber-400/20 p-2 px-3 flex items-center justify-between shrink-0 z-30 text-amber-200 text-xs">
-                <div className="flex items-center space-x-2 min-w-0">
-                  <EyeOff className="w-3.5 h-3.5 text-amber-400 shrink-0" />
-                  <p className="truncate text-[11px] font-medium">Jonli lokatsiyangiz o'chirilgan (Ghost Mode).</p>
+            {!isLocationEnabled && !activeRouteUser && (() => {
+              const originFallback = resolveEffectiveOriginCoords(null, currentUser, filterRegion);
+              return (
+                <div className="bg-[#12141E]/95 border-b border-white/[0.08] p-2 px-3 flex items-center justify-between shrink-0 z-30 text-zinc-300 text-xs">
+                  <div className="flex items-center space-x-2 min-w-0">
+                    <MapPin className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+                    <p className="truncate text-[11px] font-medium">
+                      Hudud markazi: <span className="text-white font-semibold">{originFallback.label}</span> (GPS yoqilmagan)
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    data-testid="map-enable-gps-btn"
+                    onClick={() => handleToggleLocation(true)}
+                    className="bg-[#E11D48] hover:bg-[#BE123C] text-white px-3 py-1 rounded-lg text-[10.5px] font-bold shrink-0 ml-2 transition cursor-pointer"
+                  >
+                    GPS yoqish
+                  </button>
                 </div>
-                <button
-                  type="button"
-                  data-testid="map-enable-gps-btn"
-                  onClick={() => handleToggleLocation(true)}
-                  className="bg-[#E11D48] hover:bg-[#BE123C] text-white px-3 py-1 rounded-lg text-[10.5px] font-bold shrink-0 ml-2 transition cursor-pointer"
-                >
-                  GPS yoqish
-                </button>
-              </div>
-            )}
+              );
+            })()}
 
             {gpsStatusMsg && (
-              <div className="bg-rose-950/70 border-b border-rose-500/30 p-2 px-3 text-rose-200 text-[10.5px] font-medium flex items-center justify-between shrink-0 z-30 gap-2">
+              <div
+                data-testid="map-gps-status-banner"
+                className="bg-amber-950/70 border-b border-amber-500/30 p-2 px-3 text-amber-100 text-[10.5px] font-medium flex items-center justify-between shrink-0 z-30 gap-2"
+              >
                 <div className="flex items-center space-x-1.5 min-w-0">
-                  <AlertTriangle className="w-3.5 h-3.5 text-rose-400 shrink-0" />
+                  <AlertTriangle className="w-3.5 h-3.5 text-amber-400 shrink-0" />
                   <span className="truncate">{gpsStatusMsg}</span>
                 </div>
-                <button
-                  type="button"
-                  onClick={() => handleToggleLocation(true)}
-                  className="underline text-[10.5px] font-bold text-white shrink-0 cursor-pointer"
-                >
-                  Qayta urinish
-                </button>
+                <div className="flex items-center gap-2 shrink-0">
+                  <button
+                    type="button"
+                    onClick={() => handleToggleLocation(true)}
+                    className="underline text-[10.5px] font-bold text-white cursor-pointer"
+                  >
+                    Qayta urinish
+                  </button>
+                  <button
+                    type="button"
+                    aria-label="Yopish"
+                    onClick={() => setGpsStatusMsg('')}
+                    className="text-amber-300 hover:text-white cursor-pointer"
+                  >
+                    <X className="w-3.5 h-3.5" />
+                  </button>
+                </div>
               </div>
             )}
 
@@ -4603,7 +4731,11 @@ export default function App() {
                         ) : routeInfo ? (
                           <span>
                             {routeInfo.distanceKm} km · ~{routeInfo.durationMin} daqiqa
-                            {routeInfo.isFallback ? ' (taxminiy)' : ''}
+                            {routeInfo.originLabel
+                              ? ` (${routeInfo.originLabel})`
+                              : routeInfo.isFallback
+                              ? ' (taxminiy)'
+                              : ''}
                           </span>
                         ) : null}
                       </p>

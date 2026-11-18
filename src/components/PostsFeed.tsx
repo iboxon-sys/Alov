@@ -41,6 +41,7 @@ import {
   validateNewPostDraft,
 } from '../utils/posts';
 import { isAdminTelegramUser } from '../utils/tokenomics';
+import { AdminBadge } from './AdminBadge';
 import { isUserOnlineStrict } from '../utils/presence';
 import {
   parseMediaLink,
@@ -1350,6 +1351,21 @@ export const PostsFeed: React.FC<PostsFeedProps> = ({
             const authorName = liveAuthor?.name || post.authorName || 'Foydalanuvchi';
             const authorUsername = liveAuthor?.username || post.authorUsername || '';
             const authorVerified = Boolean(liveAuthor?.faceId?.verified || liveAuthor?.isVerified || post.authorVerified);
+            const authorAdminUser =
+              liveAuthor ||
+              (post.authorIsAdmin || post.authorRole === 'admin'
+                ? {
+                    uid: post.authorUid,
+                    id: post.authorId,
+                    username: authorUsername,
+                    role: 'admin',
+                    isAdmin: true,
+                  }
+                : {
+                    uid: post.authorUid,
+                    id: post.authorId,
+                    username: authorUsername,
+                  });
 
             const likes = Array.isArray(post.likes) ? post.likes : [];
             const isLiked = Boolean(currentUser?.uid && likes.includes(currentUser.uid));
@@ -1425,6 +1441,11 @@ export const PostsFeed: React.FC<PostsFeedProps> = ({
                         <span className="text-sm font-bold text-white group-hover:text-rose-400 transition-colors truncate">
                           {authorName}
                         </span>
+                        <AdminBadge
+                          user={authorAdminUser}
+                          size="xs"
+                          testId={`post-author-admin-badge-${post.id}`}
+                        />
                         {authorVerified && <ShieldCheck className="w-3.5 h-3.5 text-emerald-400 shrink-0" />}
                         {viewerIsAdmin && authorGender && (
                           <span

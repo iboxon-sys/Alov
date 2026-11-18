@@ -351,5 +351,123 @@
         "avatar": "https://i.pravatar.cc/150?img=32"
       }
     }
+  ],
+  "pw_user_jasur_tg_salikh_07": [
+    {
+      "id": "m_admin_1",
+      "senderId": "tg_salikh_07",
+      "type": "text",
+      "text": "Salom Jasur, adminlik huquqingiz faol!",
+      "time": "12:00",
+      "fileUrl": null,
+      "senderName": "Salikh",
+      "senderAvatar": "/api/telegram/avatar/6621230534",
+      "sender": {
+        "_id": "tg_salikh_07",
+        "uid": "tg_salikh_07",
+        "name": "Salikh",
+        "avatar": "/api/telegram/avatar/6621230534"
+      },
+      "status": "read",
+      "read": true
+    },
+    {
+      "id": "m_admin_2",
+      "senderId": "pw_user_jasur",
+      "type": "text",
+      "text": "Rahmat bosh admin!",
+      "time": "12:01",
+      "fileUrl": null,
+      "senderName": "Jasur",
+      "senderAvatar": "",
+      "sender": {
+        "_id": "pw_user_jasur",
+        "uid": "pw_user_jasur",
+        "name": "Jasur",
+        "avatar": ""
+      },
+      "status": "read",
+      "read": true
+    }
+  ],
+  "alov_ai_bot_pw_user_jasur": [
+    {
+      "id": "m_ai_1",
+      "senderId": "pw_user_jasur",
+      "type": "text",
+      "text": "Qalesan, bugun kayfiyating qanaqa?",
+      "time": "12:02",
+      "fileUrl": null,
+      "senderName": "Jasur",
+      "senderAvatar": "",
+      "sender": {
+        "_id": "pw_user_jasur",
+        "uid": "pw_user_jasur",
+        "name": "Jasur",
+        "avatar": ""
+      },
+      "status": "read",
+      "read": true
+    },
+    {
+      "id": "ai_1794993629407h03",
+      "senderId": "alov_ai_bot",
+      "senderName": "Alov AI",
+      "senderAvatar": "/assets/aistudio/image_e20a1307.webp",
+      "text": "Yaxshi, rahmat! Sen‑chi, kayfiyating qanday? 😊",
+      "type": "text",
+      "status": "read",
+      "read": true,
+      "createdAt": "2026-11-18T09:20:29.407Z",
+      "time": "09:20 AM"
+    },
+    {
+      "id": "m_ai_2",
+      "senderId": "pw_user_jasur",
+      "type": "text",
+      "text": "Menga Toshkentdan 20-25 yoshli qiz topib ber",
+      "time": "12:03",
+      "fileUrl": null,
+      "senderName": "Jasur",
+      "senderAvatar": "",
+      "sender": {
+        "_id": "pw_user_jasur",
+        "uid": "pw_user_jasur",
+        "name": "Jasur",
+        "avatar": ""
+      },
+      "status": "read",
+      "read": true
+    },
+    {
+      "id": "ai_1794993630901x3r",
+      "senderId": "alov_ai_bot",
+      "senderName": "Alov AI",
+      "senderAvatar": "/assets/aistudio/image_e20a1307.webp",
+      "text": "Zo'r! Mana bir qiz tavsiya: Madina, 22 yosh, Chilonzor, musiqa va kitoblar bilan shug'ullanadi. 😊",
+      "type": "text",
+      "recommendedProfiles": [
+        {
+          "uid": "pw_user_madina",
+          "id": "ALOV-MG01",
+          "name": "Madina",
+          "username": "madina_uz",
+          "age": 22,
+          "gender": "female",
+          "region": "Toshkent shahri",
+          "district": "Chilonzor tumani",
+          "neighborhood": "",
+          "avatar": "",
+          "bio": "Musiqa va kitoblar",
+          "isVerified": true,
+          "isOnline": false,
+          "startGifUrl": ""
+        }
+      ],
+      "status": "read",
+      "read": true,
+      "createdAt": "2026-11-18T09:20:30.901Z",
+      "time": "09:20 AM"
+    }
   ]
 }

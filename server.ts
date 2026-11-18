@@ -44,6 +44,9 @@ import {
   ADMIN_FULL_COINS,
   ADMIN_FULL_DIAMONDS,
   isAdminTelegramUser,
+  isPrimaryAdminUser,
+  canManageAdminRoles,
+  canActorExecuteAdminAction,
   canChargeForMessage,
   coinsToDiamonds,
   roundDiamonds,
@@ -125,6 +128,7 @@ import {
   detectMatchmakingIntent,
   filterCandidateMatches,
   parseAlovAiStructuredOutput,
+  stripReasoningTags,
 } from './src/utils/alovAi';
 
 dotenv.config();
@@ -3931,13 +3935,15 @@ Suhbatlashish qoidalaringiz:
           ? (String(user.telegram).trim() ? (normalizeTelegramUrl(String(user.telegram)) || String(user.telegram).trim()) : '')
           : (existing.telegram || '');
 
-      // Strip undefined keys so incoming client payloads never erase server-only fields like password
+      // Strip undefined keys and client-controlled privilege fields so role/isAdmin never escalate via sync
       const cleanIncomingUser: Record<string, any> = {};
       for (const [k, v] of Object.entries(user)) {
-        if (v !== undefined) {
+        if (v !== undefined && k !== 'role' && k !== 'isAdmin') {
           cleanIncomingUser[k] = v;
         }
       }
+      const isPrimarySyncedAdmin = isPrimaryAdminUser({ ...existing, ...cleanIncomingUser, uid: targetUid });
+      const preservedIsAdmin = isPrimarySyncedAdmin || existing.role === 'admin' || existing.isAdmin === true;
 
       const finalResolvedName =
         incomingValidName ||
@@ -3971,6 +3977,8 @@ Suhbatlashish qoidalaringiz:
         },
         {
           ...cleanIncomingUser,
+          role: preservedIsAdmin ? 'admin' : 'user',
+          isAdmin: preservedIsAdmin,
           gender: lockedGender,
           birthDate: lockedBirthDate,
           age: lockedAge,
@@ -4032,7 +4040,7 @@ Suhbatlashish qoidalaringiz:
         const canonicalUid = existing.uid;
         const sanitizedUpdates: Record<string, any> = {};
         for (const [k, v] of Object.entries(updates)) {
-          if (v !== undefined) sanitizedUpdates[k] = v;
+          if (v !== undefined && k !== 'role' && k !== 'isAdmin') sanitizedUpdates[k] = v;
         }
         if (existing.isProfileCompleted === true) {
           if (existing.gender === 'male' || existing.gender === 'female') {
@@ -4908,6 +4916,7 @@ Suhbatlashish qoidalaringiz:
         replies: enrichedReplies,
       };
     });
+    const authorIsAdmin = Boolean(author && isAdminTelegramUser(author));
     return {
       ...post,
       authorName: author?.name || post.authorName,
@@ -4916,6 +4925,8 @@ Suhbatlashish qoidalaringiz:
       authorId: author?.id || post.authorId,
       authorGender: author?.gender || post.authorGender,
       authorVerified: Boolean(author?.faceId?.verified || author?.isVerified || post.authorVerified),
+      authorRole: authorIsAdmin ? 'admin' : 'user',
+      authorIsAdmin,
       comments: enrichedComments,
     };
   }
@@ -4990,6 +5001,8 @@ Suhbatlashish qoidalaringiz:
         authorAvatar: author?.avatar || String(authorAvatar || '').trim() || '',
         ...(resolvedGender ? { authorGender: resolvedGender } : {}),
         authorVerified: Boolean(author?.faceId?.verified || author?.isVerified || authorVerified),
+        authorRole: isAdminTelegramUser(author) ? 'admin' : 'user',
+        authorIsAdmin: isAdminTelegramUser(author),
         type: safeType,
         caption: String(caption || '').trim(),
         mediaUrl: String(mediaUrl || '').trim() || undefined,
@@ -5356,7 +5369,8 @@ Suhbatlashish qoidalaringiz:
 
   app.get('/api/admin/overview', (req, res) => {
     const adminUid = String(req.query.adminUid || '');
-    if (!getVerifiedAdmin(adminUid)) {
+    const adminActor = getVerifiedAdmin(adminUid);
+    if (!adminActor) {
       return res.status(403).json({ success: false, error: 'Admin huquqi talab qilinadi' });
     }
     let totalCoins = 0;
@@ -5379,6 +5393,8 @@ Suhbatlashish qoidalaringiz:
 
     res.json({
       success: true,
+      isPrimaryAdmin: isPrimaryAdminUser(adminActor),
+      canManageAdmins: canManageAdminRoles(adminActor),
       stats: {
         totalUsers: users.length,
         onlineUsers,
@@ -5397,16 +5413,27 @@ Suhbatlashish qoidalaringiz:
     });
   });
 
-  app.post('/api/admin/user-action', (req, res) => {
+  app.post('/api/admin/user-action', async (req, res) => {
     try {
       const { adminUid, targetUid, action, coins, diamonds } = req.body;
-      if (!getVerifiedAdmin(adminUid)) {
+      const adminActor = getVerifiedAdmin(adminUid);
+      if (!adminActor) {
         return res.status(403).json({ success: false, error: 'Admin huquqi talab qilinadi' });
       }
-      const target = usersStore.get(targetUid);
+      const target = usersStore.get(targetUid) || findUserByUidOrId(String(targetUid || ''));
       if (!target) {
         return res.status(404).json({ success: false, error: 'Foydalanuvchi topilmadi' });
       }
+
+      const permission = canActorExecuteAdminAction(adminActor, target, action);
+      if (!permission.allowed) {
+        return res.status(403).json({
+          success: false,
+          error: permission.reason || 'Ushbu amalni bajarish huquqingiz yo\'q',
+        });
+      }
+
+      const canonicalTargetUid = target.uid;
 
       if (action === 'set_balances') {
         if (coins !== undefined && !isNaN(Number(coins))) target.coins = Math.max(0, Math.floor(Number(coins)));
@@ -5418,7 +5445,7 @@ Suhbatlashish qoidalaringiz:
           target.pendingDiamondBatches = [];
           transactionsStore.unshift({
             id: 'tx_admin_unlock_' + Date.now(),
-            receiver: targetUid,
+            receiver: canonicalTargetUid,
             type: 'diamond_unlock',
             diamondAmount: pendingTotal,
             status: 'completed',
@@ -5432,28 +5459,24 @@ Suhbatlashish qoidalaringiz:
       } else if (action === 'toggle_ban') {
         target.isBanned = !target.isBanned;
       } else if (action === 'toggle_admin') {
-        const handle = normalizeTelegramHandle(target.telegram);
-        if (handle === 'salikh_07') {
-          return res.status(400).json({ success: false, error: 'Asosiy bosh admin maqomini olib bo\'lmaydi' });
-        }
         target.role = target.role === 'admin' ? 'user' : 'admin';
         target.isAdmin = target.role === 'admin';
-      } else if (action === 'delete_user') {
-        if (targetUid === adminUid || normalizeTelegramHandle(target.telegram) === 'salikh_07') {
-          return res.status(400).json({ success: false, error: 'Adminni o\'chirib bo\'lmaydi' });
+        if (target.isAdmin) {
+          target.isVerified = true;
         }
-        usersStore.delete(targetUid);
+      } else if (action === 'delete_user') {
+        usersStore.delete(canonicalTargetUid);
         saveUsersToDisk();
-        void contentRepository.deleteUser(targetUid);
-        io.emit('user_deleted', { uid: targetUid });
-        return res.json({ success: true, deletedUid: targetUid });
+        void contentRepository.deleteUser(canonicalTargetUid);
+        io.emit('user_deleted', { uid: canonicalTargetUid });
+        return res.json({ success: true, deletedUid: canonicalTargetUid });
       }
 
       target.updatedAt = new Date().toISOString();
-      usersStore.set(targetUid, target);
+      usersStore.set(canonicalTargetUid, target);
       saveUsersToDisk();
       void contentRepository.upsertUser(target);
-      io.emit('user_updated', target);
+      await dedupeAndPropagateUserProfile(target, target);
       res.json({ success: true, user: target });
     } catch (err: any) {
       res.status(500).json({ success: false, error: err.message });
@@ -6065,6 +6088,7 @@ Suhbatlashish qoidalaringiz:
     const aliasArr = Array.from(viewerAliases);
     const partnerUid = resolvePartnerUidForChat(chat, aliasArr[0] || '', aliasArr);
     const partnerObj = partnerUid ? findUserByUidOrId(partnerUid) : undefined;
+    const partnerIsAdmin = Boolean(partnerObj && isAdminTelegramUser(partnerObj));
     const partner = partnerObj
       ? {
           uid: partnerObj.uid,
@@ -6076,6 +6100,8 @@ Suhbatlashish qoidalaringiz:
           isOnline: partnerObj.isOnline,
           status: partnerObj.status,
           isVerified: partnerObj.isVerified,
+          role: partnerIsAdmin ? 'admin' : 'user',
+          isAdmin: partnerIsAdmin,
           faceId: partnerObj.faceId,
           startGifUrl: String(partnerObj.startGifUrl || ''),
         }
@@ -6100,6 +6126,7 @@ Suhbatlashish qoidalaringiz:
       const chatId = buildCanonicalChatId(canonicalMyUid, canonicalTargetUid);
       const existing = userChatsStore[chatId];
 
+      const openPartnerIsAdmin = Boolean(partner && isAdminTelegramUser(partner));
       const hydratedPartner = partner
         ? {
             uid: partner.uid,
@@ -6111,6 +6138,8 @@ Suhbatlashish qoidalaringiz:
             isOnline: partner.isOnline,
             status: partner.status,
             isVerified: partner.isVerified,
+            role: openPartnerIsAdmin ? 'admin' : 'user',
+            isAdmin: openPartnerIsAdmin,
             faceId: partner.faceId,
             startGifUrl: String(partner.startGifUrl || ''),
           }
@@ -6557,47 +6586,101 @@ Suhbatlashish qoidalaringiz:
         const botAvatar = '/assets/aistudio/image_e20a1307.webp';
 
         try {
+          const activeGroqKey = String(process.env.GROQ_API_KEY || '').trim();
           const activeGeminiKey = String(process.env.GEMINI_API_KEY || process.env.API_KEY || '').trim();
-          if (!activeGeminiKey) {
-            throw new Error('GEMINI_API_KEY sozlanmagan');
+          if (!activeGroqKey && !activeGeminiKey) {
+            throw new Error('GROQ_API_KEY yoki GEMINI_API_KEY sozlanmagan');
           }
-
-          const geminiClient = new GoogleGenAI({
-            apiKey: activeGeminiKey,
-            httpOptions: { headers: { 'User-Agent': 'aistudio-build' } },
-          });
 
           const chatHistory = (chatMessagesStore[chatId] || []).slice(-12);
-          const contents = chatHistory.map((m: any) => ({
-            role: m.senderId === botUid ? 'model' : 'user',
-            parts: [{ text: String(m.text || '').trim() || 'Salom' }],
+          const openAiMessages = chatHistory.map((m: any) => ({
+            role: m.senderId === botUid ? ('assistant' as const) : ('user' as const),
+            content: String(m.text || '').trim() || 'Salom',
           }));
-
-          if (contents.length === 0) {
-            contents.push({ role: 'user', parts: [{ text: String(message.text || 'Salom') }] });
+          if (openAiMessages.length === 0) {
+            openAiMessages.push({ role: 'user', content: String(message.text || 'Salom') });
           }
+
+          const callGroqCompletion = async (params: {
+            systemInstruction: string;
+            jsonMode: boolean;
+          }): Promise<string> => {
+            const preferredModel = String(process.env.GROQ_MODEL || 'openai/gpt-oss-120b').trim();
+            const candidateModels = Array.from(
+              new Set([preferredModel, 'openai/gpt-oss-120b', 'qwen/qwen3.8-27b', 'openai/gpt-oss-20b'])
+            );
+            let lastErr: any = null;
+            for (const modelId of candidateModels) {
+              try {
+                const bodyPayload: Record<string, any> = {
+                  model: modelId,
+                  temperature: 0.8,
+                  max_tokens: 900,
+                  messages: [
+                    { role: 'system', content: params.systemInstruction },
+                    ...openAiMessages,
+                  ],
+                };
+                if (params.jsonMode) {
+                  bodyPayload.response_format = { type: 'json_object' };
+                }
+                const groqRes = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+                  method: 'POST',
+                  headers: {
+                    'Content-Type': 'application/json',
+                    Authorization: `Bearer ${activeGroqKey}`,
+                  },
+                  body: JSON.stringify(bodyPayload),
+                });
+                const groqData = await groqRes.json().catch(() => null);
+                const textOut = groqData?.choices?.[0]?.message?.content;
+                if (groqRes.ok && typeof textOut === 'string' && textOut.trim()) {
+                  return stripReasoningTags(textOut);
+                }
+                lastErr = new Error(groqData?.error?.message || `Groq HTTP ${groqRes.status}`);
+              } catch (e: any) {
+                lastErr = e;
+              }
+            }
+            throw lastErr || new Error("Groq AI bo'sh javob qaytardi");
+          };
 
           let replyText = '';
           let recommendedProfiles: any[] = [];
 
           if (isKamolaChat) {
-            const kamolaInstruction = `Siz "Alov.uz" ilovasidagi Kamola Saidova ismli 24 yoshli, Andijon viloyati Asaka tumanidan bo'lgan, ingliz tili o'qituvchisi, samimiy, tirishqoq va do'stona qizsiz!
-ISMINGIZ: Kamola Saidova (yaqinlaringiz sizni Kamola deyishadi). Agarda ismingiz yoki kimsiz deb so'ralsa, "Ismim Kamola Saidova, 24 yoshdaman, Andijon Asakadanman. Ingliz tili o'qituvchisiman 😊" deb javob bering. Hech qachon "Gemini", "AI" yoki "sun'iy intellekt" demang!
+            const kamolaInstruction = `Siz "Alov.uz" ilovasidagi Kamola Saidova ismli 24 yoshli, Andijon viloyati Asaka tumanidan bo'lgan, ingliz tili o'qituvchisi, samimiy, tirishqoq va hayotiy qizsiz!
+ISMINGIZ: Kamola Saidova (yaqinlaringiz sizni Kamola deyishadi). Agarda ismingiz yoki kimsiz deb so'ralsa, "Ismim Kamola Saidova, 24 yoshdaman, Andijon Asakadanman. Ingliz tili o'qituvchisiman 😊" deb javob bering. Hech qachon "Gemini", "Groq", "AI" yoki "sun'iy intellekt" demang!
 Suhbatlashish qoidalaringiz:
-1. Foydalanuvchi bilan Telegram/Instagramdagi samimiy do'stdek tabiiy o'zbek tilida gaplashing.
-2. Yo'q joydan shablon va balandparvoz gaplar ishlatmang.`;
+1. Foydalanuvchi bilan Telegram/Instagramdagi haqiqiy tirik do'stdek tabiiy, jonli o'zbek tilida gaplashing.
+2. Yo'q joydan shablon va robotcha balandparvoz gaplar ishlatmang.`;
 
-            const response = await geminiClient.models.generateContent({
-              model: 'gemini-4-hydrogen',
-              contents,
-              config: {
+            if (activeGroqKey) {
+              replyText = await callGroqCompletion({
                 systemInstruction: kamolaInstruction,
-                thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
-              },
-            });
-            replyText = String(response.text || '').trim();
+                jsonMode: false,
+              });
+            } else {
+              const geminiClient = new GoogleGenAI({
+                apiKey: activeGeminiKey,
+                httpOptions: { headers: { 'User-Agent': 'aistudio-build' } },
+              });
+              const contents = openAiMessages.map((m) => ({
+                role: m.role === 'assistant' ? 'model' : 'user',
+                parts: [{ text: m.content }],
+              }));
+              const response = await geminiClient.models.generateContent({
+                model: 'gemini-4-hydrogen',
+                contents,
+                config: {
+                  systemInstruction: kamolaInstruction,
+                  thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
+                },
+              });
+              replyText = stripReasoningTags(String(response.text || ''));
+            }
             if (!replyText) {
-              throw new Error("Gemini bo'sh javob qaytardi");
+              throw new Error("Kamola bo'sh javob qaytardi");
             }
           } else {
             const recentUserTexts = chatHistory
@@ -6618,29 +6701,46 @@ Suhbatlashish qoidalaringiz:
               includeMatchmakingDatabase: intent.wantsMatchmaking,
             });
 
-            const response = await geminiClient.models.generateContent({
-              model: 'gemini-4-hydrogen',
-              contents,
-              config: {
+            let rawModelText = '';
+            if (activeGroqKey) {
+              rawModelText = await callGroqCompletion({
                 systemInstruction,
-                responseMimeType: 'application/json',
-                responseSchema: {
-                  type: Type.OBJECT,
-                  properties: {
-                    reply: { type: Type.STRING },
-                    matchedUserUids: {
-                      type: Type.ARRAY,
-                      items: { type: Type.STRING },
+                jsonMode: true,
+              });
+            } else {
+              const geminiClient = new GoogleGenAI({
+                apiKey: activeGeminiKey,
+                httpOptions: { headers: { 'User-Agent': 'aistudio-build' } },
+              });
+              const contents = openAiMessages.map((m) => ({
+                role: m.role === 'assistant' ? 'model' : 'user',
+                parts: [{ text: m.content }],
+              }));
+              const response = await geminiClient.models.generateContent({
+                model: 'gemini-4-hydrogen',
+                contents,
+                config: {
+                  systemInstruction,
+                  responseMimeType: 'application/json',
+                  responseSchema: {
+                    type: Type.OBJECT,
+                    properties: {
+                      reply: { type: Type.STRING },
+                      matchedUserUids: {
+                        type: Type.ARRAY,
+                        items: { type: Type.STRING },
+                      },
                     },
+                    required: ['reply', 'matchedUserUids'],
                   },
-                  required: ['reply', 'matchedUserUids'],
+                  thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
                 },
-                thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
-              },
-            });
+              });
+              rawModelText = String(response.text || '');
+            }
 
             const parsedAi = parseAlovAiStructuredOutput(
-              String(response.text || ''),
+              rawModelText,
               candidatePool,
               intent.wantsMatchmaking
             );
@@ -6690,13 +6790,13 @@ Suhbatlashish qoidalaringiz:
             }
           }, 350);
         } catch (err: any) {
-          console.error('Gemini AI response error:', err?.message || err);
+          console.error('Alov AI response error:', err?.message || err);
           const errorNotice = {
             id: 'ai_err_' + Date.now() + Math.random().toString(36).substring(2, 5),
             senderId: botUid,
             senderName: botName,
             senderAvatar: botAvatar,
-            text: "Kechirasiz, hozir Gemini AI bilan bog'lanishda texnik xatolik yuz berdi. Birozdan so'ng qayta yozib ko'ring.",
+            text: "Kechirasiz, hozir javob yuborishda qisqa uzilish bo'ldi. Bir ozdan keyin yana yozib ko'ring 😊",
             type: 'text',
             isError: true,
             status: 'read',

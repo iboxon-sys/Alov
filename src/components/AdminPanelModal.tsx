@@ -27,7 +27,14 @@ import {
   MessageCircle,
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { formatDiamondsDisplay, getPendingDiamondsTotal } from '../utils/tokenomics';
+import {
+  canManageAdminRoles,
+  formatDiamondsDisplay,
+  getPendingDiamondsTotal,
+  isAdminTelegramUser,
+  isPrimaryAdminUser,
+} from '../utils/tokenomics';
+import { AdminBadge } from './AdminBadge';
 import { resolveEffectiveProfileAvatar } from '../utils/faceId';
 import { resolveApiMediaUrl } from '../config/api';
 import type { CoinPurchaseRequest } from '../utils/coinRequests';
@@ -104,8 +111,12 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
   const [subConfig, setSubConfig] = useState<MandatorySubscriptionConfig>(DEFAULT_MANDATORY_SUBSCRIPTION_CONFIG);
   const [subBusy, setSubBusy] = useState(false);
   const [subVerifyBusy, setSubVerifyBusy] = useState(false);
+  const [canManageAdminsState, setCanManageAdminsState] = useState<boolean>(() =>
+    canManageAdminRoles(currentUser)
+  );
 
   const adminUid = currentUser?.uid || '';
+  const actorCanManageAdmins = canManageAdminRoles(currentUser) && canManageAdminsState;
 
   const fetchOverview = async () => {
     if (!adminUid) return;
@@ -123,6 +134,11 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
         setWithdrawals(Array.isArray(data.withdrawals) ? data.withdrawals : []);
         setCoinRequests(Array.isArray(data.coinRequests) ? data.coinRequests : []);
         setTransactions(Array.isArray(data.transactions) ? data.transactions : []);
+        if (typeof data.canManageAdmins === 'boolean') {
+          setCanManageAdminsState(data.canManageAdmins);
+        } else {
+          setCanManageAdminsState(canManageAdminRoles(currentUser));
+        }
       }
 
       const subRes = await fetch(`${apiBaseUrl}/api/admin/subscription/config?adminUid=${encodeURIComponent(adminUid)}`);
@@ -506,7 +522,7 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
     return users.filter((u) => {
       if (userSegment === 'verified' && !u.isVerified && !u.faceId?.verified) return false;
       if (userSegment === 'banned' && !u.isBanned) return false;
-      if (userSegment === 'admins' && u.role !== 'admin') return false;
+      if (userSegment === 'admins' && !isAdminTelegramUser(u)) return false;
       if (!q) return true;
       return (
         String(u.name || '').toLowerCase().includes(q) ||
@@ -589,9 +605,7 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
                 <h2 className="text-lg sm:text-xl font-editorial font-bold tracking-tight text-white truncate">
                   Alov.uz Boshqaruv Markazi
                 </h2>
-                <span className="px-2 py-0.5 rounded-md bg-amber-500/15 border border-amber-400/30 text-amber-300 text-[10px] font-bold uppercase tracking-wider shrink-0">
-                  Admin
-                </span>
+                <AdminBadge user={currentUser} size="sm" testId="admin-panel-header-badge" />
               </div>
               <p className="text-xs text-zinc-400 truncate mt-0.5">
                 {currentUser?.name || 'Admin'} · {currentUser?.telegram || '@Salikh_07'}
@@ -1353,7 +1367,7 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
                       className="w-full pl-10 pr-4 py-3 rounded-2xl bg-[#12141E] border border-white/10 text-xs font-medium text-white placeholder:text-zinc-500 outline-none focus:border-rose-500"
                     />
                   </div>
-                  {users.some((u) => u.uid !== adminUid && u.role !== 'admin') && (
+                  {actorCanManageAdmins && users.some((u) => u.uid !== adminUid && !isAdminTelegramUser(u)) && (
                     confirmPurgeNonAdmins ? (
                       <div className="flex items-center gap-1.5 shrink-0">
                         <button
@@ -1386,6 +1400,18 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
                     )
                   )}
                 </div>
+
+                {!actorCanManageAdmins && (
+                  <div
+                    data-testid="admin-delegated-notice"
+                    className="bg-amber-500/10 border border-amber-400/25 rounded-2xl px-4 py-2.5 text-xs text-amber-200 flex items-center gap-2"
+                  >
+                    <ShieldCheck className="w-4 h-4 text-amber-300 shrink-0" />
+                    <span>
+                      Sizda barcha admin vakolatlari faol. Faqat Bosh Admin (@Salikh_07) boshqa foydalanuvchilarga adminlik bera oladi.
+                    </span>
+                  </div>
+                )}
 
                 {filteredUsers.length === 0 ? (
                   <div className="bg-[#12141E] rounded-2xl p-10 text-center text-xs text-zinc-400 border border-white/10">
@@ -1430,11 +1456,7 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
                                     <span className="truncate">{u.name || 'Nomsiz'}</span>
                                     <ArrowUpRight className="w-3 h-3 text-rose-400 shrink-0" />
                                   </button>
-                                  {u.role === 'admin' && (
-                                    <span className="px-1.5 py-0.5 rounded bg-amber-500/20 text-amber-300 text-[9px] font-black">
-                                      ADMIN
-                                    </span>
-                                  )}
+                                  <AdminBadge user={u} size="xs" testId={`admin-user-card-badge-${u.uid}`} />
                                   {u.isVerified && (
                                     <span className="px-1.5 py-0.5 rounded bg-emerald-500/20 text-emerald-300 text-[9px] font-bold">
                                       Tasdiqlangan
@@ -1545,33 +1567,42 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
 
                             {u.uid !== adminUid && (
                               <>
-                                <button
-                                  type="button"
-                                  disabled={busyId === u.uid}
-                                  onClick={() => handleUserAction(u.uid, 'toggle_ban')}
-                                  className="px-2.5 py-1 rounded-lg bg-white/10 hover:bg-white/15 text-zinc-200 border border-white/10 text-[11px] font-semibold flex items-center gap-1 cursor-pointer"
-                                >
-                                  <Ban className="w-3 h-3" />
-                                  <span>{u.isBanned ? 'Blokdan ochish' : 'Bloklash'}</span>
-                                </button>
-                                <button
-                                  type="button"
-                                  disabled={busyId === u.uid}
-                                  onClick={() => handleUserAction(u.uid, 'toggle_admin')}
-                                  className="px-2.5 py-1 rounded-lg bg-indigo-500/15 hover:bg-indigo-500/25 text-indigo-300 border border-indigo-500/25 text-[11px] font-semibold flex items-center gap-1 cursor-pointer"
-                                >
-                                  <ShieldCheck className="w-3 h-3" />
-                                  <span>{u.role === 'admin' ? 'Adminlikni olish' : 'Admin qilish'}</span>
-                                </button>
-                                <button
-                                  type="button"
-                                  disabled={busyId === u.uid}
-                                  onClick={() => handleUserAction(u.uid, 'delete_user')}
-                                  className="px-2.5 py-1 rounded-lg bg-rose-500/15 hover:bg-rose-500/25 text-rose-300 border border-rose-500/25 text-[11px] font-semibold flex items-center gap-1 cursor-pointer"
-                                >
-                                  <Trash2 className="w-3 h-3" />
-                                  <span>O'chirish</span>
-                                </button>
+                                {!isPrimaryAdminUser(u) && (!isAdminTelegramUser(u) || actorCanManageAdmins) && (
+                                  <button
+                                    type="button"
+                                    disabled={busyId === u.uid}
+                                    data-testid={`admin-toggle-ban-btn-${u.uid}`}
+                                    onClick={() => handleUserAction(u.uid, 'toggle_ban')}
+                                    className="px-2.5 py-1 rounded-lg bg-white/10 hover:bg-white/15 text-zinc-200 border border-white/10 text-[11px] font-semibold flex items-center gap-1 cursor-pointer"
+                                  >
+                                    <Ban className="w-3 h-3" />
+                                    <span>{u.isBanned ? 'Blokdan ochish' : 'Bloklash'}</span>
+                                  </button>
+                                )}
+                                {actorCanManageAdmins && !isPrimaryAdminUser(u) && (
+                                  <button
+                                    type="button"
+                                    disabled={busyId === u.uid}
+                                    data-testid={`admin-toggle-role-btn-${u.uid}`}
+                                    onClick={() => handleUserAction(u.uid, 'toggle_admin')}
+                                    className="px-2.5 py-1 rounded-lg bg-indigo-500/15 hover:bg-indigo-500/25 text-indigo-300 border border-indigo-500/25 text-[11px] font-semibold flex items-center gap-1 cursor-pointer"
+                                  >
+                                    <ShieldCheck className="w-3 h-3" />
+                                    <span>{isAdminTelegramUser(u) ? 'Adminlikni olish' : 'Admin qilish'}</span>
+                                  </button>
+                                )}
+                                {!isPrimaryAdminUser(u) && (!isAdminTelegramUser(u) || actorCanManageAdmins) && (
+                                  <button
+                                    type="button"
+                                    disabled={busyId === u.uid}
+                                    data-testid={`admin-delete-user-btn-${u.uid}`}
+                                    onClick={() => handleUserAction(u.uid, 'delete_user')}
+                                    className="px-2.5 py-1 rounded-lg bg-rose-500/15 hover:bg-rose-500/25 text-rose-300 border border-rose-500/25 text-[11px] font-semibold flex items-center gap-1 cursor-pointer"
+                                  >
+                                    <Trash2 className="w-3 h-3" />
+                                    <span>O'chirish</span>
+                                  </button>
+                                )}
                               </>
                             )}
                           </div>

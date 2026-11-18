@@ -63,6 +63,7 @@ import { ChatGifBar } from './ChatGifBar';
 import { VideoPlayer, VoiceMessage, AudioPlayer } from './ChatMedia';
 import { isGifMessage, type GiphyGifItem } from '../utils/giphy';
 import { ChatSkeleton } from './Skeleton';
+import { AdminBadge } from './AdminBadge';
 
 const ChatMediaPicker = lazy(() =>
   import('./ChatMediaPicker').then((m) => ({ default: m.ChatMediaPicker }))
@@ -73,7 +74,7 @@ const ALOV_AI_USER = {
   id: 'ALOV-AI',
   name: 'Alov AI',
   avatar: '/assets/aistudio/image_e20a1307.webp',
-  bio: 'Sizning samimiy va mehribon virtual suhbatdoshingiz.',
+  bio: "Samimiy do'st va hayotiy suhbatdosh.",
   status: 'online',
   isAI: true,
 };
@@ -748,6 +749,9 @@ export const ChatView: React.FC<ChatViewProps> = ({
   const partnerFromUsersList = otherUid
     ? usersList.find((u) => u.uid === otherUid || u.id === otherUid)
     : undefined;
+  const resolvedChatPartner = partnerFromUsersList
+    ? { ...selectedChatUser, ...partnerFromUsersList }
+    : selectedChatUser;
   const resolvedPartnerStartGif = String(
     partnerFromUsersList?.startGifUrl ??
       selectedChatUser?.startGifUrl ??
@@ -1334,7 +1338,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
                         <span className="text-[10.5px] text-emerald-400 font-semibold shrink-0">Onlayn</span>
                       </div>
                       <p className="text-xs text-zinc-400 truncate mt-0.5">
-                        Samimiy suhbatdoshingiz
+                        Samimiy suhbatdosh · O&apos;zbekcha jonli muloqot
                       </p>
                     </div>
                   </button>
@@ -1391,6 +1395,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
                           <h3 className="font-bold text-sm text-white truncate">
                             {otherUser?.name || 'Foydalanuvchi'}
                           </h3>
+                          <AdminBadge user={otherUser} size="xs" testId="chat-list-admin-badge" />
                           {chat.isAI && <span className="text-[10px] font-bold text-rose-400 shrink-0">· AI</span>}
                         </div>
                         <span className="text-[10.5px] text-zinc-500 tabular-nums shrink-0">
@@ -1429,8 +1434,9 @@ export const ChatView: React.FC<ChatViewProps> = ({
     );
   }
 
-  const partnerOnline = isUserOnlineStrict(selectedChatUser, onlineUserIds);
-  const partnerAvatar = resolveMediaOrAvatar(resolveEffectiveProfileAvatar(selectedChatUser));
+  const partnerOnline = isUserOnlineStrict(resolvedChatPartner, onlineUserIds);
+  const partnerAvatar = resolveMediaOrAvatar(resolveEffectiveProfileAvatar(resolvedChatPartner));
+  const partnerIsAdmin = isAdminTelegramUser(resolvedChatPartner);
 
   const progressVal = Number(effectiveUser?.diamondProgress || 0);
   const progressPct = getDiamondProgressPercent(progressVal);
@@ -1459,7 +1465,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
           </button>
           <button
             type="button"
-            onClick={() => otherUid && triggerOpenProfile(otherUid, selectedChatUser)}
+            onClick={() => otherUid && triggerOpenProfile(otherUid, resolvedChatPartner)}
             className="flex items-center space-x-2.5 min-w-0 text-left hover:opacity-85 transition cursor-pointer"
             title="Profilni ko'rish"
           >
@@ -1467,12 +1473,14 @@ export const ChatView: React.FC<ChatViewProps> = ({
               {partnerAvatar ? (
                 <img
                   src={partnerAvatar}
-                  alt={selectedChatUser?.name || ''}
-                  className="w-9 h-9 rounded-full object-cover border border-white/15"
+                  alt={resolvedChatPartner?.name || ''}
+                  className={`w-9 h-9 rounded-full object-cover border ${
+                    partnerIsAdmin ? 'border-amber-400/60' : 'border-white/15'
+                  }`}
                 />
               ) : (
                 <div className="w-9 h-9 rounded-full bg-rose-500/20 text-rose-300 font-bold text-sm flex items-center justify-center border border-rose-500/30">
-                  {getSafeUserDisplayName(selectedChatUser, 'F').charAt(0).toUpperCase()}
+                  {getSafeUserDisplayName(resolvedChatPartner, 'F').charAt(0).toUpperCase()}
                 </div>
               )}
               {partnerOnline && (
@@ -1480,11 +1488,18 @@ export const ChatView: React.FC<ChatViewProps> = ({
               )}
             </div>
             <div className="min-w-0">
-              <h3 className="font-sans font-bold text-sm text-white leading-none truncate">
-                {selectedChatUser?.name || 'Foydalanuvchi'}
-              </h3>
-              <p className={`text-[10.5px] mt-1 ${partnerOnline ? 'text-emerald-400 font-semibold' : 'text-zinc-400'}`}>
-                {partnerOnline ? 'tarmoqda' : formatLastSeenUz(selectedChatUser?.lastSeen, false)}
+              <div className="flex items-center gap-1.5 min-w-0">
+                <h3 className="font-sans font-bold text-sm text-white leading-none truncate">
+                  {resolvedChatPartner?.name || 'Foydalanuvchi'}
+                </h3>
+                <AdminBadge user={resolvedChatPartner} size="xs" testId="chat-header-admin-badge" />
+              </div>
+              <p className={`text-[10.5px] mt-1 truncate ${partnerOnline ? 'text-emerald-400 font-semibold' : 'text-zinc-400'}`}>
+                {partnerIsAdmin
+                  ? `Platforma administratori · ${partnerOnline ? 'tarmoqda' : formatLastSeenUz(resolvedChatPartner?.lastSeen, false)}`
+                  : partnerOnline
+                  ? 'tarmoqda'
+                  : formatLastSeenUz(resolvedChatPartner?.lastSeen, false)}
               </p>
             </div>
           </button>
@@ -1566,6 +1581,8 @@ export const ChatView: React.FC<ChatViewProps> = ({
           const isDefaultMediaText =
             !msg.text ||
             ['GIF', 'Rasm 🖼️', 'Rasm', 'Video 🎥', 'Video'].includes(String(msg.text).trim());
+          const adminBadgeUser = isMe ? effectiveUser : resolvedChatPartner;
+          const messageSenderIsAdmin = isAdminTelegramUser(adminBadgeUser);
 
           return (
             <div
@@ -1578,6 +1595,11 @@ export const ChatView: React.FC<ChatViewProps> = ({
                   data-testid="chat-frameless-media"
                   className="max-w-[82%] sm:max-w-[75%] relative bg-transparent border-0 p-0 shadow-none"
                 >
+                  {messageSenderIsAdmin && (
+                    <div className={`mb-1 flex items-center ${isMe ? 'justify-end' : 'justify-start'}`}>
+                      <AdminBadge user={adminBadgeUser} size="xs" testId="chat-message-admin-badge" />
+                    </div>
+                  )}
                   {msg.type === 'video' ? (
                     <div className="relative rounded-2xl overflow-hidden">
                       <VideoPlayer url={resolvedUrl} />
@@ -1643,9 +1665,16 @@ export const ChatView: React.FC<ChatViewProps> = ({
                   className={`max-w-[85%] rounded-[18px] relative px-4 py-2.5 ${
                     isMe
                       ? 'bg-gradient-to-br from-[#E11D48] to-[#BE123C] text-white rounded-tr-none shadow-md shadow-rose-950/30'
+                      : messageSenderIsAdmin
+                      ? 'bg-[#191620] text-zinc-100 border border-amber-400/35 rounded-tl-none shadow-md shadow-amber-950/20'
                       : 'bg-[#151824] text-zinc-100 border border-white/[0.08] rounded-tl-none'
                   }`}
                 >
+                  {messageSenderIsAdmin && (
+                    <div className={`mb-1.5 flex items-center ${isMe ? 'justify-end' : 'justify-start'}`}>
+                      <AdminBadge user={adminBadgeUser} size="xs" testId="chat-message-admin-badge" />
+                    </div>
+                  )}
                   {msg.type === 'gift' ? (
                     <div className="flex items-center space-x-2.5 py-1">
                       <span className="text-3xl shrink-0">{msg.giftIcon || msg.giftInfo?.giftIcon || '🎁'}</span>

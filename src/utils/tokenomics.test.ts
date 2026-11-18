@@ -19,6 +19,10 @@ import {
   ADMIN_FULL_COINS,
   ADMIN_FULL_DIAMONDS,
   isAdminTelegramUser,
+  isPrimaryAdminUser,
+  canManageAdminRoles,
+  getAdminBadgeLabel,
+  canActorExecuteAdminAction,
   canChargeForMessage,
   coinsToDiamonds,
   formatDiamondsDisplay,
@@ -76,12 +80,39 @@ describe('tokenomics, wallet, 24h 120-diamond cap, 12h unlock & call billing hel
     assert.equal(videoBill.uzsEquivalent, 500);
   });
 
-  it('recognizes @Salikh_07 and https://t.me/Salikh_07 as platform admin', () => {
-    assert.equal(isAdminTelegramUser({ telegram: 'https://t.me/Salikh_07' }), true);
+  it('recognizes @Salikh_07 as primary admin and delegated role=admin with restricted role-grant rights', () => {
+    const headAdmin = { uid: 'tg_salikh_07', telegram: 'https://t.me/Salikh_07', role: 'admin', isAdmin: true };
+    const delegatedAdmin = { uid: 'u_admin_2', telegram: 'https://t.me/helper_admin', role: 'admin', isAdmin: true };
+    const regularUser = { uid: 'u_regular', telegram: 'https://t.me/other_user', role: 'user' };
+
+    assert.equal(isAdminTelegramUser(headAdmin), true);
     assert.equal(isAdminTelegramUser({ telegram: '@Salikh_07' }), true);
     assert.equal(isAdminTelegramUser({ username: 'salikh_07' }), true);
-    assert.equal(isAdminTelegramUser({ telegram: 'https://t.me/other_user', role: 'user' }), false);
-    assert.equal(isAdminTelegramUser({ telegram: 'https://t.me/other_user', role: 'admin' }), true);
+    assert.equal(isAdminTelegramUser(regularUser), false);
+    assert.equal(isAdminTelegramUser(delegatedAdmin), true);
+
+    assert.equal(isPrimaryAdminUser(headAdmin), true);
+    assert.equal(isPrimaryAdminUser(delegatedAdmin), false);
+    assert.equal(canManageAdminRoles(headAdmin), true);
+    assert.equal(canManageAdminRoles(delegatedAdmin), false);
+    assert.equal(getAdminBadgeLabel(headAdmin), 'Bosh Admin');
+    assert.equal(getAdminBadgeLabel(delegatedAdmin), 'Admin');
+    assert.equal(getAdminBadgeLabel(regularUser), null);
+
+    // Head admin CAN grant/revoke admin on regular users, but NOT strip own/primary admin status
+    assert.equal(canActorExecuteAdminAction(headAdmin, regularUser, 'toggle_admin').allowed, true);
+    assert.equal(canActorExecuteAdminAction(headAdmin, headAdmin, 'toggle_admin').allowed, false);
+
+    // Delegated admin has ALL normal admin powers (balances, verify, ban, delete regular user)
+    assert.equal(canActorExecuteAdminAction(delegatedAdmin, regularUser, 'set_balances').allowed, true);
+    assert.equal(canActorExecuteAdminAction(delegatedAdmin, regularUser, 'toggle_verify').allowed, true);
+    assert.equal(canActorExecuteAdminAction(delegatedAdmin, regularUser, 'toggle_ban').allowed, true);
+    assert.equal(canActorExecuteAdminAction(delegatedAdmin, regularUser, 'delete_user').allowed, true);
+
+    // Delegated admin CANNOT add/remove admins or ban/delete Bosh Admin / other admins
+    assert.equal(canActorExecuteAdminAction(delegatedAdmin, regularUser, 'toggle_admin').allowed, false);
+    assert.equal(canActorExecuteAdminAction(delegatedAdmin, headAdmin, 'toggle_ban').allowed, false);
+    assert.equal(canActorExecuteAdminAction(delegatedAdmin, headAdmin, 'delete_user').allowed, false);
   });
 
   it('skips coin deduction when friendship mode is active, AI bot, or admin', () => {

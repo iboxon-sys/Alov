@@ -12,6 +12,8 @@ import {
   X,
 } from 'lucide-react';
 import {
+  buildDemoFaceIdProfile,
+  buildDemoFaceIdSvgDataUrl,
   computeAverageEAR,
   computeSmileMetrics,
   createBlinkTrackerState,
@@ -137,6 +139,8 @@ export const FaceIdVerificationModal: React.FC<FaceIdVerificationModalProps> = (
   const [isSaving, setIsSaving] = useState(false);
   const [isAnalyzingServer, setIsAnalyzingServer] = useState(false);
   const [retrySeed, setRetrySeed] = useState(0);
+  const [verificationMode, setVerificationMode] = useState<'demo' | 'camera'>('demo');
+  const [demoGender, setDemoGender] = useState<'female' | 'male'>('female');
 
   // Refs synced cleanly so detection loop never tears down & restarts mid-blink
   const phaseRef = useRef(phase);
@@ -162,6 +166,20 @@ export const FaceIdVerificationModal: React.FC<FaceIdVerificationModalProps> = (
   };
 
   useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      stopCamera();
+    };
+  }, []);
+
+  useEffect(() => {
+    if (verificationMode !== 'camera') {
+      stopCamera();
+      setCameraReady(false);
+      setCameraError('');
+      return;
+    }
     mountedRef.current = true;
     let active = true;
 
@@ -250,14 +268,13 @@ export const FaceIdVerificationModal: React.FC<FaceIdVerificationModalProps> = (
 
     return () => {
       active = false;
-      mountedRef.current = false;
       stopCamera();
     };
-  }, [retrySeed]);
+  }, [retrySeed, verificationMode]);
 
   // Continuous low-latency biometric landmark + throttled gender/expression loop
   useEffect(() => {
-    if (!modelsReady || !cameraReady) return;
+    if (verificationMode !== 'camera' || !modelsReady || !cameraReady) return;
 
     let cancelled = false;
     let frameCounter = 0;
@@ -615,20 +632,120 @@ export const FaceIdVerificationModal: React.FC<FaceIdVerificationModalProps> = (
     }
   };
 
+  const handleDemoVerify = async () => {
+    setIsSaving(true);
+    const svgDataUrl = buildDemoFaceIdSvgDataUrl(demoGender, userName);
+    let photoDataUrl = svgDataUrl;
+    try {
+      const canvas = document.createElement('canvas');
+      canvas.width = 360;
+      canvas.height = 480;
+      const ctx = canvas.getContext('2d');
+      if (ctx) {
+        const grad = ctx.createLinearGradient(0, 0, 360, 480);
+        grad.addColorStop(0, demoGender === 'female' ? '#4C1D2D' : '#172554');
+        grad.addColorStop(1, demoGender === 'female' ? '#1E1019' : '#0F172A');
+        ctx.fillStyle = grad;
+        ctx.fillRect(0, 0, 360, 480);
+
+        const accent = demoGender === 'female' ? '#F43F5E' : '#38BDF8';
+        ctx.beginPath();
+        ctx.arc(180, 175, 76, 0, Math.PI * 2);
+        ctx.fillStyle = demoGender === 'female' ? 'rgba(244,63,94,0.22)' : 'rgba(56,189,248,0.22)';
+        ctx.fill();
+        ctx.lineWidth = 3;
+        ctx.strokeStyle = accent;
+        ctx.stroke();
+
+        ctx.fillStyle = 'rgba(226,232,240,0.92)';
+        ctx.beginPath();
+        ctx.arc(180, 158, 36, 0, Math.PI * 2);
+        ctx.fill();
+
+        const initial = String(userName || (demoGender === 'female' ? 'Q' : 'Y')).trim().charAt(0).toUpperCase() || 'A';
+        ctx.fillStyle = '#0F172A';
+        ctx.font = '800 32px sans-serif';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(initial, 180, 160);
+
+        ctx.fillStyle = 'rgba(16,185,129,0.22)';
+        ctx.strokeStyle = '#10B981';
+        ctx.lineWidth = 1.5;
+        ctx.beginPath();
+        ctx.roundRect(68, 346, 224, 42, 21);
+        ctx.fill();
+        ctx.stroke();
+
+        ctx.fillStyle = '#D1FAE5';
+        ctx.font = '700 13px sans-serif';
+        ctx.fillText(demoGender === 'female' ? 'QIZ · DEMO FACE ID' : 'YIGIT · DEMO FACE ID', 180, 368);
+
+        photoDataUrl = canvas.toDataURL('image/png');
+      }
+    } catch {
+      photoDataUrl = svgDataUrl;
+    }
+
+    try {
+      const res = await fetch(`${apiBaseUrl}/api/face-id/save`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          uid: userUid,
+          photoDataUrl,
+          detectedGender: demoGender,
+          confidence: 99,
+          blinkVerified: true,
+          smileVerified: true,
+          method: 'demo_test',
+        }),
+      });
+      const data = await res.json().catch(() => null);
+      const photoUrl = data?.photoUrl || photoDataUrl;
+      const faceId = data?.faceId || buildDemoFaceIdProfile({ gender: demoGender, photoUrl });
+      stopCamera();
+      onVerified({
+        photoUrl,
+        photoDataUrl,
+        detectedGender: demoGender,
+        userSelectedGender: demoGender,
+        confidence: 99,
+        faceId,
+      });
+    } catch {
+      const fallbackFaceId = buildDemoFaceIdProfile({ gender: demoGender, photoUrl: photoDataUrl });
+      stopCamera();
+      onVerified({
+        photoUrl: photoDataUrl,
+        photoDataUrl,
+        detectedGender: demoGender,
+        userSelectedGender: demoGender,
+        confidence: 99,
+        faceId: fallbackFaceId,
+      });
+    } finally {
+      if (mountedRef.current) setIsSaving(false);
+    }
+  };
+
   const isGreenVerified = phase === 'verified_ready' || phase === 'captured_preview';
+  const demoPreviewSvg = buildDemoFaceIdSvgDataUrl(demoGender, userName);
 
   return (
-    <div className="space-y-4 text-left">
+    <div className="space-y-4 text-left text-zinc-100" data-testid="faceid-modal-root">
       <div className="flex items-start justify-between gap-2">
         <div>
-          <p className="text-[11px] font-bold uppercase tracking-[0.14em] text-[#C93545]">
+          <p className="text-[11px] font-bold uppercase tracking-[0.14em] text-rose-400">
             Biometrik Xavfsizlik
           </p>
-          <h2 className="text-2xl font-editorial font-bold text-[#221719] leading-tight">
-            Haqiqiy Face ID Tasdiqlash
+          <h2 className="text-xl sm:text-2xl font-editorial font-bold text-white leading-tight">
+            Face ID Tasdiqlash
           </h2>
-          <p className="text-xs text-[#6B5B5E] mt-0.5">
-            {userName ? `${userName}, ` : ''}jinsni aniqlash va haqiqiy profil rasmingiz uchun kameraga qarang.
+          <p className="text-xs text-zinc-400 mt-0.5">
+            {verificationMode === 'demo'
+              ? 'Test rejimi faol — bir marta bosish bilan tezkor tasdiqlash.'
+              : `${userName ? `${userName}, ` : ''}jinsni aniqlash va profil rasmingiz uchun kameraga qarang.`}
           </p>
         </div>
         {onCancel && (
@@ -638,13 +755,115 @@ export const FaceIdVerificationModal: React.FC<FaceIdVerificationModalProps> = (
               stopCamera();
               onCancel();
             }}
-            className="p-2 rounded-full text-slate-400 hover:text-slate-700 hover:bg-rose-50 transition shrink-0"
+            className="p-2 rounded-full text-zinc-400 hover:text-white hover:bg-white/10 transition shrink-0 cursor-pointer"
             aria-label="Bekor qilish"
           >
             <X className="w-4 h-4" />
           </button>
         )}
       </div>
+
+      {/* Mode Switcher: Demo Test vs Live Camera */}
+      <div className="grid grid-cols-2 gap-1.5 p-1 rounded-2xl bg-[#171A26] border border-white/10">
+        <button
+          type="button"
+          data-testid="faceid-mode-demo"
+          onClick={() => setVerificationMode('demo')}
+          className={`min-h-[40px] px-3 py-2 rounded-xl text-xs font-bold transition cursor-pointer flex items-center justify-center gap-1.5 ${
+            verificationMode === 'demo'
+              ? 'bg-emerald-500 text-white shadow-sm'
+              : 'text-zinc-400 hover:text-white'
+          }`}
+        >
+          <Sparkles className="w-3.5 h-3.5" />
+          <span>Demo tekshirish</span>
+        </button>
+        <button
+          type="button"
+          data-testid="faceid-mode-camera"
+          onClick={() => setVerificationMode('camera')}
+          className={`min-h-[40px] px-3 py-2 rounded-xl text-xs font-bold transition cursor-pointer flex items-center justify-center gap-1.5 ${
+            verificationMode === 'camera'
+              ? 'bg-[#E11D48] text-white shadow-sm'
+              : 'text-zinc-400 hover:text-white'
+          }`}
+        >
+          <Camera className="w-3.5 h-3.5" />
+          <span>Jonli kamera</span>
+        </button>
+      </div>
+
+      {verificationMode === 'demo' ? (
+        <div className="space-y-3.5" data-testid="faceid-demo-panel">
+          <div className="rounded-[24px] bg-[#171A26] border border-emerald-500/25 p-4 flex flex-col items-center text-center gap-3">
+            <div className="w-28 h-36 rounded-2xl overflow-hidden border-2 border-emerald-400/60 shadow-lg bg-[#0E1017]">
+              <img src={demoPreviewSvg} alt="Demo Face ID" className="w-full h-full object-cover" />
+            </div>
+            <div className="space-y-1">
+              <div className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-emerald-500/15 border border-emerald-500/30 text-emerald-300 text-[11px] font-bold">
+                <CheckCircle2 className="w-3.5 h-3.5" />
+                <span>Demo rejim tayyor (Kamera shart emas)</span>
+              </div>
+              <p className="text-[11px] text-zinc-400 leading-relaxed max-w-xs">
+                Boshqa bo&apos;limlarni tez test qilish uchun jinsingizni tanlang va darhol tasdiqlang.
+              </p>
+            </div>
+          </div>
+
+          <div className="space-y-1.5">
+            <p className="text-[11px] font-bold text-zinc-300">Jinsingizni tanlang:</p>
+            <div className="grid grid-cols-2 gap-2">
+              <button
+                type="button"
+                aria-pressed={demoGender === 'female'}
+                data-testid="faceid-demo-gender-female"
+                onClick={() => setDemoGender('female')}
+                className={`min-h-[44px] py-2.5 px-3 rounded-xl text-xs font-bold border transition cursor-pointer ${
+                  demoGender === 'female'
+                    ? 'bg-[#E11D48] text-white border-rose-400 shadow-md shadow-rose-950/40'
+                    : 'bg-[#171A26] text-zinc-300 border-white/10 hover:border-rose-400/50'
+                }`}
+              >
+                Ayol / Qiz
+              </button>
+              <button
+                type="button"
+                aria-pressed={demoGender === 'male'}
+                data-testid="faceid-demo-gender-male"
+                onClick={() => setDemoGender('male')}
+                className={`min-h-[44px] py-2.5 px-3 rounded-xl text-xs font-bold border transition cursor-pointer ${
+                  demoGender === 'male'
+                    ? 'bg-sky-600 text-white border-sky-400 shadow-md shadow-sky-950/40'
+                    : 'bg-[#171A26] text-zinc-300 border-white/10 hover:border-sky-400/50'
+                }`}
+              >
+                Erkak / Yigit
+              </button>
+            </div>
+          </div>
+
+          <button
+            type="button"
+            data-testid="faceid-demo-verify-btn"
+            onClick={handleDemoVerify}
+            disabled={isSaving}
+            className="w-full min-h-[48px] py-3.5 px-5 rounded-2xl bg-gradient-to-r from-emerald-600 to-teal-600 hover:brightness-110 text-white font-bold text-sm shadow-lg shadow-emerald-950/40 flex items-center justify-center gap-2 transition active:scale-[0.98] disabled:opacity-60 cursor-pointer"
+          >
+            {isSaving ? (
+              <>
+                <RefreshCw className="w-4 h-4 animate-spin" />
+                <span>Tasdiqlanmoqda...</span>
+              </>
+            ) : (
+              <>
+                <ShieldCheck className="w-4 h-4" />
+                <span>Demo Face ID bilan tasdiqlash</span>
+              </>
+            )}
+          </button>
+        </div>
+      ) : (
+        <>
 
       {/* Camera Viewport or Captured Preview */}
       <div className="relative mx-auto w-full max-w-[290px] aspect-[3/4] rounded-[28px] overflow-hidden bg-[#181013] shadow-[0_18px_45px_rgba(34,23,25,0.22)]">
@@ -738,53 +957,62 @@ export const FaceIdVerificationModal: React.FC<FaceIdVerificationModalProps> = (
           </div>
         )}
 
-        {/* Camera Error State */}
+            {/* Camera Error State */}
         {cameraError && (
           <div className="absolute inset-0 bg-[#1B1215] p-5 flex flex-col items-center justify-center text-center space-y-3 text-white">
             <div className="w-12 h-12 rounded-full bg-rose-500/20 text-rose-200 flex items-center justify-center">
               <Camera className="w-6 h-6" />
             </div>
             <p className="text-xs font-medium text-rose-100 leading-relaxed">{cameraError}</p>
-            <button
-              type="button"
-              onClick={() => setRetrySeed((s) => s + 1)}
-              className="px-4 py-2 rounded-xl bg-[#C93545] hover:bg-[#b22938] text-white text-xs font-bold transition"
-            >
-              Kamerani qayta yoqish
-            </button>
+            <div className="flex flex-wrap items-center justify-center gap-2">
+              <button
+                type="button"
+                onClick={() => setRetrySeed((s) => s + 1)}
+                className="px-4 py-2 rounded-xl bg-[#C93545] hover:bg-[#b22938] text-white text-xs font-bold transition cursor-pointer"
+              >
+                Kamerani qayta yoqish
+              </button>
+              <button
+                type="button"
+                onClick={() => setVerificationMode('demo')}
+                className="px-4 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold transition cursor-pointer"
+              >
+                Demo rejimga o&apos;tish
+              </button>
+            </div>
           </div>
         )}
       </div>
 
       {/* Gentle 2-Action Liveness Checklist */}
       {phase === 'scanning' && (
-        <div className="bg-[#FAF4F2] border border-rose-200/70 rounded-2xl p-3 space-y-2">
+        <div className="bg-[#171A26] border border-white/10 rounded-2xl p-3 space-y-2">
           <div className="flex items-center justify-between text-xs">
-            <span className={`flex items-center gap-2 font-semibold ${faceDetected ? 'text-emerald-700' : 'text-[#5D4C50]'}`}>
+            <span className={`flex items-center gap-2 font-semibold ${faceDetected ? 'text-emerald-400' : 'text-zinc-300'}`}>
               <UserCheck className="w-4 h-4 shrink-0" />
               <span>1. Yuzingizni ramka ichiga keltiring</span>
             </span>
-            <span className={`text-[11px] font-bold ${faceDetected ? 'text-emerald-600' : 'text-slate-400'}`}>
+            <span className={`text-[11px] font-bold ${faceDetected ? 'text-emerald-400' : 'text-zinc-500'}`}>
               {faceDetected ? 'Bajarildi ✓' : 'Kutilmoqda'}
             </span>
           </div>
 
           <div className="flex items-center justify-between text-xs">
-            <span className={`flex items-center gap-2 font-semibold ${blinkVerified ? 'text-emerald-700' : 'text-[#5D4C50]'}`}>
+            <span className={`flex items-center gap-2 font-semibold ${blinkVerified ? 'text-emerald-400' : 'text-zinc-300'}`}>
               <Eye className="w-4 h-4 shrink-0" />
               <span>2. Ko'zingizni bir marta ochib-yuming</span>
             </span>
-            <span className={`text-[11px] font-bold ${blinkVerified ? 'text-emerald-600' : 'text-[#C93545]'}`}>
+            <span className={`text-[11px] font-bold ${blinkVerified ? 'text-emerald-400' : 'text-rose-400'}`}>
               {blinkVerified ? 'Bajarildi ✓' : 'Kutilmoqda'}
             </span>
           </div>
 
           <div className="flex items-center justify-between text-xs">
-            <span className={`flex items-center gap-2 font-semibold ${smileVerified ? 'text-emerald-700' : 'text-[#5D4C50]'}`}>
+            <span className={`flex items-center gap-2 font-semibold ${smileVerified ? 'text-emerald-400' : 'text-zinc-300'}`}>
               <Smile className="w-4 h-4 shrink-0" />
               <span>3. Ozgina tabassum qiling</span>
             </span>
-            <span className={`text-[11px] font-bold ${smileVerified ? 'text-emerald-600' : 'text-[#C93545]'}`}>
+            <span className={`text-[11px] font-bold ${smileVerified ? 'text-emerald-400' : 'text-rose-400'}`}>
               {smileVerified ? 'Bajarildi ✓' : 'Kutilmoqda'}
             </span>
           </div>
@@ -794,19 +1022,19 @@ export const FaceIdVerificationModal: React.FC<FaceIdVerificationModalProps> = (
       {/* Green Verified State -> Manual Pose Shutter */}
       {phase === 'verified_ready' && (
         <div className="space-y-3">
-          <div className="bg-emerald-50 border border-emerald-200 rounded-2xl px-3.5 py-2.5 flex items-center justify-between text-xs">
-            <div className="flex items-center gap-2 text-emerald-900 font-bold">
-              <Sparkles className="w-4 h-4 text-emerald-600 shrink-0" />
+          <div className="bg-emerald-500/15 border border-emerald-500/30 rounded-2xl px-3.5 py-2.5 flex items-center justify-between text-xs">
+            <div className="flex items-center gap-2 text-emerald-200 font-bold">
+              <Sparkles className="w-4 h-4 text-emerald-400 shrink-0" />
               <span>Jonlilik tekshiruvi muvaffaqiyatli o'tdi!</span>
             </div>
-            <span className="font-black text-emerald-700">100% Real</span>
+            <span className="font-black text-emerald-400">100% Real</span>
           </div>
 
           <button
             type="button"
             data-testid="faceid-capture-btn"
             onClick={handleManualCapture}
-            className="w-full py-3.5 px-5 rounded-2xl bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-700 hover:to-teal-700 text-white font-bold text-sm shadow-lg shadow-emerald-600/20 flex items-center justify-center gap-2 transition active:scale-[0.98]"
+            className="w-full py-3.5 px-5 rounded-2xl bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-700 hover:to-teal-700 text-white font-bold text-sm shadow-lg shadow-emerald-600/20 flex items-center justify-center gap-2 transition active:scale-[0.98] cursor-pointer"
           >
             <Camera className="w-4 h-4" />
             <span>Rasmga olish</span>
@@ -817,21 +1045,21 @@ export const FaceIdVerificationModal: React.FC<FaceIdVerificationModalProps> = (
       {/* Captured Photo Preview -> Retake, Optional Gender Select, or Confirm */}
       {phase === 'captured_preview' && (
         <div className="space-y-3">
-          <div className="bg-[#FAF4F2] border border-rose-200/70 rounded-2xl p-3 space-y-2.5 text-xs">
+          <div className="bg-[#171A26] border border-white/10 rounded-2xl p-3 space-y-2.5 text-xs">
             <div className="flex items-center justify-between gap-2">
               <div>
-                <p className="font-bold text-[#221719]">
+                <p className="font-bold text-white">
                   {userSelectedGender
-                    ? <>Tanlangan jins: <span className="text-[#C93545]">{genderToUzLabel(userSelectedGender)}</span></>
+                    ? <>Tanlangan jins: <span className="text-rose-400">{genderToUzLabel(userSelectedGender)}</span></>
                     : "Jinsingizni tanlang"}
                 </p>
-                <p className="text-[11px] text-[#6B5B5E]">
+                <p className="text-[11px] text-zinc-400">
                   {isAnalyzingServer
                     ? "Biometrik rasm tayyorlanmoqda..."
                     : "O'zingizga mos tugmani tanlang (keyingi oynada ham tanlash mumkin)"}
                 </p>
               </div>
-              <ShieldCheck className="w-5 h-5 text-emerald-600 shrink-0" />
+              <ShieldCheck className="w-5 h-5 text-emerald-400 shrink-0" />
             </div>
 
             <div className="grid grid-cols-2 gap-2 pt-0.5">
@@ -841,8 +1069,8 @@ export const FaceIdVerificationModal: React.FC<FaceIdVerificationModalProps> = (
                 onClick={() => setUserSelectedGender('female')}
                 className={`py-2 px-3 rounded-xl text-xs font-bold border transition cursor-pointer ${
                   userSelectedGender === 'female'
-                    ? 'bg-[#C93545] text-white border-[#C93545] shadow-xs'
-                    : 'bg-white text-[#36272A] border-[#E5D9D6] hover:border-[#C93545]/50'
+                    ? 'bg-[#E11D48] text-white border-rose-400 shadow-xs'
+                    : 'bg-[#11131C] text-zinc-300 border-white/10 hover:border-rose-400/50'
                 }`}
               >
                 Ayol / Qiz
@@ -853,8 +1081,8 @@ export const FaceIdVerificationModal: React.FC<FaceIdVerificationModalProps> = (
                 onClick={() => setUserSelectedGender('male')}
                 className={`py-2 px-3 rounded-xl text-xs font-bold border transition cursor-pointer ${
                   userSelectedGender === 'male'
-                    ? 'bg-[#221719] text-white border-[#221719] shadow-xs'
-                    : 'bg-white text-[#36272A] border-[#E5D9D6] hover:border-[#221719]/50'
+                    ? 'bg-sky-600 text-white border-sky-400 shadow-xs'
+                    : 'bg-[#11131C] text-zinc-300 border-white/10 hover:border-sky-400/50'
                 }`}
               >
                 Erkak / Yigit
@@ -868,7 +1096,7 @@ export const FaceIdVerificationModal: React.FC<FaceIdVerificationModalProps> = (
               data-testid="faceid-retake-btn"
               onClick={handleRetakePhoto}
               disabled={isSaving}
-              className="py-3 px-4 rounded-2xl bg-white border border-rose-200 text-[#221719] hover:bg-rose-50 font-bold text-xs flex items-center justify-center gap-1.5 transition"
+              className="py-3 px-4 rounded-2xl bg-[#171A26] border border-white/15 text-zinc-200 hover:bg-white/10 font-bold text-xs flex items-center justify-center gap-1.5 transition cursor-pointer"
             >
               <RefreshCw className="w-3.5 h-3.5" />
               <span>Qayta olish</span>
@@ -879,7 +1107,7 @@ export const FaceIdVerificationModal: React.FC<FaceIdVerificationModalProps> = (
               data-testid="faceid-confirm-btn"
               onClick={handleConfirmAndSave}
               disabled={isSaving || isAnalyzingServer}
-              className="py-3 px-4 rounded-2xl bg-gradient-to-r from-[#C93545] to-[#A62433] hover:brightness-105 text-white font-bold text-xs shadow-md flex items-center justify-center gap-1.5 transition disabled:opacity-60"
+              className="py-3 px-4 rounded-2xl bg-gradient-to-r from-[#C93545] to-[#A62433] hover:brightness-105 text-white font-bold text-xs shadow-md flex items-center justify-center gap-1.5 transition disabled:opacity-60 cursor-pointer"
             >
               {isSaving ? (
                 <>
@@ -895,6 +1123,8 @@ export const FaceIdVerificationModal: React.FC<FaceIdVerificationModalProps> = (
             </button>
           </div>
         </div>
+      )}
+        </>
       )}
     </div>
   );

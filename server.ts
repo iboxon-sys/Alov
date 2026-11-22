@@ -112,8 +112,10 @@ import {
 } from './src/utils/telegramBotUtils';
 import {
   buildUpdatedUserSnapshot,
+  calculateAgeFromBirthDate,
   collectReplacedUserMediaUrls,
   deduplicateUsersList,
+  deriveBirthDateFromAge,
   isExplicitProfileDisplayName,
   mergeReturningAuthProfile,
   normalizeTelegramUrl,
@@ -2954,17 +2956,24 @@ Suhbatlashish qoidalaringiz:
       if (!match) {
         return res.status(400).json({ success: false, error: 'Rasm formati noto\'g\'ri' });
       }
-      const ext = match[1].includes('png') ? 'png' : 'jpg';
+      const ext = match[1].includes('svg') ? 'svg' : match[1].includes('png') ? 'png' : 'jpg';
+      const mimeType = ext === 'svg' ? 'image/svg+xml' : `image/${ext}`;
       const safeUid = String(uid || `guest_${Date.now()}`).replace(/[^a-zA-Z0-9_-]/g, '_');
       const fileName = `face_${safeUid}_${Date.now()}.${ext}`;
       const filePath = path.join(FACE_ID_DIR, fileName);
       const faceBuf = Buffer.from(match[2], 'base64');
       fs.writeFileSync(filePath, faceBuf);
-      await contentRepository.saveMediaFile(`face/${fileName}`, `image/${ext}`, faceBuf);
+      await contentRepository.saveMediaFile(`face/${fileName}`, mimeType, faceBuf);
 
       const photoUrl = `/api/face-id/photo/${fileName}`;
       const normalizedGender: 'male' | 'female' | null =
         detectedGender === 'male' ? 'male' : detectedGender === 'female' ? 'female' : null;
+      const resolvedMethod =
+        method === 'demo_test'
+          ? 'demo_test'
+          : method === 'camera_biometric_ai'
+            ? 'camera_biometric_ai'
+            : 'camera_biometric';
       const faceIdPayload = {
         verified: true,
         detectedGender: normalizedGender,
@@ -2974,13 +2983,13 @@ Suhbatlashish qoidalaringiz:
             : normalizedGender === 'male'
               ? 'Yigit (Erkak)'
               : '',
-        confidence: Math.max(72, Math.min(99, Number(confidence) || 92)),
+        confidence: Math.max(72, Math.min(99, Number(confidence) || (resolvedMethod === 'demo_test' ? 99 : 92))),
         liveness: {
           blinkVerified: Boolean(blinkVerified),
           smileVerified: Boolean(smileVerified),
           faceDetected: true,
         },
-        method: method === 'camera_biometric_ai' ? 'camera_biometric_ai' : 'camera_biometric',
+        method: resolvedMethod,
         verifiedAt: new Date().toISOString(),
         capturedPhotoUrl: photoUrl,
       };
@@ -3919,18 +3928,26 @@ Suhbatlashish qoidalaringiz:
           error: "Iltimos, jinsingizni tanlang (Erkak / Yigit yoki Ayol / Qiz)!",
         });
       }
+      const canEditDemographics = isAdminAccount && isProfileEditSync;
       const lockedGender =
-        isAlreadyCompleted && existingGender
+        !canEditDemographics && isAlreadyCompleted && existingGender
           ? existingGender
           : incomingGender || existingGender;
+      const nextAgeInput = Number(user.age);
+      const resolvedBirthDateFromAdminAge =
+        canEditDemographics && !user.birthDate && Number.isFinite(nextAgeInput) && nextAgeInput >= 18
+          ? deriveBirthDateFromAge(nextAgeInput, existing.birthDate)
+          : '';
       const lockedBirthDate =
-        isAlreadyCompleted && existing.birthDate
+        !canEditDemographics && isAlreadyCompleted && existing.birthDate
           ? existing.birthDate
-          : (user.birthDate || existing.birthDate || '2002-05-15');
+          : (user.birthDate || resolvedBirthDateFromAdminAge || existing.birthDate || '2002-05-15');
       const lockedAge =
-        isAlreadyCompleted && existing.birthDate
+        !canEditDemographics && isAlreadyCompleted && existing.birthDate
           ? computeAgeFromBirth(existing.birthDate, existing.age)
-          : Number(user.age || existing.age || computeAgeFromBirth(lockedBirthDate, 22));
+          : (canEditDemographics && Number.isFinite(nextAgeInput) && nextAgeInput >= 18
+              ? Math.min(99, Math.round(nextAgeInput))
+              : Number(user.age || computeAgeFromBirth(lockedBirthDate, existing.age || 22)));
       const rawSyncedPhone = (!protectEditedProfile && user.phone !== undefined)
         ? String(user.phone)
         : String(existing.phone !== undefined ? existing.phone : (user.phone || ''));
@@ -4073,13 +4090,33 @@ Suhbatlashish qoidalaringiz:
         for (const [k, v] of Object.entries(updates)) {
           if (v !== undefined && k !== 'role' && k !== 'isAdmin') sanitizedUpdates[k] = v;
         }
-        if (existing.isProfileCompleted === true) {
+        const targetIsAdmin = isAdminTelegramUser(existing);
+        if (existing.isProfileCompleted === true && !targetIsAdmin) {
           if (existing.gender === 'male' || existing.gender === 'female') {
             sanitizedUpdates.gender = existing.gender;
           }
           if (existing.birthDate) {
             sanitizedUpdates.birthDate = existing.birthDate;
             sanitizedUpdates.age = existing.age;
+          }
+        } else if (targetIsAdmin) {
+          const incomingGender =
+            sanitizedUpdates.gender === 'male' || sanitizedUpdates.gender === 'female'
+              ? sanitizedUpdates.gender
+              : existing.gender;
+          if (incomingGender === 'male' || incomingGender === 'female') {
+            sanitizedUpdates.gender = incomingGender;
+          }
+          const incomingAgeNum = Number(sanitizedUpdates.age);
+          const hasExplicitAge = sanitizedUpdates.age !== undefined && Number.isFinite(incomingAgeNum) && incomingAgeNum >= 18;
+          const hasExplicitBirthDate = typeof sanitizedUpdates.birthDate === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(sanitizedUpdates.birthDate);
+          if (hasExplicitBirthDate && !hasExplicitAge) {
+            sanitizedUpdates.age = calculateAgeFromBirthDate(sanitizedUpdates.birthDate, existing.age || 22);
+          } else if (hasExplicitAge && !hasExplicitBirthDate) {
+            sanitizedUpdates.age = Math.min(99, Math.round(incomingAgeNum));
+            sanitizedUpdates.birthDate = deriveBirthDateFromAge(sanitizedUpdates.age, existing.birthDate);
+          } else if (hasExplicitBirthDate && hasExplicitAge) {
+            sanitizedUpdates.age = Math.min(99, Math.round(incomingAgeNum));
           }
         }
         if (typeof sanitizedUpdates.name === 'string' && isExplicitProfileDisplayName(sanitizedUpdates.name)) {
@@ -5465,7 +5502,7 @@ Suhbatlashish qoidalaringiz:
 
   app.post('/api/admin/user-action', async (req, res) => {
     try {
-      const { adminUid, targetUid, action, coins, diamonds } = req.body;
+      const { adminUid, targetUid, action, coins, diamonds, gender, age, birthDate } = req.body;
       const adminActor = getVerifiedAdmin(adminUid);
       if (!adminActor) {
         return res.status(403).json({ success: false, error: 'Admin huquqi talab qilinadi' });
@@ -5488,6 +5525,36 @@ Suhbatlashish qoidalaringiz:
       if (action === 'set_balances') {
         if (coins !== undefined && !isNaN(Number(coins))) target.coins = Math.max(0, Math.floor(Number(coins)));
         if (diamonds !== undefined && !isNaN(Number(diamonds))) target.diamonds = roundDiamonds(Math.max(0, Number(diamonds)));
+      } else if (action === 'set_demographics') {
+        if (gender !== undefined) {
+          if (gender !== 'male' && gender !== 'female') {
+            return res.status(400).json({ success: false, error: "Jins faqat 'male' (Yigit) yoki 'female' (Qiz) bo'lishi kerak" });
+          }
+          target.gender = gender;
+          if (target.faceId && typeof target.faceId === 'object') {
+            target.faceId = {
+              ...target.faceId,
+              detectedGender: gender,
+              genderLabelUz: gender === 'female' ? 'Qiz (Ayol)' : 'Yigit (Erkak)',
+            };
+          }
+        }
+        const parsedAge = age !== undefined && age !== '' ? Math.round(Number(age)) : NaN;
+        const cleanBirthDate = typeof birthDate === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(birthDate.trim())
+          ? birthDate.trim()
+          : '';
+        if (age !== undefined && age !== '' && (!Number.isFinite(parsedAge) || parsedAge < 18 || parsedAge > 99)) {
+          return res.status(400).json({ success: false, error: "Yosh 18 dan 99 gacha bo'lishi kerak" });
+        }
+        if (Number.isFinite(parsedAge) && parsedAge >= 18) {
+          target.age = parsedAge;
+          target.birthDate = cleanBirthDate && calculateAgeFromBirthDate(cleanBirthDate, parsedAge) === parsedAge
+            ? cleanBirthDate
+            : deriveBirthDateFromAge(parsedAge, cleanBirthDate || target.birthDate);
+        } else if (cleanBirthDate) {
+          target.birthDate = cleanBirthDate;
+          target.age = calculateAgeFromBirthDate(cleanBirthDate, target.age || 22);
+        }
       } else if (action === 'unlock_pending_diamonds') {
         const pendingTotal = getPendingDiamondsTotal(target.pendingDiamondBatches);
         if (pendingTotal > 0) {
@@ -5515,11 +5582,12 @@ Suhbatlashish qoidalaringiz:
           target.isVerified = true;
         }
       } else if (action === 'delete_user') {
+        const deletedName = target.name || target.id || canonicalTargetUid;
         usersStore.delete(canonicalTargetUid);
         saveUsersToDisk();
         void contentRepository.deleteUser(canonicalTargetUid);
-        io.emit('user_deleted', { uid: canonicalTargetUid });
-        return res.json({ success: true, deletedUid: canonicalTargetUid });
+        io.emit('user_deleted', { uid: canonicalTargetUid, id: target.id });
+        return res.json({ success: true, deletedUid: canonicalTargetUid, deletedName });
       }
 
       target.updatedAt = new Date().toISOString();

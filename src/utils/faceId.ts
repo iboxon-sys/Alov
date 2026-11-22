@@ -15,7 +15,7 @@ export interface FaceIdProfileData {
     smileVerified: boolean;
     faceDetected: boolean;
   };
-  method: 'camera_biometric' | 'camera_biometric_ai';
+  method: 'camera_biometric' | 'camera_biometric_ai' | 'demo_test';
   verifiedAt: string;
   capturedPhotoUrl?: string;
 }
@@ -249,6 +249,53 @@ export function resolveEffectiveProfileAvatar(user: {
   if (facePhoto) return facePhoto;
   return rawAvatar;
 }
+
+export function buildDemoFaceIdSvgDataUrl(gender: 'male' | 'female', name?: string | null): string {
+  const isFemale = gender === 'female';
+  const bg1 = isFemale ? '#4C1D2D' : '#172554';
+  const bg2 = isFemale ? '#1E1019' : '#0F172A';
+  const accent = isFemale ? '#F43F5E' : '#38BDF8';
+  const initial = String(name || (isFemale ? 'A' : 'Y')).trim().charAt(0).toUpperCase() || (isFemale ? 'Q' : 'Y');
+  const label = isFemale ? 'QIZ · DEMO FACE ID' : 'YIGIT · DEMO FACE ID';
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="360" height="480" viewBox="0 0 360 480">
+  <defs>
+    <linearGradient id="g" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="${bg1}"/>
+      <stop offset="100%" stop-color="${bg2}"/>
+    </linearGradient>
+  </defs>
+  <rect width="360" height="480" fill="url(#g)"/>
+  <circle cx="180" cy="175" r="76" fill="${accent}" fill-opacity="0.2" stroke="${accent}" stroke-width="3"/>
+  <circle cx="180" cy="158" r="36" fill="#E2E8F0" fill-opacity="0.92"/>
+  <path d="M116 244c12-34 40-50 64-50s52 16 64 50" fill="#E2E8F0" fill-opacity="0.88"/>
+  <text x="180" y="172" text-anchor="middle" font-family="sans-serif" font-size="34" font-weight="800" fill="${bg2}">${initial}</text>
+  <rect x="64" y="346" width="232" height="44" rx="22" fill="#10B981" fill-opacity="0.2" stroke="#10B981" stroke-width="1.5"/>
+  <text x="180" y="373" text-anchor="middle" font-family="sans-serif" font-size="13" font-weight="700" fill="#D1FAE5">${label}</text>
+</svg>`;
+  return `data:image/svg+xml;base64,${typeof btoa === 'function' ? btoa(unescape(encodeURIComponent(svg))) : Buffer.from(svg, 'utf-8').toString('base64')}`;
+}
+
+export function buildDemoFaceIdProfile(params: {
+  gender: 'male' | 'female';
+  photoUrl: string;
+  verifiedAt?: string;
+}): FaceIdProfileData {
+  return {
+    verified: true,
+    detectedGender: params.gender,
+    genderLabelUz: genderToUzLabel(params.gender),
+    confidence: 99,
+    liveness: {
+      blinkVerified: true,
+      smileVerified: true,
+      faceDetected: true,
+    },
+    method: 'demo_test',
+    verifiedAt: params.verifiedAt || new Date().toISOString(),
+    capturedPhotoUrl: params.photoUrl,
+  };
+}
+
 
 export function formatFaceIdDateUz(isoDate?: string | null): string {
   if (!isoDate) return 'Tasdiqlangan';

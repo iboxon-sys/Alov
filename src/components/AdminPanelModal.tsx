@@ -25,6 +25,7 @@ import {
   FileText,
   Heart,
   MessageCircle,
+  SlidersHorizontal,
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
@@ -36,6 +37,7 @@ import {
 } from '../utils/tokenomics';
 import { AdminBadge } from './AdminBadge';
 import { resolveEffectiveProfileAvatar } from '../utils/faceId';
+import { calculateAgeFromBirthDate, deriveBirthDateFromAge } from '../utils/profileSync';
 import { resolveApiMediaUrl } from '../config/api';
 import type { CoinPurchaseRequest } from '../utils/coinRequests';
 import {
@@ -55,6 +57,7 @@ interface AdminPanelModalProps {
   socket?: any;
   onClose: () => void;
   onUserUpdated?: (user: any) => void;
+  onUserDeleted?: (uid: string) => void;
   onPostDeleted?: (postId: string) => void;
   onPostUpdated?: (post: PostItem) => void;
   onOpenUserProfile?: (uid: string, snapshot?: any) => void;
@@ -73,6 +76,7 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
   socket,
   onClose,
   onUserUpdated,
+  onUserDeleted,
   onPostDeleted,
   onPostUpdated,
   onOpenUserProfile,
@@ -96,8 +100,16 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
   const [transactions, setTransactions] = useState<any[]>([]);
   const [busyId, setBusyId] = useState<string | null>(null);
   const [confirmPurgeNonAdmins, setConfirmPurgeNonAdmins] = useState(false);
+  const [purgeConfirmPhrase, setPurgeConfirmPhrase] = useState('');
+  const [confirmDeleteUid, setConfirmDeleteUid] = useState<string | null>(null);
   const [editingBalanceUid, setEditingBalanceUid] = useState<string | null>(null);
   const [balanceForm, setBalanceForm] = useState<{ coins: string; diamonds: string }>({ coins: '0', diamonds: '0' });
+  const [editingDemographicsUid, setEditingDemographicsUid] = useState<string | null>(null);
+  const [demographicsForm, setDemographicsForm] = useState<{
+    gender: 'female' | 'male';
+    age: string;
+    birthDate: string;
+  }>({ gender: 'female', age: '22', birthDate: '2004-05-15' });
 
   // Admin Bot Broadcast & Mandatory Channel Subscription states
   const [broadcastText, setBroadcastText] = useState('');
@@ -204,6 +216,7 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
   const handleUserAction = async (targetUid: string, action: string, extra: Record<string, any> = {}) => {
     setBusyId(targetUid);
     setError('');
+    setNotice('');
     try {
       const res = await fetch(`${apiBaseUrl}/api/admin/user-action`, {
         method: 'POST',
@@ -214,6 +227,15 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
       if (!data.success) {
         setError(data.error || 'Amalni bajarishda xatolik');
       } else {
+        if (action === 'delete_user') {
+          const deletedId = data.deletedUid || targetUid;
+          setUsers((prev) => prev.filter((item) => item.uid !== deletedId));
+          setConfirmDeleteUid(null);
+          setNotice(`"${data.deletedName || deletedId}" bazadan chiqarildi (faqat shu foydalanuvchi o'chirildi).`);
+          onUserDeleted?.(deletedId);
+        } else if (action === 'set_demographics') {
+          setNotice("Foydalanuvchining jinsi va yoshi yangilandi.");
+        }
         if (data.user && onUserUpdated) {
           onUserUpdated(data.user);
         }
@@ -386,6 +408,7 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
       } else {
         setNotice(`Admindan boshqa barcha (${data.removedUsersCount || 0} ta) profil bazadan chiqarildi.`);
         setConfirmPurgeNonAdmins(false);
+        setPurgeConfirmPhrase('');
         await fetchOverview();
       }
     } catch (e: any) {
@@ -1356,49 +1379,15 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
                 transition={{ duration: 0.18 }}
                 className="space-y-3"
               >
-                <div className="flex flex-col sm:flex-row gap-2">
-                  <div className="relative flex-1">
-                    <Search className="w-4 h-4 text-zinc-400 absolute left-3.5 top-1/2 -translate-y-1/2" />
-                    <input
-                      type="text"
-                      value={searchQuery}
-                      onChange={(e) => setSearchQuery(e.target.value)}
-                      placeholder="Ism, @username, ID yoki telefon bo'yicha qidirish..."
-                      className="w-full pl-10 pr-4 py-3 rounded-2xl bg-[#12141E] border border-white/10 text-xs font-medium text-white placeholder:text-zinc-500 outline-none focus:border-rose-500"
-                    />
-                  </div>
-                  {actorCanManageAdmins && users.some((u) => u.uid !== adminUid && !isAdminTelegramUser(u)) && (
-                    confirmPurgeNonAdmins ? (
-                      <div className="flex items-center gap-1.5 shrink-0">
-                        <button
-                          type="button"
-                          disabled={busyId === 'purge_non_admins'}
-                          onClick={handlePurgeNonAdmins}
-                          data-testid="admin-confirm-purge-btn"
-                          className="px-3.5 py-2.5 rounded-2xl bg-rose-600 hover:bg-rose-500 text-white text-xs font-bold transition cursor-pointer disabled:opacity-50"
-                        >
-                          {busyId === 'purge_non_admins' ? 'Tozalanmoqda...' : 'Ha, bazadan chiqarish'}
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => setConfirmPurgeNonAdmins(false)}
-                          className="px-3 py-2.5 rounded-2xl bg-white/10 hover:bg-white/15 text-zinc-300 text-xs font-semibold transition cursor-pointer"
-                        >
-                          Bekor
-                        </button>
-                      </div>
-                    ) : (
-                      <button
-                        type="button"
-                        onClick={() => setConfirmPurgeNonAdmins(true)}
-                        data-testid="admin-purge-non-admins-btn"
-                        className="px-4 py-2.5 rounded-2xl bg-rose-500/15 hover:bg-rose-500/25 border border-rose-500/30 text-rose-300 text-xs font-bold transition flex items-center justify-center gap-1.5 shrink-0 cursor-pointer"
-                      >
-                        <Trash2 className="w-3.5 h-3.5" />
-                        <span>Admindan boshqalarni chiqarish</span>
-                      </button>
-                    )
-                  )}
+                <div className="relative">
+                  <Search className="w-4 h-4 text-zinc-400 absolute left-3.5 top-1/2 -translate-y-1/2" />
+                  <input
+                    type="text"
+                    value={searchQuery}
+                    onChange={(e) => setSearchQuery(e.target.value)}
+                    placeholder="Ism, @username, ID yoki telefon bo'yicha qidirish..."
+                    className="w-full pl-10 pr-4 py-3 rounded-2xl bg-[#12141E] border border-white/10 text-xs font-medium text-white placeholder:text-zinc-500 outline-none focus:border-rose-500"
+                  />
                 </div>
 
                 {!actorCanManageAdmins && (
@@ -1422,11 +1411,16 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
                     {filteredUsers.map((u) => {
                       const pending24h = getPendingDiamondsTotal(u.pendingDiamondBatches);
                       const isEditingThis = editingBalanceUid === u.uid;
+                      const isEditingDemographicsThis = editingDemographicsUid === u.uid;
+                      const isConfirmingDeleteThis = confirmDeleteUid === u.uid;
+                      const canEditThisDemographics = !isPrimaryAdminUser(u) || isPrimaryAdminUser(currentUser);
+                      const displayAge = calculateAgeFromBirthDate(u.birthDate, Number(u.age || 22));
                       const userAvatar = resolveApiMediaUrl(resolveEffectiveProfileAvatar(u));
 
                       return (
                         <div
                           key={u.uid}
+                          data-testid={`admin-user-card-${u.uid}`}
                           className="bg-[#12141E] rounded-2xl p-4 border border-white/10 space-y-3 flex flex-col justify-between"
                         >
                           <div className="flex items-start justify-between gap-3">
@@ -1469,7 +1463,7 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
                                   )}
                                 </div>
                                 <p className="text-[11px] text-zinc-400 truncate mt-0.5">
-                                  {u.id} · {u.gender === 'male' ? 'Yigit' : 'Qiz'} · {u.telegram || u.phone || u.email || u.uid}
+                                  {u.id} · {u.gender === 'male' ? 'Yigit' : 'Qiz'} · {displayAge} yosh · {u.telegram || u.phone || u.email || u.uid}
                                 </p>
                               </div>
                             </div>
@@ -1526,11 +1520,105 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
                             </div>
                           )}
 
+                          {isEditingDemographicsThis && (
+                            <div
+                              data-testid={`admin-demographics-editor-${u.uid}`}
+                              className="bg-[#0B0C12] p-3 rounded-xl border border-rose-500/25 space-y-2.5"
+                            >
+                              <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+                                <div>
+                                  <label className="text-[10px] font-semibold text-zinc-400 block mb-1">Jins</label>
+                                  <select
+                                    data-testid={`admin-demographics-gender-${u.uid}`}
+                                    value={demographicsForm.gender}
+                                    onChange={(e) =>
+                                      setDemographicsForm((p) => ({
+                                        ...p,
+                                        gender: e.target.value === 'male' ? 'male' : 'female',
+                                      }))
+                                    }
+                                    className="w-full px-2.5 py-1.5 rounded-lg border border-white/15 text-xs font-bold bg-[#131520] text-white outline-none focus:border-rose-400"
+                                  >
+                                    <option value="female" className="bg-[#11131C]">Ayol / Qiz</option>
+                                    <option value="male" className="bg-[#11131C]">Erkak / Yigit</option>
+                                  </select>
+                                </div>
+                                <div>
+                                  <label className="text-[10px] font-semibold text-zinc-400 block mb-1">Yosh (18-99)</label>
+                                  <input
+                                    type="number"
+                                    min={18}
+                                    max={99}
+                                    data-testid={`admin-demographics-age-${u.uid}`}
+                                    value={demographicsForm.age}
+                                    onChange={(e) => {
+                                      const raw = e.target.value;
+                                      const n = Math.round(Number(raw));
+                                      setDemographicsForm((p) => ({
+                                        ...p,
+                                        age: raw,
+                                        birthDate:
+                                          Number.isFinite(n) && n >= 18 && n <= 99
+                                            ? deriveBirthDateFromAge(n, p.birthDate)
+                                            : p.birthDate,
+                                      }));
+                                    }}
+                                    className="w-full px-2.5 py-1.5 rounded-lg border border-white/15 text-xs font-mono font-bold bg-[#131520] text-white outline-none focus:border-rose-400"
+                                  />
+                                </div>
+                                <div>
+                                  <label className="text-[10px] font-semibold text-zinc-400 block mb-1">Tug&apos;ilgan sana</label>
+                                  <input
+                                    type="date"
+                                    data-testid={`admin-demographics-birthdate-${u.uid}`}
+                                    value={demographicsForm.birthDate}
+                                    onChange={(e) => {
+                                      const nextBd = e.target.value;
+                                      const computedAge = calculateAgeFromBirthDate(nextBd, Number(demographicsForm.age || 22));
+                                      setDemographicsForm((p) => ({
+                                        ...p,
+                                        birthDate: nextBd,
+                                        age: String(computedAge),
+                                      }));
+                                    }}
+                                    className="w-full px-2.5 py-1.5 rounded-lg border border-white/15 text-xs font-semibold bg-[#131520] text-white outline-none focus:border-rose-400"
+                                  />
+                                </div>
+                              </div>
+                              <div className="flex items-center justify-end gap-2">
+                                <button
+                                  type="button"
+                                  onClick={() => setEditingDemographicsUid(null)}
+                                  className="px-3 py-1.5 rounded-lg bg-white/10 text-zinc-300 text-[11px] font-bold cursor-pointer"
+                                >
+                                  Bekor
+                                </button>
+                                <button
+                                  type="button"
+                                  disabled={busyId === u.uid}
+                                  data-testid={`admin-save-demographics-btn-${u.uid}`}
+                                  onClick={async () => {
+                                    await handleUserAction(u.uid, 'set_demographics', {
+                                      gender: demographicsForm.gender,
+                                      age: Number(demographicsForm.age),
+                                      birthDate: demographicsForm.birthDate,
+                                    });
+                                    setEditingDemographicsUid(null);
+                                  }}
+                                  className="px-3.5 py-1.5 rounded-lg bg-[#E11D48] hover:bg-[#BE123C] text-white text-[11px] font-bold cursor-pointer"
+                                >
+                                  Saqlash
+                                </button>
+                              </div>
+                            </div>
+                          )}
+
                           <div className="flex flex-wrap gap-1.5 pt-2 border-t border-white/[0.06]">
                             <button
                               type="button"
                               disabled={busyId === u.uid}
                               onClick={() => {
+                                setEditingDemographicsUid(null);
                                 setEditingBalanceUid(isEditingThis ? null : u.uid);
                                 setBalanceForm({
                                   coins: String(u.coins ?? 0),
@@ -1542,6 +1630,30 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
                               <Coins className="w-3 h-3" />
                               <span>Balans</span>
                             </button>
+
+                            {canEditThisDemographics && (
+                              <button
+                                type="button"
+                                disabled={busyId === u.uid}
+                                data-testid={`admin-edit-demographics-btn-${u.uid}`}
+                                onClick={() => {
+                                  setEditingBalanceUid(null);
+                                  const nextAge = calculateAgeFromBirthDate(u.birthDate, Number(u.age || 22));
+                                  const nextBirthDate =
+                                    u.birthDate || deriveBirthDateFromAge(nextAge);
+                                  setEditingDemographicsUid(isEditingDemographicsThis ? null : u.uid);
+                                  setDemographicsForm({
+                                    gender: u.gender === 'male' ? 'male' : 'female',
+                                    age: String(nextAge),
+                                    birthDate: nextBirthDate,
+                                  });
+                                }}
+                                className="px-2.5 py-1 rounded-lg bg-sky-500/15 hover:bg-sky-500/25 text-sky-300 border border-sky-500/25 text-[11px] font-semibold flex items-center gap-1 cursor-pointer"
+                              >
+                                <SlidersHorizontal className="w-3 h-3" />
+                                <span>Jins / Yosh</span>
+                              </button>
+                            )}
 
                             {pending24h > 0 && (
                               <button
@@ -1592,16 +1704,38 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
                                   </button>
                                 )}
                                 {!isPrimaryAdminUser(u) && (!isAdminTelegramUser(u) || actorCanManageAdmins) && (
-                                  <button
-                                    type="button"
-                                    disabled={busyId === u.uid}
-                                    data-testid={`admin-delete-user-btn-${u.uid}`}
-                                    onClick={() => handleUserAction(u.uid, 'delete_user')}
-                                    className="px-2.5 py-1 rounded-lg bg-rose-500/15 hover:bg-rose-500/25 text-rose-300 border border-rose-500/25 text-[11px] font-semibold flex items-center gap-1 cursor-pointer"
-                                  >
-                                    <Trash2 className="w-3 h-3" />
-                                    <span>O'chirish</span>
-                                  </button>
+                                  isConfirmingDeleteThis ? (
+                                    <div className="flex items-center gap-1">
+                                      <button
+                                        type="button"
+                                        disabled={busyId === u.uid}
+                                        data-testid={`admin-confirm-delete-user-btn-${u.uid}`}
+                                        onClick={() => handleUserAction(u.uid, 'delete_user')}
+                                        className="px-2.5 py-1 rounded-lg bg-rose-600 hover:bg-rose-500 text-white text-[11px] font-bold flex items-center gap-1 cursor-pointer"
+                                      >
+                                        <Trash2 className="w-3 h-3" />
+                                        <span>Ha, {u.name?.split(' ')[0] || 'chiqarish'}ni chiqarish</span>
+                                      </button>
+                                      <button
+                                        type="button"
+                                        onClick={() => setConfirmDeleteUid(null)}
+                                        className="px-2 py-1 rounded-lg bg-white/10 hover:bg-white/15 text-zinc-300 text-[11px] font-semibold cursor-pointer"
+                                      >
+                                        Bekor
+                                      </button>
+                                    </div>
+                                  ) : (
+                                    <button
+                                      type="button"
+                                      disabled={busyId === u.uid}
+                                      data-testid={`admin-delete-user-btn-${u.uid}`}
+                                      onClick={() => setConfirmDeleteUid(u.uid)}
+                                      className="px-2.5 py-1 rounded-lg bg-rose-500/15 hover:bg-rose-500/25 text-rose-300 border border-rose-500/25 text-[11px] font-semibold flex items-center gap-1 cursor-pointer"
+                                    >
+                                      <Trash2 className="w-3 h-3" />
+                                      <span>Chiqarish</span>
+                                    </button>
+                                  )
                                 )}
                               </>
                             )}
@@ -1609,6 +1743,69 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
                         </div>
                       );
                     })}
+                  </div>
+                )}
+
+                {/* Isolated Danger Zone: Global Non-Admin Wipe (never near search bar) */}
+                {actorCanManageAdmins && users.some((u) => u.uid !== adminUid && !isAdminTelegramUser(u)) && (
+                  <div className="mt-4 bg-rose-950/20 border border-rose-500/20 rounded-2xl p-4 space-y-2.5">
+                    <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                      <div>
+                        <p className="text-xs font-bold text-rose-300 flex items-center gap-1.5">
+                          <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
+                          <span>Xavfli hudud: Barcha oddiy foydalanuvchilarni ommaviy tozalash</span>
+                        </p>
+                        <p className="text-[11px] text-zinc-400 mt-0.5">
+                          Faqat barcha foydalanuvchilarni birdaniga o&apos;chirish kerak bo&apos;lganda ishlating. Bitta odamni chiqarish uchun yuqoridagi profil kartasidan &quot;Chiqarish&quot; tugmasini bosing.
+                        </p>
+                      </div>
+                      {!confirmPurgeNonAdmins && (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setConfirmPurgeNonAdmins(true);
+                            setPurgeConfirmPhrase('');
+                          }}
+                          data-testid="admin-purge-non-admins-btn"
+                          className="px-3.5 py-2 rounded-xl bg-rose-500/15 hover:bg-rose-500/25 border border-rose-500/30 text-rose-300 text-[11px] font-bold transition shrink-0 cursor-pointer"
+                        >
+                          Barchasini tozalash...
+                        </button>
+                      )}
+                    </div>
+
+                    {confirmPurgeNonAdmins && (
+                      <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2 pt-1">
+                        <input
+                          type="text"
+                          value={purgeConfirmPhrase}
+                          onChange={(e) => setPurgeConfirmPhrase(e.target.value)}
+                          placeholder="Tasdiqlash uchun HAMMASINI TOZALASH deb yozing..."
+                          className="flex-1 px-3 py-2 rounded-xl bg-[#0B0C12] border border-rose-500/30 text-xs font-mono text-white placeholder:text-zinc-500 outline-none focus:border-rose-400"
+                        />
+                        <div className="flex items-center gap-1.5 shrink-0">
+                          <button
+                            type="button"
+                            disabled={busyId === 'purge_non_admins' || purgeConfirmPhrase.trim().toUpperCase() !== 'HAMMASINI TOZALASH'}
+                            onClick={handlePurgeNonAdmins}
+                            data-testid="admin-confirm-purge-btn"
+                            className="px-3.5 py-2 rounded-xl bg-rose-600 hover:bg-rose-500 text-white text-xs font-bold transition cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
+                          >
+                            {busyId === 'purge_non_admins' ? 'Tozalanmoqda...' : 'Tasdiqlab tozalash'}
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setConfirmPurgeNonAdmins(false);
+                              setPurgeConfirmPhrase('');
+                            }}
+                            className="px-3 py-2 rounded-xl bg-white/10 hover:bg-white/15 text-zinc-300 text-xs font-semibold transition cursor-pointer"
+                          >
+                            Bekor
+                          </button>
+                        </div>
+                      </div>
+                    )}
                   </div>
                 )}
               </motion.div>

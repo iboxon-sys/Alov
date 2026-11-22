@@ -113,6 +113,14 @@ describe('tokenomics, wallet, 24h 120-diamond cap, 12h unlock & call billing hel
     assert.equal(canActorExecuteAdminAction(delegatedAdmin, regularUser, 'toggle_admin').allowed, false);
     assert.equal(canActorExecuteAdminAction(delegatedAdmin, headAdmin, 'toggle_ban').allowed, false);
     assert.equal(canActorExecuteAdminAction(delegatedAdmin, headAdmin, 'delete_user').allowed, false);
+
+    // Gender & age editing (set_demographics): primary admin can edit anyone (including self),
+    // delegated admin can edit regular users and self, but not Bosh Admin
+    assert.equal(canActorExecuteAdminAction(headAdmin, headAdmin, 'set_demographics').allowed, true);
+    assert.equal(canActorExecuteAdminAction(headAdmin, regularUser, 'set_demographics').allowed, true);
+    assert.equal(canActorExecuteAdminAction(delegatedAdmin, regularUser, 'set_demographics').allowed, true);
+    assert.equal(canActorExecuteAdminAction(delegatedAdmin, headAdmin, 'set_demographics').allowed, false);
+    assert.equal(canActorExecuteAdminAction(regularUser, regularUser, 'set_demographics').allowed, false);
   });
 
   it('skips coin deduction when friendship mode is active, AI bot, or admin', () => {

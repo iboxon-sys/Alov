@@ -1,0 +1,151 @@
+.cs-root {
+  position: relative;
+  display: inline-flex;
+  flex-direction: column;
+  align-items: center;
+  max-width: 100%;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.cs-row {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--cs-gap, 8px);
+}
+
+.cs-root[data-disabled='true'] {
+  opacity: 0.45;
+  pointer-events: none;
+}
+
+.cs-slots {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--cs-gap, 8px);
+}
+
+.cs-slot {
+  position: relative;
+  width: var(--cs-size, 44px);
+  height: calc(var(--cs-size, 44px) * 1.18);
+  border-radius: var(--cs-radius, 12px);
+  overflow: hidden;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  isolation: isolate;
+  transition: box-shadow 160ms ease, transform 160ms ease;
+}
+
+.cs-slot-bg {
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  background: var(--cs-slot, #27272a);
+  border: 1px solid color-mix(in srgb, var(--cs-ink, #f5f5f5) 14%, transparent);
+  transition: background-color 180ms ease, border-color 180ms ease;
+}
+
+.cs-slot[data-active='true'] .cs-slot-bg {
+  background: color-mix(in srgb, var(--cs-ink, #f5f5f5) 10%, var(--cs-slot, #27272a));
+  border-color: var(--cs-accent, #f5f5f5);
+}
+
+.cs-slot[data-active='true'] {
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--cs-accent, #f5f5f5) 36%, transparent);
+}
+
+.cs-slot[data-error='true'] .cs-slot-bg {
+  border-color: var(--cs-danger, #ff3b30);
+}
+
+.cs-slot[data-error='true'] {
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--cs-danger, #ff3b30) 35%, transparent);
+}
+
+.cs-slot-fill {
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  background: var(--cs-accent, #f5f5f5);
+  transform-origin: 50% 100%;
+  pointer-events: none;
+}
+
+.cs-slot[data-error='true'] .cs-slot-fill {
+  background: var(--cs-danger, #ff3b30);
+}
+
+.cs-digit {
+  position: relative;
+  z-index: 2;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: calc(var(--cs-size, 44px) * 0.48);
+  font-weight: 800;
+  line-height: 1;
+  color: var(--cs-digit, #18181b);
+  font-variant-numeric: tabular-nums;
+  pointer-events: none;
+}
+
+.cs-dot {
+  width: calc(var(--cs-size, 44px) * 0.24);
+  height: calc(var(--cs-size, 44px) * 0.24);
+  border-radius: 9999px;
+  background: currentColor;
+  display: block;
+}
+
+.cs-caret {
+  position: relative;
+  z-index: 2;
+  width: 2px;
+  height: calc(var(--cs-size, 44px) * 0.46);
+  border-radius: 2px;
+  background: var(--cs-ink, #f5f5f5);
+  pointer-events: none;
+}
+
+.cs-wash {
+  position: absolute;
+  inset: 0;
+  z-index: 3;
+  border-radius: var(--cs-radius, 12px);
+  background: var(--cs-accent, #f5f5f5);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--cs-digit, #18181b);
+  pointer-events: none;
+}
+
+.cs-tick {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.cs-input {
+  position: absolute;
+  inset: 0;
+  z-index: 4;
+  width: 100%;
+  height: 100%;
+  opacity: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: transparent;
+  caret-color: transparent;
+  font-size: 16px;
+  cursor: text;
+}
+
+.cs-input:disabled {
+  cursor: default;
+}

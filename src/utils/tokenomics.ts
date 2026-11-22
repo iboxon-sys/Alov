@@ -92,6 +92,7 @@ export function calculateCallMinuteBilling(callType: 'audio' | 'video'): {
 
 export type AdminActionName =
   | 'set_balances'
+  | 'set_demographics'
   | 'unlock_pending_diamonds'
   | 'toggle_verify'
   | 'toggle_ban'
@@ -198,6 +199,13 @@ export function canActorExecuteAdminAction(
         reason: "Tayinlangan admin boshqa adminni bloklashi yoki o'chirishi mumkin emas",
       };
     }
+  }
+
+  if (action === 'set_demographics' && isPrimaryAdminUser(targetUser) && !isPrimaryAdminUser(actorUser)) {
+    return {
+      allowed: false,
+      reason: "Tayinlangan admin Bosh Admin profilini o'zgartira olmaydi",
+    };
   }
 
   return { allowed: true };

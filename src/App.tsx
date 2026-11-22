@@ -88,12 +88,15 @@ import { validateUsername, isUsernameUnique, formatUsernameDisplay } from './uti
 import { formatPhoneNumberPretty } from './utils/phone';
 import { shouldEnableCaptureProtection, isCaptureShortcutEvent } from './utils/captureProtection';
 import {
+  calculateAgeFromBirthDate,
+  deriveBirthDateFromAge,
   mergeAuthoritativeUserState,
   normalizeTelegramUrl,
   reconcileAppVersionCache,
   upsertUniqueUserInList,
   writeAuthoritativeUserCache,
 } from './utils/profileSync';
+import { CodeSlots, type CodeSlotsStatus } from './components/CodeSlots';
 import { parseGiphyGifItems, type GiphyGifItem } from './utils/giphy';
 import {
   DEFAULT_MANDATORY_SUBSCRIPTION_CONFIG,
@@ -366,6 +369,7 @@ export default function App() {
   const [telegramStep, setTelegramStep] = useState<'input_phone' | 'input_code' | 'face_id' | 'profile_setup'>('input_phone');
   const [generatedTgCode, setGeneratedTgCode] = useState('');
   const [enteredTgCode, setEnteredTgCode] = useState('');
+  const [tgOtpStatus, setTgOtpStatus] = useState<CodeSlotsStatus>('idle');
   const [pendingTgUser, setPendingTgUser] = useState<any | null>(null);
   const [pendingFaceId, setPendingFaceId] = useState<FaceIdProfileData | null>(null);
   const [showProfileFaceIdModal, setShowProfileFaceIdModal] = useState<boolean>(false);
@@ -670,8 +674,9 @@ export default function App() {
 
     socket.on('user_deleted', ({ uid }: { uid: string }) => {
       if (!uid) return;
-      setUsersList(prev => prev.filter(u => u.uid !== uid && u.id !== uid));
-      setSelectedProfile((prev: any) => (prev && (prev.uid === uid || prev.id === uid) ? null : prev));
+      setUsersList(prev => prev.filter(u => u.uid !== uid));
+      setSelectedProfile((prev: any) => (prev && prev.uid === uid ? null : prev));
+      setSelectedChatUser((prev: any) => (prev && prev.uid === uid ? null : prev));
     });
 
     socket.on('stream_started', (streamData: any) => {
@@ -2422,12 +2427,19 @@ export default function App() {
           (hasCustomAvatar || !resolvedSavedAvatar)
       );
 
-      const isPrimaryLocked = Boolean(currentUser?.isProfileCompleted === true);
+      const isCurrentUserAdmin = isAdminTelegramUser(currentUser);
+      const isPrimaryLocked = Boolean(currentUser?.isProfileCompleted === true) && !isCurrentUserAdmin;
       const lockedGender = isPrimaryLocked && (currentUser?.gender === 'male' || currentUser?.gender === 'female')
         ? currentUser.gender
         : regGender;
-      const lockedBirthDate = isPrimaryLocked && currentUser?.birthDate ? currentUser.birthDate : regBirthDate;
-      const computedAge = calculateAge(lockedBirthDate, Number(currentUser?.age || regAge));
+      const parsedExplicitAge = Math.round(Number(regAge));
+      const hasValidExplicitAge = Number.isFinite(parsedExplicitAge) && parsedExplicitAge >= 18 && parsedExplicitAge <= 99;
+      const lockedBirthDate = isPrimaryLocked && currentUser?.birthDate
+        ? currentUser.birthDate
+        : (regBirthDate || (hasValidExplicitAge ? deriveBirthDateFromAge(parsedExplicitAge) : '2002-05-15'));
+      const computedAge = isPrimaryLocked
+        ? calculateAge(lockedBirthDate, Number(currentUser?.age || regAge))
+        : (hasValidExplicitAge ? parsedExplicitAge : calculateAgeFromBirthDate(lockedBirthDate, Number(currentUser?.age || 22)));
       const trimmedPhone = regPhone.trim();
       const formattedPhone = trimmedPhone && trimmedPhone !== '+' && trimmedPhone !== '+998' ? formatPhoneNumberPretty(trimmedPhone) : '';
       const trimmedTelegram = regTelegram.trim();
@@ -2598,6 +2610,7 @@ export default function App() {
     setShowAuthPassword(false);
     setTelegramInput(clean.telegramInput);
     setEnteredTgCode(clean.enteredTgCode);
+    setTgOtpStatus('idle');
     setGeneratedTgCode(clean.generatedTgCode);
     setPendingTgUser(null);
     setPendingGoogleUser(null);
@@ -3106,10 +3119,11 @@ export default function App() {
     }
   };
 
-  const handleVerifyTelegramCode = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!enteredTgCode.trim()) {
+  const verifyTelegramCode = async (overrideCode?: string) => {
+    const codeToVerify = String(overrideCode !== undefined ? overrideCode : enteredTgCode).trim();
+    if (!codeToVerify) {
       setErrorMsg("Iltimos, kodni kiriting!");
+      setTgOtpStatus('error');
       return;
     }
     try {
@@ -3118,9 +3132,10 @@ export default function App() {
       const data = await safeFetchJson(getApiUrl('/api/auth/verify-telegram-code'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ phoneNumber: telegramInput.trim(), code: enteredTgCode.trim() })
+        body: JSON.stringify({ phoneNumber: telegramInput.trim(), code: codeToVerify })
       });
       if (data && data.success && data.user) {
+        setTgOtpStatus('success');
         // Remember chatId for this user so they NEVER have to press start again
         try {
           const cleanKey = telegramInput.trim().replace(/^(https?:\/\/t\.me\/|@)/i, '').toLowerCase();
@@ -3135,6 +3150,9 @@ export default function App() {
           exists: !data.isNewUser && Boolean(data.user),
           user: data.user,
         });
+
+        await new Promise((resolve) => window.setTimeout(resolve, 360));
+        setTgOtpStatus('idle');
 
         if (nextStep === 'face_id') {
           setPendingTgUser(data.user);
@@ -3172,7 +3190,7 @@ export default function App() {
           setRegNeighborhood(data.user.neighborhood || '');
           setRegBio(data.user.isProfileCompleted ? (data.user.bio || '') : '');
 
-          // Enter real Face ID verification immediately after Telegram verification
+          // Enter Face ID verification immediately after Telegram verification
           setTelegramStep('face_id');
         } else {
           // Admin (@Salikh_07) or already Face-ID-verified completed user logs straight in
@@ -3190,13 +3208,20 @@ export default function App() {
           setActiveTab('discover');
         }
       } else {
+        setTgOtpStatus('error');
         setErrorMsg(data?.error || "Kiritilgan tasdiqlash kodi noto'g'ri!");
       }
     } catch (err: any) {
+      setTgOtpStatus('error');
       setErrorMsg(err.message || "Tasdiqlashda xatolik.");
     } finally {
       setIsLoggingIn(false);
     }
+  };
+
+  const handleVerifyTelegramCode = async (e: React.FormEvent) => {
+    e.preventDefault();
+    await verifyTelegramCode();
   };
 
   const handleFaceIdVerified = async (result: FaceIdVerificationResult, origin: 'telegram' | 'google' | 'register') => {
@@ -5825,25 +5850,48 @@ export default function App() {
                   </div>
                 )}
 
-                <form onSubmit={handleVerifyTelegramCode} className="space-y-3 text-left">
-                  <div>
-                    <label className="block text-[11px] font-bold text-zinc-300 mb-1">6 xonali tasdiqlash kodi</label>
-                    <input 
-                      type="text" 
-                      name="alov_tg_otp_code"
-                      autoComplete="one-time-code"
-                      maxLength={6}
-                      value={enteredTgCode}
-                      onChange={(e) => setEnteredTgCode(e.target.value)}
-                      required
-                      className="w-full px-4 py-3 rounded-xl bg-[#171A26] border border-white/10 text-center text-xl font-mono font-bold tracking-widest text-white placeholder:text-zinc-600 focus:border-rose-500 outline-none"
-                      placeholder="123456"
-                    />
+                <form onSubmit={handleVerifyTelegramCode} className="space-y-4 text-left">
+                  <div className="space-y-2.5">
+                    <label className="block text-[11px] font-bold text-zinc-300 text-center">
+                      6 xonali tasdiqlash kodi
+                    </label>
+                    <div className="flex justify-center py-1" data-testid="tg-otp-codeslots-wrap">
+                      <CodeSlots
+                        length={6}
+                        value={enteredTgCode}
+                        status={tgOtpStatus}
+                        name="alov_tg_otp_code"
+                        dataTestId="tg-otp-codeslots-input"
+                        autoFocus
+                        onChange={(code) => {
+                          if (tgOtpStatus === 'error') {
+                            setTgOtpStatus('idle');
+                          }
+                          setEnteredTgCode(code);
+                        }}
+                        onComplete={(code) => {
+                          void verifyTelegramCode(code);
+                        }}
+                        accentColor="#E11D48"
+                        inkColor="#fb7185"
+                        slotColor="#171A26"
+                        digitColor="#ffffff"
+                        dangerColor="#ff3b30"
+                        slotSize={42}
+                        gap={8}
+                        radius={12}
+                        bounce={0.2}
+                        settle={0.3}
+                        rise={8}
+                        cascade={20}
+                        ariaLabel="Telegram 6 xonali tasdiqlash kodi"
+                      />
+                    </div>
                   </div>
 
                   <button 
                     type="submit"
-                    disabled={isLoggingIn}
+                    disabled={isLoggingIn || enteredTgCode.length < 6}
                     className="w-full py-3.5 px-4 rounded-2xl bg-gradient-to-r from-[#E11D48] to-rose-600 text-white font-bold text-sm shadow-[0_12px_28px_rgba(225,29,72,0.35)] hover:brightness-110 transition disabled:opacity-60 cursor-pointer"
                   >
                     {isLoggingIn ? "Tekshirilmoqda..." : "Tasdiqlash va kirish"}
@@ -5851,7 +5899,7 @@ export default function App() {
 
                   <button 
                     type="button"
-                    onClick={() => { setTelegramStep('input_phone'); setEnteredTgCode(''); setGeneratedTgCode(''); setPendingTgUser(null); setErrorMsg(''); }}
+                    onClick={() => { setTelegramStep('input_phone'); setEnteredTgCode(''); setTgOtpStatus('idle'); setGeneratedTgCode(''); setPendingTgUser(null); setErrorMsg(''); }}
                     className="w-full text-center text-xs font-bold text-zinc-400 hover:text-white pt-1 cursor-pointer"
                   >
                     Raqamni qayta kiritish
@@ -6911,28 +6959,58 @@ export default function App() {
                     <div>
                       <div className="flex items-center justify-between gap-2 mb-1.5">
                         <label htmlFor="edit-profile-birthdate" className="text-xs font-bold text-zinc-300 flex items-center gap-1">
-                          <span>Tug'ilgan sana</span>
-                          {currentUser?.isProfileCompleted && <Lock className="w-3 h-3 text-zinc-500" />}
+                          <span>Tug'ilgan sana va yosh</span>
+                          {currentUser?.isProfileCompleted && !isAdminTelegramUser(currentUser) && (
+                            <Lock className="w-3 h-3 text-zinc-500" />
+                          )}
                         </label>
-                        <span className="text-[11px] font-bold text-rose-400 tabular-nums">
-                          {calculateAge(regBirthDate, Number(regAge))} yosh
-                        </span>
+                        {isAdminTelegramUser(currentUser) ? (
+                          <span className="text-[10.5px] font-bold text-amber-300 tabular-nums whitespace-nowrap shrink-0">
+                            Admin: {regAge || calculateAge(regBirthDate, 22)} yosh
+                          </span>
+                        ) : (
+                          <span className="text-[11px] font-bold text-rose-400 tabular-nums">
+                            {calculateAge(regBirthDate, Number(regAge))} yosh
+                          </span>
+                        )}
                       </div>
-                      <input
-                        id="edit-profile-birthdate"
-                        type="date"
-                        value={regBirthDate}
-                        disabled={Boolean(currentUser?.isProfileCompleted)}
-                        onChange={(e) => {
-                          const bDate = e.target.value;
-                          setRegBirthDate(bDate);
-                          const computedAge = calculateAge(bDate);
-                          setRegAge(String(computedAge));
-                        }}
-                        max={new Date().toISOString().split('T')[0]}
-                        className="w-full px-3.5 py-2.5 min-h-[44px] rounded-xl bg-[#171A26] border border-white/10 text-xs font-semibold text-white focus:border-rose-500 focus:ring-1 focus:ring-rose-500/40 transition-all outline-none cursor-pointer disabled:bg-[#0E1018] disabled:text-zinc-500 disabled:cursor-not-allowed"
-                      />
-                      {currentUser?.isProfileCompleted && (
+                      <div className={isAdminTelegramUser(currentUser) ? 'grid grid-cols-[1fr_92px] gap-2' : ''}>
+                        <input
+                          id="edit-profile-birthdate"
+                          type="date"
+                          value={regBirthDate}
+                          disabled={Boolean(currentUser?.isProfileCompleted) && !isAdminTelegramUser(currentUser)}
+                          onChange={(e) => {
+                            const bDate = e.target.value;
+                            setRegBirthDate(bDate);
+                            const computedAge = calculateAge(bDate);
+                            setRegAge(String(computedAge));
+                          }}
+                          max={new Date().toISOString().split('T')[0]}
+                          className="w-full px-3.5 py-2.5 min-h-[44px] rounded-xl bg-[#171A26] border border-white/10 text-xs font-semibold text-white focus:border-rose-500 focus:ring-1 focus:ring-rose-500/40 transition-all outline-none cursor-pointer disabled:bg-[#0E1018] disabled:text-zinc-500 disabled:cursor-not-allowed"
+                        />
+                        {isAdminTelegramUser(currentUser) && (
+                          <input
+                            id="edit-profile-age"
+                            type="number"
+                            min={18}
+                            max={99}
+                            aria-label="Yosh"
+                            value={regAge}
+                            onChange={(e) => {
+                              const raw = e.target.value;
+                              setRegAge(raw);
+                              const num = Math.round(Number(raw));
+                              if (Number.isFinite(num) && num >= 18 && num <= 99) {
+                                setRegBirthDate(deriveBirthDateFromAge(num, regBirthDate));
+                              }
+                            }}
+                            className="w-full px-3 py-2.5 min-h-[44px] rounded-xl bg-[#171A26] border border-white/10 text-xs font-mono font-bold text-center text-white focus:border-rose-500 focus:ring-1 focus:ring-rose-500/40 transition-all outline-none"
+                            placeholder="Yosh"
+                          />
+                        )}
+                      </div>
+                      {currentUser?.isProfileCompleted && !isAdminTelegramUser(currentUser) && (
                         <p className="text-[10.5px] text-zinc-500 mt-1">Birlamchi tug'ilgan yil o'zgartirilmaydi.</p>
                       )}
                     </div>
@@ -6941,17 +7019,21 @@ export default function App() {
                       <div className="flex items-center justify-between gap-2 mb-1.5">
                         <label htmlFor="edit-profile-gender" className="text-xs font-bold text-zinc-300 flex items-center gap-1">
                           <span>Jins</span>
-                          {currentUser?.isProfileCompleted && <Lock className="w-3 h-3 text-zinc-500" />}
+                          {currentUser?.isProfileCompleted && !isAdminTelegramUser(currentUser) && (
+                            <Lock className="w-3 h-3 text-zinc-500" />
+                          )}
                         </label>
-                        {currentUser?.isProfileCompleted && (
+                        {isAdminTelegramUser(currentUser) ? (
+                          <span className="text-[10.5px] text-amber-300 font-bold">Admin o&apos;zgartira oladi</span>
+                        ) : currentUser?.isProfileCompleted ? (
                           <span className="text-[10.5px] text-emerald-400 font-bold">Birlamchi (o'zgarmas)</span>
-                        )}
+                        ) : null}
                       </div>
                       <select
                         id="edit-profile-gender"
                         value={regGender}
                         onChange={(e) => setRegGender(e.target.value as any)}
-                        disabled={Boolean(currentUser?.isProfileCompleted)}
+                        disabled={Boolean(currentUser?.isProfileCompleted) && !isAdminTelegramUser(currentUser)}
                         className="w-full px-3.5 py-2.5 min-h-[44px] rounded-xl bg-[#171A26] border border-white/10 text-xs font-semibold text-white focus:border-rose-500 focus:ring-1 focus:ring-rose-500/40 transition-all outline-none disabled:bg-[#0E1018] disabled:text-zinc-500 disabled:cursor-not-allowed"
                       >
                         <option value="female" className="bg-[#11131C] text-white">Ayol / Qiz</option>
@@ -7788,10 +7870,21 @@ export default function App() {
               }
               openUserProfileByUid(uid, snapshot);
             }}
+            onUserDeleted={(deletedUid) => {
+              if (!deletedUid) return;
+              setUsersList((prev) => prev.filter((u) => u.uid !== deletedUid));
+              setSelectedProfile((prev: any) => (prev && prev.uid === deletedUid ? null : prev));
+              setSelectedChatUser((prev: any) => (prev && prev.uid === deletedUid ? null : prev));
+            }}
             onUserUpdated={(updatedUser) => {
-              if (updatedUser?.uid === currentUser?.uid) {
+              if (!updatedUser?.uid) return;
+              setUsersList((prev) => upsertUniqueUserInList(prev, updatedUser));
+              if (updatedUser.uid === currentUser?.uid) {
                 const clean = mergeAuthoritativeUserState(currentUser, updatedUser);
                 setCurrentUser(clean);
+                if (clean.gender === 'male' || clean.gender === 'female') setRegGender(clean.gender);
+                if (clean.birthDate) setRegBirthDate(clean.birthDate);
+                if (clean.age) setRegAge(String(clean.age));
                 writeAuthoritativeUserCache(localStorage, clean);
               }
             }}

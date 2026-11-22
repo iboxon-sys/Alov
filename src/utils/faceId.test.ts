@@ -1,6 +1,8 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import {
+  buildDemoFaceIdProfile,
+  buildDemoFaceIdSvgDataUrl,
   computeEyeAspectRatio,
   computeAverageEAR,
   createBlinkTrackerState,
@@ -164,5 +166,21 @@ describe('faceId pure biometric helpers', () => {
     assert.equal(genderToUzLabel(null), 'Tanlanmagan');
     assert.equal(genderToUzLabel('male'), 'Yigit (Erkak)');
     assert.equal(genderToUzLabel('female'), 'Qiz (Ayol)');
+  });
+
+  it('builds verified demo Face ID profile & SVG portrait for test mode', () => {
+    const svgUrl = buildDemoFaceIdSvgDataUrl('female', 'Madina');
+    assert.ok(svgUrl.startsWith('data:image/svg+xml;base64,'));
+    const demoProfile = buildDemoFaceIdProfile({
+      gender: 'male',
+      photoUrl: '/api/face-id/photo/demo_1.svg',
+      verifiedAt: '2026-11-19T10:00:00.000Z',
+    });
+    assert.equal(demoProfile.verified, true);
+    assert.equal(demoProfile.method, 'demo_test');
+    assert.equal(demoProfile.detectedGender, 'male');
+    assert.equal(demoProfile.genderLabelUz, 'Yigit (Erkak)');
+    assert.equal(demoProfile.liveness.faceDetected, true);
+    assert.equal(demoProfile.capturedPhotoUrl, '/api/face-id/photo/demo_1.svg');
   });
 });

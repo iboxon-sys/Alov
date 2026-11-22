@@ -2,8 +2,10 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   buildUpdatedUserSnapshot,
+  calculateAgeFromBirthDate,
   collectReplacedUserMediaUrls,
   deduplicateUsersList,
+  deriveBirthDateFromAge,
   isExplicitProfileDisplayName,
   mergeAuthoritativeUserState,
   mergeReturningAuthProfile,
@@ -392,6 +394,51 @@ describe('Profile persistence, identity deduplication & DB propagation', () => {
     assert.equal(afterRelogin.lastName, '');
     assert.equal(afterRelogin.avatar, '/api/media/edited_avatar.jpg');
     assert.equal(afterRelogin.username, 'azizbek_yangi');
+  });
+
+  it('derives birthDate from age consistently and propagates gender/age edits across faceId, posts, and chats', () => {
+    const refNow = new Date('2026-11-19T12:00:00.000Z');
+    const derived = deriveBirthDateFromAge(27, '2002-05-15', refNow);
+    assert.equal(derived, '1999-05-15');
+    assert.equal(calculateAgeFromBirthDate(derived, 22, refNow), 27);
+
+    const updated = buildUpdatedUserSnapshot(
+      {
+        uid: 'tg_salikh_07',
+        gender: 'male',
+        age: 24,
+        birthDate: '2002-05-15',
+        faceId: { verified: true, detectedGender: 'male', genderLabelUz: 'Yigit (Erkak)' },
+      },
+      {
+        gender: 'female',
+        age: 27,
+        birthDate: derived,
+        isProfileEdit: true,
+      },
+      { isProfileEdit: true }
+    );
+    assert.equal(updated.gender, 'female');
+    assert.equal(updated.age, 27);
+    assert.equal(updated.faceId.detectedGender, 'female');
+    assert.equal(updated.faceId.genderLabelUz, 'Qiz (Ayol)');
+
+    const stores = {
+      posts: [{ id: 'p_adm', authorUid: 'tg_salikh_07', authorName: 'Salikh', authorGender: 'male' }],
+      userChats: {
+        c1: { id: 'c1', participants: ['tg_salikh_07', 'u2'], partner: { uid: 'tg_salikh_07', name: 'Salikh', gender: 'male', age: 24 } },
+      },
+      chatMessages: {},
+      liveStreams: {},
+      coinRequests: [],
+      withdrawals: [],
+    };
+    const prop = propagateProfileUpdateAcrossStores(stores, updated);
+    assert.equal(prop.postsChanged, true);
+    assert.equal(prop.chatsChanged, true);
+    assert.equal(stores.posts[0].authorGender, 'female');
+    assert.equal(stores.userChats.c1.partner.gender, 'female');
+    assert.equal(stores.userChats.c1.partner.age, 27);
   });
 });
 

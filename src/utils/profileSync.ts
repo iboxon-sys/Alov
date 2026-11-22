@@ -6,6 +6,46 @@ export function normalizeTelegramUrl(raw?: string | null): string {
   return `https://t.me/${clean}`;
 }
 
+export function calculateAgeFromBirthDate(birthDateStr?: string | null, fallbackAge: number = 22, nowDate: Date = new Date()): number {
+  const safeFallback = Number.isFinite(Number(fallbackAge)) && Number(fallbackAge) >= 18
+    ? Math.min(99, Math.round(Number(fallbackAge)))
+    : 22;
+  if (!birthDateStr) return safeFallback;
+  const parts = String(birthDateStr).trim().match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if (!parts) {
+    const parsed = new Date(birthDateStr);
+    if (isNaN(parsed.getTime())) return safeFallback;
+    let age = nowDate.getFullYear() - parsed.getFullYear();
+    const m = nowDate.getMonth() - parsed.getMonth();
+    if (m < 0 || (m === 0 && nowDate.getDate() < parsed.getDate())) age -= 1;
+    return age >= 18 && age <= 99 ? age : safeFallback;
+  }
+  const year = Number(parts[1]);
+  const month = Number(parts[2]);
+  const day = Number(parts[3]);
+  let age = nowDate.getFullYear() - year;
+  const currentMonth = nowDate.getMonth() + 1;
+  const currentDay = nowDate.getDate();
+  if (currentMonth < month || (currentMonth === month && currentDay < day)) {
+    age -= 1;
+  }
+  return age >= 18 && age <= 99 ? age : safeFallback;
+}
+
+export function deriveBirthDateFromAge(ageInput: number, existingBirthDate?: string | null, nowDate: Date = new Date()): string {
+  const clampedAge = Math.max(18, Math.min(99, Math.round(Number(ageInput) || 22)));
+  const existingMatch = String(existingBirthDate || '').trim().match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  const month = existingMatch ? Number(existingMatch[2]) : 5;
+  const day = existingMatch ? Number(existingMatch[3]) : 15;
+  const currentMonth = nowDate.getMonth() + 1;
+  const currentDay = nowDate.getDate();
+  const hadBirthdayThisYear = currentMonth > month || (currentMonth === month && currentDay >= day);
+  const birthYear = nowDate.getFullYear() - clampedAge - (hadBirthdayThisYear ? 0 : 1);
+  const mm = String(Math.max(1, Math.min(12, month))).padStart(2, '0');
+  const dd = String(Math.max(1, Math.min(28, day))).padStart(2, '0');
+  return `${birthYear}-${mm}-${dd}`;
+}
+
 export function isExplicitProfileDisplayName(name?: string | null): boolean {
   if (!name) return false;
   const trimmed = String(name).trim();
@@ -155,6 +195,10 @@ export function propagateProfileUpdateAcrossStores(
         nextPost.authorRole = nextAuthorRole;
         changed = true;
       }
+      if ((updatedUser.gender === 'male' || updatedUser.gender === 'female') && nextPost.authorGender !== updatedUser.gender) {
+        nextPost.authorGender = updatedUser.gender;
+        changed = true;
+      }
     }
     if (Array.isArray(p.comments)) {
       const nextComments = p.comments.map((c: any) => {
@@ -213,6 +257,9 @@ export function propagateProfileUpdateAcrossStores(
         name: newName || chat.partner.name,
         username: newUsername !== undefined ? newUsername : chat.partner.username,
         avatar: newAvatar !== undefined ? newAvatar : chat.partner.avatar,
+        gender: updatedUser.gender || chat.partner.gender,
+        age: updatedUser.age || chat.partner.age,
+        birthDate: updatedUser.birthDate || chat.partner.birthDate,
         startGifUrl: updatedUser.startGifUrl !== undefined ? String(updatedUser.startGifUrl || '') : (chat.partner.startGifUrl || ''),
         isVerified,
         role: partnerIsAdmin ? 'admin' : 'user',
@@ -548,6 +595,15 @@ export function buildUpdatedUserSnapshot(
     const nextFaceId = { ...next.faceId };
     delete nextFaceId.capturedPhotoUrl;
     next.faceId = nextFaceId;
+  }
+
+  // Keep faceId.detectedGender synchronized when user.gender is updated (e.g. by Admin)
+  if ((next.gender === 'male' || next.gender === 'female') && next.faceId && typeof next.faceId === 'object') {
+    next.faceId = {
+      ...next.faceId,
+      detectedGender: next.gender,
+      genderLabelUz: next.gender === 'female' ? 'Qiz (Ayol)' : 'Yigit (Erkak)',
+    };
   }
 
   if (isProfileEdit) {

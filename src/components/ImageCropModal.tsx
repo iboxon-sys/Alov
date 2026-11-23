@@ -135,9 +135,9 @@ export const ImageCropModal: React.FC<ImageCropModalProps> = ({
             disabled={isSubmitting}
             aria-label="Rasm tahrirlash oynasini yopish"
             onClick={onClose}
-            className="w-9 h-9 rounded-full bg-white/[0.06] text-zinc-400 hover:text-white hover:bg-rose-500/20 flex items-center justify-center transition cursor-pointer disabled:opacity-50"
+            className="min-w-[44px] min-h-[44px] w-11 h-11 rounded-full bg-white/[0.08] text-zinc-200 hover:text-white hover:bg-rose-600 border border-white/15 flex items-center justify-center transition shrink-0 cursor-pointer disabled:opacity-50"
           >
-            <X className="w-4 h-4" />
+            <X className="w-5 h-5" />
           </button>
         </div>
 

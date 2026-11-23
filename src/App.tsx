@@ -96,6 +96,16 @@ import {
   upsertUniqueUserInList,
   writeAuthoritativeUserCache,
 } from './utils/profileSync';
+import {
+  mergeDbAuthoritativeProfile,
+  shouldPreserveLocalSessionOnSyncResult,
+} from './utils/firestoreSync';
+import {
+  loadAuthoritativeUserFromFirestore,
+  saveOrBackfillUserInFirestore,
+  syncAuthoritativeWalletToFirestore,
+  updateExistingUserInFirestore,
+} from './services/firestoreProfileService';
 import { CodeSlots, type CodeSlotsStatus } from './components/CodeSlots';
 import { parseGiphyGifItems, type GiphyGifItem } from './utils/giphy';
 import {
@@ -552,12 +562,16 @@ export default function App() {
   const socketRef = useRef<Socket | null>(null);
 
   const currentUserRef = useRef<any>(null);
+  const isProfileHydratedRef = useRef<boolean>(false);
   const selectedChatUserRef = useRef<any>(null);
   const usersListRef = useRef<any[]>([]);
   const originalGetDisplayMediaRef = useRef<any>(null);
 
   useEffect(() => {
     currentUserRef.current = currentUser || (firebaseUser ? { uid: firebaseUser.uid, name: firebaseUser.displayName } : null);
+    if (!currentUser && !firebaseUser) {
+      isProfileHydratedRef.current = false;
+    }
   }, [currentUser, firebaseUser]);
 
   useEffect(() => {
@@ -639,6 +653,9 @@ export default function App() {
         setCurrentUser((prev: any) => {
           const authoritative = mergeAuthoritativeUserState(prev, updatedUser);
           writeAuthoritativeUserCache(localStorage, authoritative);
+          if (authoritative?.uid) {
+            void syncAuthoritativeWalletToFirestore(authoritative.uid, authoritative);
+          }
           return authoritative;
         });
       }
@@ -870,6 +887,9 @@ export default function App() {
               const cleanUser = mergeAuthoritativeUserState(currentUserRef.current, res.user);
               setCurrentUser(cleanUser);
               writeAuthoritativeUserCache(localStorage, cleanUser);
+              if (cleanUser?.uid) {
+                void syncAuthoritativeWalletToFirestore(cleanUser.uid, cleanUser);
+              }
             }
           })
           .catch(() => {});
@@ -907,78 +927,115 @@ export default function App() {
     };
   }, []);
 
-  // Version-aware Session Restore on App Mount: clears stale caches on version bump while keeping active login identity
+  const applyAuthoritativeUserSession = React.useCallback((rawUser: any, overrideToken?: string) => {
+    if (!rawUser || !rawUser.uid) return null;
+    const syncedUser = mergeAuthoritativeUserState(
+      currentUserRef.current,
+      overrideToken ? { ...rawUser, authToken: overrideToken } : rawUser
+    );
+    if (!syncedUser) return null;
+
+    const userBdate = syncedUser.birthDate || '2002-05-15';
+    setRegBirthDate(userBdate);
+    setRegName(getSafeUserDisplayName(syncedUser, syncedUser.name || ''));
+    setRegUsername(syncedUser.username || '');
+    setRegAge(String(calculateAge(userBdate, syncedUser.age || 22)));
+    setRegGender(
+      syncedUser.isProfileCompleted && (syncedUser.gender === 'male' || syncedUser.gender === 'female')
+        ? syncedUser.gender
+        : ''
+    );
+    setRegRegion(syncedUser.region || 'Toshkent shahri');
+    setRegDistrict(syncedUser.district || 'Yunusobod tumani');
+    setRegNeighborhood(syncedUser.neighborhood || '');
+    setRegPhone(formatPhoneNumberPretty(syncedUser.phone || '+998 '));
+    setRegTelegram(syncedUser.telegram || '');
+    setRegInstagram(syncedUser.instagram || '');
+    setRegBio(syncedUser.bio || '');
+    setRegAvatar(resolveEffectiveProfileAvatar(syncedUser));
+    setRegBanner(syncedUser.banner || '');
+    setRegVideoUrl(syncedUser.videoUrl || '');
+    setRegStartGifUrl(syncedUser.startGifUrl || '');
+    setRegLocationVisibility(syncedUser.locationVisibility || 'everyone');
+    setIsLocationEnabled(syncedUser.isLocationEnabled !== false && syncedUser.locationVisibility !== 'ghost');
+
+    isProfileHydratedRef.current = true;
+    setCurrentUser(syncedUser);
+    setUsersList(prev => upsertUniqueUserInList(prev, syncedUser));
+    writeAuthoritativeUserCache(localStorage, syncedUser);
+    persistLocalAuthCredentials(localStorage, {
+      token: overrideToken || syncedUser.authToken || localStorage.getItem('alov_auth_token') || `alov_session_${syncedUser.uid}`,
+      userId: syncedUser.uid,
+      user: syncedUser,
+    });
+    return syncedUser;
+  }, []);
+
+  // Version-aware Session Restore on App Mount: clears stale caches on version bump while loading DB before rendering state
   useEffect(() => {
-    try {
-      const versionState = reconcileAppVersionCache(localStorage, APP_VERSION);
-      if (versionState.versionChanged && typeof window !== 'undefined') {
-        if ('caches' in window && window.caches) {
-          window.caches.keys()
-            .then((keys) => Promise.all(keys.map((key) => window.caches.delete(key))))
-            .catch(() => {});
+    let cancelled = false;
+    const restoreSession = async () => {
+      try {
+        const versionState = reconcileAppVersionCache(localStorage, APP_VERSION);
+        if (versionState.versionChanged && typeof window !== 'undefined') {
+          if ('caches' in window && window.caches) {
+            window.caches.keys()
+              .then((keys) => Promise.all(keys.map((key) => window.caches.delete(key))))
+              .catch(() => {});
+          }
+          if ('serviceWorker' in navigator && navigator.serviceWorker) {
+            navigator.serviceWorker.getRegistrations()
+              .then((regs) => regs.forEach((reg) => { reg.update().catch(() => {}); }))
+              .catch(() => {});
+          }
         }
-        if ('serviceWorker' in navigator && navigator.serviceWorker) {
-          navigator.serviceWorker.getRegistrations()
-            .then((regs) => regs.forEach((reg) => { reg.update().catch(() => {}); }))
-            .catch(() => {});
-        }
-      }
 
-      const cached = localStorage.getItem('alov_current_user');
-      if (cached) {
-        const parsed = JSON.parse(cached);
-        if (parsed && canPersistUserProfile(parsed) && !requiresFaceIdForUser(parsed)) {
-          const isTg = Boolean(parsed.uid?.startsWith('tg_') || parsed.telegramChatId || parsed.telegram);
-          const sanitized = isTg
-            ? {
-                ...parsed,
-                name: getSafeUserDisplayName(parsed, ''),
-                avatar: resolveEffectiveProfileAvatar(parsed),
-              }
-            : parsed;
-          setCurrentUser(sanitized);
-          setActiveTab('discover');
-          setIsAuthChecking(false);
+        let parsedCached: any = null;
+        try {
+          const cached = localStorage.getItem('alov_current_user');
+          if (cached) {
+            const p = JSON.parse(cached);
+            if (p && canPersistUserProfile(p) && !requiresFaceIdForUser(p)) {
+              const isTg = Boolean(p.uid?.startsWith('tg_') || p.telegramChatId || p.telegram);
+              parsedCached = isTg
+                ? {
+                    ...p,
+                    name: getSafeUserDisplayName(p, ''),
+                    avatar: resolveEffectiveProfileAvatar(p),
+                  }
+                : p;
+            }
+          }
+        } catch {}
 
-          safeFetchJson(getApiUrl('/api/users/sync'), {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            cache: 'no-store',
-            body: JSON.stringify({ user: sanitized, lookupOnly: true })
-          })
-            .then(res => {
-              if (res && res.success && res.exists && res.user) {
-                const syncedUser = mergeAuthoritativeUserState(
-                  null,
-                  res.token ? { ...res.user, authToken: res.token } : res.user
-                );
-                setCurrentUser(syncedUser);
-                writeAuthoritativeUserCache(localStorage, syncedUser);
-                persistLocalAuthCredentials(localStorage, {
-                  token: res.token || syncedUser.authToken,
-                  userId: syncedUser.uid,
-                  user: syncedUser,
-                });
-              } else if (res && res.success && res.exists === false) {
-                try {
-                  localStorage.removeItem('alov_current_user');
-                  localStorage.removeItem('alov_user_' + parsed.uid);
-                  persistLocalAuthCredentials(localStorage, null);
-                } catch (e) {}
-                setCurrentUser(null);
-                setActiveTab('landing');
-              }
-            })
-            .catch(() => {});
+        const targetUid = String(parsedCached?.uid || versionState.preservedUserId || '').trim();
+        const hasBridgeToken = Boolean(versionState.preservedToken);
+
+        if (!targetUid && !hasBridgeToken) {
+          const tgWebAppUser = (window as any).Telegram?.WebApp?.initDataUnsafe?.user;
+          if (!tgWebAppUser?.id && !auth.currentUser) {
+            setIsAuthChecking(false);
+          }
+          return;
         }
-      } else if (versionState.preservedUserId || versionState.preservedToken) {
-        const restoreRequest = versionState.preservedUserId
+
+        // Wait for Firebase Auth initial state resolution so we don't misclassify a Firebase session during deploy restart
+        await auth.authStateReady().catch(() => {});
+        if (cancelled) return;
+
+        // Load external DB records FIRST (Firestore + Backend) before finalizing UI state
+        const firestorePromise = targetUid && auth.currentUser?.uid === targetUid
+          ? loadAuthoritativeUserFromFirestore(targetUid).catch(() => null)
+          : Promise.resolve(null);
+
+        const backendPromise = targetUid
           ? safeFetchJson(getApiUrl('/api/users/sync'), {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
               cache: 'no-store',
-              body: JSON.stringify({ user: { uid: versionState.preservedUserId }, lookupOnly: true })
-            })
+              body: JSON.stringify({ user: { uid: targetUid }, lookupOnly: true })
+            }).then((res) => ({ res, networkFailed: false }))
+              .catch(() => ({ res: null, networkFailed: true }))
           : safeFetchJson(getApiUrl('/api/auth/bridge-session'), {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
@@ -987,38 +1044,91 @@ export default function App() {
                 token: versionState.preservedToken,
                 userId: versionState.preservedUserId,
               })
-            });
+            }).then((res) => ({ res, networkFailed: false }))
+              .catch(() => ({ res: null, networkFailed: true }));
 
-        restoreRequest
-          .then(res => {
-            if (res && res.success && res.user && canPersistUserProfile(res.user) && !requiresFaceIdForUser(res.user)) {
-              const syncedUser = mergeAuthoritativeUserState(
-                null,
-                res.token ? { ...res.user, authToken: res.token } : res.user
-              );
-              setCurrentUser(syncedUser);
-              writeAuthoritativeUserCache(localStorage, syncedUser);
-              persistLocalAuthCredentials(localStorage, {
-                token: res.token || versionState.preservedToken || syncedUser.authToken,
-                userId: syncedUser.uid,
-                user: syncedUser,
+        const [firestoreUser, backendOutcome] = await Promise.all([firestorePromise, backendPromise]);
+        if (cancelled) return;
+
+        const backendRes = backendOutcome.res;
+        const backendUser = backendRes?.success && (backendRes?.exists || backendRes?.user) ? backendRes.user : null;
+
+        let mergedUser = mergeDbAuthoritativeProfile({
+          firestoreUser,
+          backendUser,
+          cachedUser: parsedCached,
+        });
+
+        // Re-hydrate Express backend from Firestore if backend restarted clean on deploy while Firestore has the user
+        if (firestoreUser && canPersistUserProfile(firestoreUser) && !backendUser && !backendOutcome.networkFailed) {
+          try {
+            const rehydrateRes = await safeFetchJson(getApiUrl('/api/users/sync'), {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                user: { ...(mergedUser || firestoreUser), rehydrateFromExternalDb: true },
+              }),
+            });
+            if (rehydrateRes?.success && rehydrateRes?.user) {
+              mergedUser = mergeDbAuthoritativeProfile({
+                firestoreUser,
+                backendUser: rehydrateRes.user,
+                cachedUser: parsedCached,
               });
-              setActiveTab(prev => (prev === 'landing' ? 'discover' : prev));
-            } else if (res && res.success && res.exists === false) {
-              persistLocalAuthCredentials(localStorage, null);
             }
-          })
-          .catch(() => {})
-          .finally(() => {
-            setIsAuthChecking(false);
-          });
-      } else {
-        setIsAuthChecking(false);
+          } catch {}
+        }
+
+        // Backfill Firestore once if backend has user and Firestore didn't yet
+        if (backendUser && canPersistUserProfile(backendUser) && !firestoreUser && targetUid && auth.currentUser?.uid === targetUid) {
+          void saveOrBackfillUserInFirestore(mergedUser || backendUser);
+        }
+
+        const preservation = shouldPreserveLocalSessionOnSyncResult({
+          cachedUser: parsedCached,
+          firestoreUser,
+          backendResponse: backendRes,
+          networkFailed: backendOutcome.networkFailed,
+        });
+
+        if (preservation.preserve) {
+          const finalUser = mergedUser || parsedCached;
+          if (finalUser && canPersistUserProfile(finalUser) && !requiresFaceIdForUser(finalUser)) {
+            applyAuthoritativeUserSession(finalUser, backendRes?.token);
+            setActiveTab((prev) => (prev === 'landing' ? 'discover' : prev));
+          }
+        } else if (preservation.reason === 'deleted_or_banned') {
+          try {
+            localStorage.removeItem('alov_current_user');
+            if (targetUid) localStorage.removeItem('alov_user_' + targetUid);
+            persistLocalAuthCredentials(localStorage, null);
+          } catch {}
+          isProfileHydratedRef.current = false;
+          setCurrentUser(null);
+          setActiveTab('landing');
+        } else if (!auth.currentUser) {
+          // Backend has no record and no Firestore user — clear stale snapshot only if not Firebase-authenticated
+          try {
+            localStorage.removeItem('alov_current_user');
+            if (targetUid) localStorage.removeItem('alov_user_' + targetUid);
+            persistLocalAuthCredentials(localStorage, null);
+          } catch {}
+          isProfileHydratedRef.current = false;
+          setCurrentUser(null);
+        }
+      } catch (e) {
+        // Resilient fallback
+      } finally {
+        if (!cancelled) {
+          setIsAuthChecking(false);
+        }
       }
-    } catch (e) {
-      setIsAuthChecking(false);
-    }
-  }, []);
+    };
+    void restoreSession();
+    return () => {
+      cancelled = true;
+    };
+  }, [applyAuthoritativeUserSession]);
 
   // Vercel Direct-Access Guard + Parent <-> Iframe Auth Bridge (alov.onrender.com <-> alov-mu.vercel.app)
   const embedRouteInfo = React.useMemo(() => {
@@ -1152,8 +1262,9 @@ export default function App() {
     };
   }, [embedRouteInfo.isEmbedRoute, embedRouteInfo.section, isInIframe]);
 
-  // Telegram WebApp Auto-login & Integration (never auto-opens Auth or Face ID on boot for new visitors)
+  // Telegram WebApp Auto-login & Integration (waits for DB lookup BEFORE resolving auth checking state)
   useEffect(() => {
+    let cancelled = false;
     try {
       const tg = (window as any).Telegram?.WebApp;
       if (tg) {
@@ -1184,32 +1295,33 @@ export default function App() {
           })
           .then(res => res.json())
           .then(data => {
+            if (cancelled) return;
             const exists = Boolean(data && data.success && data.exists && data.user);
             const u = exists ? mergeAuthoritativeUserState(null, data.user) : null;
             const bootDecision = resolveTelegramMiniAppBootAction({ exists, user: u });
             if (bootDecision.shouldAutoLogin && u) {
-              setRegName(getSafeUserDisplayName(u, realName));
-              setRegAvatar(resolveEffectiveProfileAvatar(u) || pickPreferredAvatar(tgUser.photo_url));
-              setRegVideoUrl(u.videoUrl || '');
-              setRegStartGifUrl(u.startGifUrl || '');
-              setCurrentUser(u);
-              writeAuthoritativeUserCache(localStorage, u);
-              persistLocalAuthCredentials(localStorage, {
-                token: u.authToken || `alov_session_${u.uid}`,
-                userId: u.uid,
-                user: u,
-              });
+              applyAuthoritativeUserSession(u, data?.token);
               setActiveTab('discover');
             }
           })
-          .catch(() => {});
-          setIsAuthChecking(false);
+          .catch(() => {})
+          .finally(() => {
+            if (!cancelled) {
+              setIsAuthChecking(false);
+            }
+          });
+          return () => {
+            cancelled = true;
+          };
         }
       }
     } catch (e) {
       console.warn("Telegram WebApp init warning:", e);
     }
-  }, []);
+    return () => {
+      cancelled = true;
+    };
+  }, [applyAuthoritativeUserSession]);
 
   // Safety Timeout Fallback to prevent infinite loading ("Sessiya tiklanmoqda...")
   useEffect(() => {
@@ -1225,16 +1337,16 @@ export default function App() {
     return () => clearTimeout(timeout);
   }, []);
 
-  // Foydalanuvchi hisobini server bilan lookupOnly rejimida tekshirish (tugallanmagan profil yaratilmaydi)
+  // Foydalanuvchi hisobini avval Firestore va backend bilan lookupOnly rejimida tekshirish (bazadagi ma'lumotlar birinchi yuklanadi)
   const syncUserWithBackend = async (user: User, options?: { autoOpenFaceId?: boolean }) => {
     const autoOpenFaceId = options?.autoOpenFaceId === true;
     try {
-      let userData: any = null;
-
-      try {
-        const data = await safeFetchJson(getApiUrl('/api/users/sync'), {
+      const [firestoreUser, backendData] = await Promise.all([
+        loadAuthoritativeUserFromFirestore(user.uid).catch(() => null),
+        safeFetchJson(getApiUrl('/api/users/sync'), {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
+          cache: 'no-store',
           body: JSON.stringify({
             user: {
               uid: user.uid,
@@ -1244,12 +1356,44 @@ export default function App() {
             },
             lookupOnly: true,
           })
-        });
-        if (data && data.success && data.exists && data.user) {
-          userData = data.user;
-        }
-      } catch (e) {
-        console.warn("Backend user lookup offline fallback:", e);
+        }).catch((e) => {
+          console.warn("Backend user lookup offline fallback:", e);
+          return null;
+        }),
+      ]);
+
+      const backendUser = backendData && backendData.success && backendData.exists && backendData.user
+        ? backendData.user
+        : null;
+
+      let userData = mergeDbAuthoritativeProfile({
+        firestoreUser,
+        backendUser,
+        cachedUser: currentUserRef.current?.uid === user.uid ? currentUserRef.current : null,
+      });
+
+      // Re-hydrate Express backend automatically from Firestore if backend was wiped across deploys
+      if (firestoreUser && canPersistUserProfile(firestoreUser) && !backendUser) {
+        try {
+          const rehydrate = await safeFetchJson(getApiUrl('/api/users/sync'), {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              user: { ...(userData || firestoreUser), rehydrateFromExternalDb: true },
+            }),
+          });
+          if (rehydrate?.success && rehydrate?.user) {
+            userData = mergeDbAuthoritativeProfile({
+              firestoreUser,
+              backendUser: rehydrate.user,
+            });
+          }
+        } catch {}
+      }
+
+      // Backfill Firestore once for existing users whose profile only existed in backend
+      if (backendUser && canPersistUserProfile(backendUser) && !firestoreUser) {
+        void saveOrBackfillUserInFirestore(userData || backendUser);
       }
 
       if (!userData) {
@@ -1264,31 +1408,6 @@ export default function App() {
         return null;
       }
 
-      // Anketani to'ldirish maydonlarini yangilash
-      const userBdate = userData.birthDate || '2002-05-15';
-      setRegBirthDate(userBdate);
-      setRegName(getSafeUserDisplayName(userData, user.displayName || ''));
-      setRegUsername(userData.username || '');
-      setRegAge(String(calculateAge(userBdate, userData.age || 22)));
-      setRegGender(
-        userData.isProfileCompleted && (userData.gender === 'male' || userData.gender === 'female')
-          ? userData.gender
-          : ''
-      );
-      setRegRegion(userData.region || 'Toshkent shahri');
-      setRegDistrict(userData.district || 'Yunusobod tumani');
-      setRegNeighborhood(userData.neighborhood || '');
-      setRegPhone(formatPhoneNumberPretty(userData.phone || '+998 '));
-      setRegTelegram(userData.telegram || '');
-      setRegInstagram(userData.instagram || '');
-      setRegBio(userData.bio || '');
-      setRegAvatar(resolveEffectiveProfileAvatar(userData));
-      setRegBanner(userData.banner || '');
-      setRegVideoUrl(userData.videoUrl || '');
-      setRegStartGifUrl(userData.startGifUrl || '');
-      setRegLocationVisibility(userData.locationVisibility || 'everyone');
-      setIsLocationEnabled(userData.isLocationEnabled !== false);
-
       // Admin bypasses Face ID completely; non-admins must have completed profile + Face ID verification
       const nextStep = resolvePostProviderAuthStep({
         provider: 'google',
@@ -1296,6 +1415,29 @@ export default function App() {
         user: userData,
       });
       if (nextStep === 'face_id') {
+        const userBdate = userData.birthDate || '2002-05-15';
+        setRegBirthDate(userBdate);
+        setRegName(getSafeUserDisplayName(userData, user.displayName || ''));
+        setRegUsername(userData.username || '');
+        setRegAge(String(calculateAge(userBdate, userData.age || 22)));
+        setRegGender(
+          userData.isProfileCompleted && (userData.gender === 'male' || userData.gender === 'female')
+            ? userData.gender
+            : ''
+        );
+        setRegRegion(userData.region || 'Toshkent shahri');
+        setRegDistrict(userData.district || 'Yunusobod tumani');
+        setRegNeighborhood(userData.neighborhood || '');
+        setRegPhone(formatPhoneNumberPretty(userData.phone || '+998 '));
+        setRegTelegram(userData.telegram || '');
+        setRegInstagram(userData.instagram || '');
+        setRegBio(userData.bio || '');
+        setRegAvatar(resolveEffectiveProfileAvatar(userData));
+        setRegBanner(userData.banner || '');
+        setRegVideoUrl(userData.videoUrl || '');
+        setRegStartGifUrl(userData.startGifUrl || '');
+        setRegLocationVisibility(userData.locationVisibility || 'everyone');
+        setIsLocationEnabled(userData.isLocationEnabled !== false && userData.locationVisibility !== 'ghost');
         if (autoOpenFaceId) {
           setPendingGoogleUser(user);
           setAuthOrigin('google');
@@ -1305,14 +1447,7 @@ export default function App() {
         return userData;
       }
 
-      const cleanUser = mergeAuthoritativeUserState(currentUserRef.current, userData);
-      writeAuthoritativeUserCache(localStorage, cleanUser);
-      persistLocalAuthCredentials(localStorage, {
-        token: cleanUser?.authToken || localStorage.getItem('alov_auth_token') || `alov_session_${cleanUser?.uid || user.uid}`,
-        userId: cleanUser?.uid || user.uid,
-        user: cleanUser,
-      });
-      setCurrentUser(cleanUser);
+      const cleanUser = applyAuthoritativeUserSession(userData, backendData?.token);
       setShowAuthModal(false);
       setActiveTab(prev => (prev === 'landing' ? 'discover' : prev));
       return cleanUser;
@@ -1573,12 +1708,14 @@ export default function App() {
   useEffect(() => {
     const activeUid = currentUser?.uid || firebaseUser?.uid;
     const emitCoords = (coords: { lat: number; lng: number; accuracy?: number }) => {
-      if (!activeUid) return;
+      if (!activeUid || !isProfileHydratedRef.current || !currentUserRef.current?.isProfileCompleted) return;
+      const effectiveVis = currentUserRef.current?.locationVisibility || regLocationVisibility;
+      if (!effectiveVis) return;
       socketRef.current?.emit('update_location', {
         uid: activeUid,
         location: coords,
         isLocationEnabled: true,
-        locationVisibility: currentUser?.locationVisibility || regLocationVisibility || 'everyone'
+        locationVisibility: effectiveVis
       });
       fetch(getApiUrl('/api/users/update'), {
         method: 'POST',
@@ -2222,6 +2359,11 @@ export default function App() {
           userId: finalUser?.uid || currentUser.uid,
           user: finalUser,
         });
+        void updateExistingUserInFirestore(
+          currentUser.uid,
+          { banner: finalBannerUrl, hasEditedProfile: true },
+          currentUser
+        );
         showToast("Profil banneri muvaffaqiyatli yangilandi");
       }
       setShowCropModal(false);
@@ -2539,6 +2681,13 @@ export default function App() {
         }).catch(() => {});
       }
 
+      // Persist to Firestore (non-destructive merge/update only for changed profile fields)
+      void updateExistingUserInFirestore(activeUid, profileEditPayload, currentUser).catch(() => {});
+      if (!currentUser?.isProfileCompleted) {
+        void saveOrBackfillUserInFirestore(savedUser);
+      }
+
+      isProfileHydratedRef.current = true;
       writeAuthoritativeUserCache(localStorage, savedUser);
       persistLocalAuthCredentials(localStorage, {
         token: savedUser.authToken || localStorage.getItem('alov_auth_token') || `alov_session_${savedUser.uid || activeUid}`,
@@ -2584,14 +2733,23 @@ export default function App() {
   };
 
   const handleLocationVisibilityChange = (value: 'everyone' | 'mutual' | 'ghost') => {
+    if (!isProfileHydratedRef.current && !currentUser?.uid) return;
     setRegLocationVisibility(value);
     const enabled = value !== 'ghost';
     setIsLocationEnabled(enabled);
-    setCurrentUser((prev: any) =>
-      prev ? { ...prev, locationVisibility: value, isLocationEnabled: enabled } : prev
-    );
+    setCurrentUser((prev: any) => {
+      if (!prev) return prev;
+      const updated = { ...prev, locationVisibility: value, isLocationEnabled: enabled };
+      writeAuthoritativeUserCache(localStorage, updated);
+      return updated;
+    });
     const activeUid = currentUser?.uid || firebaseUser?.uid;
     if (activeUid) {
+      void updateExistingUserInFirestore(
+        activeUid,
+        { locationVisibility: value, isLocationEnabled: enabled },
+        currentUser
+      );
       fetch(getApiUrl('/api/users/update'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -2677,12 +2835,19 @@ export default function App() {
           setErrorMsg("Ro'yxatdan o'tish oxirigacha yakunlanmagan. Iltimos, Face ID va profil anketasini yakunlang!");
           return;
         }
-        setCurrentUser(userData);
-        persistLocalAuthCredentials(localStorage, {
-          token: serverLoginRes.token || userData.authToken,
-          userId: userData.uid,
-          user: userData,
-        });
+        const applied = applyAuthoritativeUserSession(userData, serverLoginRes.token);
+        const targetEmail = String(userData.email || (authEmail.includes('@') && !authEmail.startsWith('@') ? authEmail.trim() : '')).trim();
+        if (!auth.currentUser && targetEmail) {
+          void signInWithEmailAndPassword(auth, targetEmail, authPassword.trim())
+            .then((cred) => {
+              if (cred?.user && applied) {
+                void saveOrBackfillUserInFirestore({ ...applied, uid: cred.user.uid });
+              }
+            })
+            .catch(() => {});
+        } else if (applied) {
+          void saveOrBackfillUserInFirestore(applied);
+        }
         setShowAuthModal(false);
         setActiveTab('discover');
         return;
@@ -2830,6 +2995,7 @@ export default function App() {
       provider.setCustomParameters({ prompt: 'select_account' });
       const result = await signInWithPopup(auth, provider);
       if (result?.user) {
+        const firestoreExisting = await loadAuthoritativeUserFromFirestore(result.user.uid).catch(() => null);
         const partialUser = {
           uid: result.user.uid,
           email: result.user.email,
@@ -2845,21 +3011,35 @@ export default function App() {
         });
         const data = await response.json();
 
+        let mergedAuthUser = mergeDbAuthoritativeProfile({
+          firestoreUser: firestoreExisting,
+          backendUser: data && data.success && data.exists && data.user ? data.user : null,
+        });
+
+        if (firestoreExisting && canPersistUserProfile(firestoreExisting) && (!data?.exists || !data?.user)) {
+          const rehydrate = await safeFetchJson(getApiUrl('/api/users/sync'), {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ user: { ...(mergedAuthUser || firestoreExisting), rehydrateFromExternalDb: true } }),
+          }).catch(() => null);
+          if (rehydrate?.success && rehydrate?.user) {
+            mergedAuthUser = mergeDbAuthoritativeProfile({
+              firestoreUser: firestoreExisting,
+              backendUser: rehydrate.user,
+            });
+          }
+        } else if (data?.exists && data?.user && canPersistUserProfile(data.user) && !firestoreExisting) {
+          void saveOrBackfillUserInFirestore(mergedAuthUser || data.user);
+        }
+
         if (
           resolvePostProviderAuthStep({
             provider: 'google',
-            exists: Boolean(data && data.success && data.exists && data.user),
-            user: data?.user,
+            exists: Boolean(mergedAuthUser),
+            user: mergedAuthUser,
           }) === 'enter_app'
         ) {
-          const canonicalUser = mergeAuthoritativeUserState(null, data.token ? { ...data.user, authToken: data.token } : data.user);
-          setCurrentUser(canonicalUser);
-          writeAuthoritativeUserCache(localStorage, canonicalUser);
-          persistLocalAuthCredentials(localStorage, {
-            token: data.token || canonicalUser?.authToken || `alov_session_${canonicalUser?.uid}`,
-            userId: canonicalUser?.uid,
-            user: canonicalUser,
-          });
+          applyAuthoritativeUserSession(mergedAuthUser, data?.token);
           setShowAuthModal(false);
           setActiveTab('discover');
           setIsLoggingIn(false);
@@ -2975,15 +3155,10 @@ export default function App() {
         setIsLoggingIn(false);
         return;
       }
-      const finalUser = mergeAuthoritativeUserState(null, syncData.token ? { ...syncData.user, authToken: syncData.token } : syncData.user);
-      setCurrentUser(finalUser);
-      setUsersList(prev => upsertUniqueUserInList(prev, finalUser));
-      writeAuthoritativeUserCache(localStorage, finalUser);
-      persistLocalAuthCredentials(localStorage, {
-        token: syncData.token || finalUser?.authToken || `alov_session_${finalUser?.uid}`,
-        userId: finalUser?.uid,
-        user: finalUser,
-      });
+      const finalUser = applyAuthoritativeUserSession(syncData.user, syncData.token);
+      if (finalUser) {
+        void saveOrBackfillUserInFirestore(finalUser);
+      }
       setPendingGoogleUser(null);
       setPendingFaceId(null);
       setShowAuthModal(false);
@@ -3025,14 +3200,7 @@ export default function App() {
         const exists = Boolean(res && res.success && res.exists && res.user);
         const step = resolvePostProviderAuthStep({ provider: 'telegram', exists, user: res?.user });
         if (step === 'enter_app' && res?.user) {
-          const cleanUser = mergeAuthoritativeUserState(null, res.token ? { ...res.user, authToken: res.token } : res.user);
-          setCurrentUser(cleanUser);
-          writeAuthoritativeUserCache(localStorage, cleanUser);
-          persistLocalAuthCredentials(localStorage, {
-            token: res.token || cleanUser?.authToken || `alov_session_${cleanUser?.uid}`,
-            userId: cleanUser?.uid,
-            user: cleanUser,
-          });
+          applyAuthoritativeUserSession(res.user, res.token);
           setShowAuthModal(false);
           setActiveTab('discover');
           setIsLoggingIn(false);
@@ -3194,14 +3362,10 @@ export default function App() {
           setTelegramStep('face_id');
         } else {
           // Admin (@Salikh_07) or already Face-ID-verified completed user logs straight in
-          const userData = mergeAuthoritativeUserState(null, data.token ? { ...data.user, authToken: data.token } : data.user);
-          setCurrentUser(userData);
-          writeAuthoritativeUserCache(localStorage, userData);
-          persistLocalAuthCredentials(localStorage, {
-            token: data.token || userData?.authToken || `alov_session_${userData?.uid}`,
-            userId: userData?.uid,
-            user: userData,
-          });
+          const verifiedTgUser = applyAuthoritativeUserSession(data.user, data.token);
+          if (verifiedTgUser) {
+            void saveOrBackfillUserInFirestore(verifiedTgUser);
+          }
           setShowAuthModal(false);
           setAuthMode('login');
           setTelegramStep('input_phone');
@@ -3264,15 +3428,10 @@ export default function App() {
           setErrorMsg(syncData?.error || "Profilni serverga yuklashda xatolik.");
           return;
         }
-        const finalUser = mergeAuthoritativeUserState(null, syncData.token ? { ...syncData.user, authToken: syncData.token } : syncData.user);
-        setCurrentUser(finalUser);
-        setUsersList(prev => upsertUniqueUserInList(prev, finalUser));
-        writeAuthoritativeUserCache(localStorage, finalUser);
-        persistLocalAuthCredentials(localStorage, {
-          token: syncData.token || finalUser?.authToken || `alov_session_${finalUser?.uid}`,
-          userId: finalUser?.uid,
-          user: finalUser,
-        });
+        const finalUser = applyAuthoritativeUserSession(syncData.user, syncData.token);
+        if (finalUser) {
+          void saveOrBackfillUserInFirestore(finalUser);
+        }
         setPendingTgUser(null);
         setPendingFaceId(null);
         setShowAuthModal(false);
@@ -3377,15 +3536,10 @@ export default function App() {
         setIsLoggingIn(false);
         return;
       }
-      const finalUser = mergeAuthoritativeUserState(null, syncData.token ? { ...syncData.user, authToken: syncData.token } : syncData.user);
-      setCurrentUser(finalUser);
-      setUsersList(prev => upsertUniqueUserInList(prev, finalUser));
-      writeAuthoritativeUserCache(localStorage, finalUser);
-      persistLocalAuthCredentials(localStorage, {
-        token: syncData.token || finalUser?.authToken || `alov_session_${finalUser?.uid}`,
-        userId: finalUser?.uid,
-        user: finalUser,
-      });
+      const finalUser = applyAuthoritativeUserSession(syncData.user, syncData.token);
+      if (finalUser) {
+        void saveOrBackfillUserInFirestore(finalUser);
+      }
       setPendingTgUser(null);
       setPendingFaceId(null);
       setShowAuthModal(false);
@@ -3400,6 +3554,7 @@ export default function App() {
   };
 
   const handleLogout = async () => {
+    isProfileHydratedRef.current = false;
     const activeUid = currentUser?.uid || firebaseUser?.uid;
     if (activeUid) {
       socketRef.current?.emit('unregister_user', { uid: activeUid });
@@ -3520,7 +3675,12 @@ export default function App() {
         })
       });
       if (data && data.success && data.sender) {
-        setCurrentUser(data.sender);
+        const cleanSender = mergeAuthoritativeUserState(currentUserRef.current, data.sender);
+        setCurrentUser(cleanSender);
+        writeAuthoritativeUserCache(localStorage, cleanSender);
+        if (cleanSender?.uid) {
+          void syncAuthoritativeWalletToFirestore(cleanSender.uid, cleanSender);
+        }
         setShowGiftModal(false);
         showToast(`${gift.name} sovg'asi yuborildi!`);
       } else {
@@ -3625,7 +3785,12 @@ export default function App() {
         })
       });
       if (data && data.success && data.user) {
-        setCurrentUser(data.user);
+        const cleanUser = mergeAuthoritativeUserState(currentUserRef.current, data.user);
+        setCurrentUser(cleanUser);
+        writeAuthoritativeUserCache(localStorage, cleanUser);
+        if (cleanUser?.uid) {
+          void syncAuthoritativeWalletToFirestore(cleanUser.uid, cleanUser);
+        }
         setShowWithdrawModal(false);
         showToast(`Pul yechish arizangiz adminga yuborildi (${calculateDiamondCashoutUzs(withdrawAmount).toLocaleString()} so'm). Admin siz bilan bog'lanadi!`);
       } else {
@@ -3660,7 +3825,7 @@ export default function App() {
 
       {/* Top Header (hidden during full-screen Efirlar, Chatruletka & mobile Chat conversation) */}
       {shouldShowOuterAppHeader({ isMobileViewport, activeTab, chatView }) && (
-      <header className="shrink-0 bg-[#0D0F17]/92 backdrop-blur-xl border-b border-white/[0.08] px-3 sm:px-5 pt-[env(safe-area-inset-top,0px)] min-h-14 flex items-center justify-between gap-2 z-40 overflow-hidden">
+      <header className="shrink-0 bg-[#0D0F17]/92 backdrop-blur-xl border-b border-white/[0.08] px-3 sm:px-5 pt-[var(--alov-safe-top,env(safe-area-inset-top,0px))] min-h-14 flex items-center justify-between gap-2 z-40 overflow-hidden">
         <div
           className="flex items-center gap-2 sm:gap-2.5 min-w-0 shrink-0 cursor-pointer group"
           onClick={() => setActiveTab('discover')}
@@ -4665,7 +4830,12 @@ export default function App() {
               if (activeLiveUsers.length === 0) {
                 return (
                   <div className="relative w-full h-full flex flex-col items-center justify-center p-6 text-center text-white bg-[#09090D] space-y-4">
-                    <button onClick={() => setActiveTab('discover')} className="absolute top-4 left-4 p-2.5 rounded-full bg-white/10 hover:bg-white/20 backdrop-blur-md text-white transition cursor-pointer">
+                    <button
+                      type="button"
+                      onClick={() => setActiveTab('discover')}
+                      aria-label="Efirlardan chiqish"
+                      className="absolute top-[calc(1rem+var(--alov-safe-top,0px))] left-4 z-30 min-w-[44px] min-h-[44px] w-11 h-11 flex items-center justify-center rounded-full bg-white/15 hover:bg-rose-600 border border-white/20 backdrop-blur-md text-white shadow-lg transition cursor-pointer"
+                    >
                       <X className="w-5 h-5" />
                     </button>
                     <div className="w-16 h-16 rounded-full bg-rose-600/20 border border-rose-500/40 flex items-center justify-center animate-pulse">
@@ -4717,9 +4887,16 @@ export default function App() {
                   )}
                   <div className="absolute inset-0 bg-gradient-to-b from-black/70 via-black/25 to-black/85 pointer-events-none" />
 
-                  <div className="relative z-10 p-4 flex items-center justify-between text-white pt-6">
+                  <div className="relative z-20 px-4 pb-4 pt-[calc(1rem+var(--alov-safe-top,0px))] flex items-center justify-between text-white">
                     <div className="flex items-center space-x-3">
-                      <button onClick={() => setActiveTab('discover')} className="p-2 rounded-full bg-black/40 backdrop-blur-md cursor-pointer"><X className="w-5 h-5" /></button>
+                      <button
+                        type="button"
+                        onClick={() => setActiveTab('discover')}
+                        aria-label="Efirlardan chiqish"
+                        className="min-w-[44px] min-h-[44px] w-11 h-11 flex items-center justify-center rounded-full bg-black/55 hover:bg-rose-600 border border-white/20 backdrop-blur-md text-white transition shrink-0 cursor-pointer"
+                      >
+                        <X className="w-5 h-5" />
+                      </button>
 
                       <div className="flex items-center space-x-2 bg-black/40 backdrop-blur-md px-3 py-1.5 rounded-full">
                         <img src={currentReelUser.avatar || '/assets/aistudio/image_e20a1307.webp'} className="w-7 h-7 rounded-full object-cover border border-rose-500" />
@@ -4839,11 +5016,11 @@ export default function App() {
                   </button>
                   <button
                     type="button"
-                    aria-label="Yopish"
+                    aria-label="Xabarni yopish"
                     onClick={() => setGpsStatusMsg('')}
-                    className="text-amber-300 hover:text-white cursor-pointer"
+                    className="min-w-[44px] min-h-[44px] -my-2 -mr-2 rounded-full flex items-center justify-center text-amber-300 hover:text-white hover:bg-amber-500/20 transition shrink-0 cursor-pointer"
                   >
-                    <X className="w-3.5 h-3.5" />
+                    <X className="w-4 h-4" />
                   </button>
                 </div>
               </div>
@@ -4993,9 +5170,9 @@ export default function App() {
                         type="button"
                         onClick={() => setShowFilterModal(false)}
                         aria-label="Filtrni yopish"
-                        className="w-8 h-8 rounded-xl bg-white/[0.06] hover:bg-rose-600 text-zinc-300 hover:text-white flex items-center justify-center transition cursor-pointer"
+                        className="min-w-[44px] min-h-[44px] w-11 h-11 rounded-xl bg-white/[0.08] hover:bg-rose-600 border border-white/15 text-zinc-200 hover:text-white flex items-center justify-center transition shrink-0 cursor-pointer"
                       >
-                        <X className="w-4 h-4" />
+                        <X className="w-5 h-5" />
                       </button>
                     </div>
 
@@ -5263,7 +5440,7 @@ export default function App() {
                     window.parent.postMessage({ type: 'ALOV_EMBED_NAVIGATE', tab: 'discover' }, '*');
                   } catch {}
                 }}
-                className="absolute top-4 left-4 z-20 p-2.5 rounded-full bg-white/10 hover:bg-white/20 backdrop-blur-md text-white transition cursor-pointer"
+                className="absolute top-[calc(1rem+var(--alov-safe-top,0px))] left-4 z-30 min-w-[44px] min-h-[44px] w-11 h-11 flex items-center justify-center rounded-full bg-white/15 hover:bg-rose-600 border border-white/20 backdrop-blur-md text-white shadow-lg transition cursor-pointer"
               >
                 <X className="w-5 h-5" />
               </button>
@@ -5364,7 +5541,7 @@ export default function App() {
       {/* --- AUTHENTICATION MODAL --- */}
       {showAuthModal && (
         <div
-          className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-[#06060A]/80 backdrop-blur-xl"
+          className="fixed inset-0 z-50 flex items-center justify-center p-4 pt-[max(1rem,var(--alov-safe-top,0px))] bg-[#06060A]/80 backdrop-blur-xl"
           data-testid="auth-modal-backdrop"
         >
           <motion.div
@@ -5373,7 +5550,7 @@ export default function App() {
             transition={{ duration: 0.22, ease: [0.22, 1, 0.36, 1] }}
             data-testid="auth-modal"
             className={cn(
-              "bg-[#11131C] text-zinc-100 rounded-[28px] w-full p-6 sm:p-7 text-left space-y-4 relative shadow-[0_32px_90px_rgba(0,0,0,0.85)] border border-white/10 max-h-[92vh] overflow-y-auto",
+              "bg-[#11131C] text-zinc-100 rounded-[28px] w-full text-left relative shadow-[0_32px_90px_rgba(0,0,0,0.85)] border border-white/10 max-h-[92dvh] flex flex-col overflow-hidden",
               inlinePolicyReturnMode !== null
                 ? "max-w-xl"
                 : (authMode === 'google_face_id' || authMode === 'register_face_id' || (authMode === 'telegram' && telegramStep === 'face_id'))
@@ -5381,22 +5558,29 @@ export default function App() {
                   : "max-w-sm"
             )}
           >
-            <div className="pointer-events-none absolute -top-20 inset-x-10 h-32 bg-rose-600/15 blur-3xl rounded-full" />
+            <div className="pointer-events-none absolute -top-20 inset-x-10 h-32 bg-rose-600/15 blur-3xl rounded-full z-0" />
 
             {!(authMode === 'google_face_id' || authMode === 'register_face_id' || (authMode === 'telegram' && telegramStep === 'face_id')) && (
-              <button 
-                onClick={() => {
-                  resetAuthFormState();
-                  setShowAuthModal(false);
-                  setAuthMode('login');
-                  setTelegramStep('input_phone');
-                }} 
-                aria-label="Oynani yopish"
-                className="absolute top-5 right-5 w-8 h-8 rounded-full bg-white/[0.06] hover:bg-rose-500/20 text-zinc-400 hover:text-white flex items-center justify-center transition z-10 cursor-pointer"
-              >
-                <X className="w-4 h-4" />
-              </button>
+              <>
+                <div className="pointer-events-none absolute top-0 inset-x-0 h-14 bg-gradient-to-b from-[#11131C] via-[#11131C]/80 to-transparent z-30" />
+                <button 
+                  type="button"
+                  onClick={() => {
+                    resetAuthFormState();
+                    setShowAuthModal(false);
+                    setAuthMode('login');
+                    setTelegramStep('input_phone');
+                  }} 
+                  aria-label="Oynani yopish"
+                  data-testid="auth-modal-close-btn"
+                  className="absolute top-3.5 right-3.5 z-40 min-w-[44px] min-h-[44px] w-11 h-11 rounded-full bg-[#1B1E2B]/95 hover:bg-rose-600 border border-white/15 text-zinc-200 hover:text-white flex items-center justify-center shadow-lg transition cursor-pointer"
+                >
+                  <X className="w-5 h-5" />
+                </button>
+              </>
             )}
+
+            <div className="flex-1 min-h-0 overflow-y-auto overscroll-y-contain p-6 sm:p-7 space-y-4 relative z-10">
 
             {inlinePolicyReturnMode !== null ? (
               <Suspense fallback={<div className="py-10 text-center text-xs text-zinc-400">Yuklanmoqda...</div>}>
@@ -6202,7 +6386,7 @@ export default function App() {
               </div>
             ) : (
               <div className="space-y-4 text-center relative z-10">
-                <div className="space-y-2">
+                <div className="space-y-2 px-10">
                   <div className="w-11 h-11 rounded-2xl bg-gradient-to-br from-[#E11D48] to-rose-700 text-white flex items-center justify-center mx-auto shadow-[0_8px_24px_rgba(225,29,72,0.4)]">
                     <Flame className="w-5 h-5" />
                   </div>
@@ -6450,6 +6634,7 @@ export default function App() {
                 </div>
               </div>
             )}
+            </div>
           </motion.div>
         </div>
       )}
@@ -6461,10 +6646,12 @@ export default function App() {
             <div className="p-5 border-b border-white/10 flex items-center justify-between bg-[#181A26]">
               <h2 className="text-lg font-editorial font-bold text-white tracking-tight">Maxfiylik Siyosati (Privacy Policy)</h2>
               <button 
+                type="button"
+                aria-label="Maxfiylik siyosatini yopish"
                 onClick={() => setShowPrivacyModal(false)}
-                className="w-8 h-8 rounded-full bg-white/10 hover:bg-rose-500/20 text-zinc-300 hover:text-white flex items-center justify-center transition cursor-pointer"
+                className="min-w-[44px] min-h-[44px] w-11 h-11 rounded-full bg-white/10 hover:bg-rose-600 border border-white/15 text-zinc-200 hover:text-white flex items-center justify-center transition shrink-0 cursor-pointer"
               >
-                <X className="w-4 h-4" />
+                <X className="w-5 h-5" />
               </button>
             </div>
             
@@ -6546,10 +6733,12 @@ export default function App() {
             <div className="p-5 border-b border-white/10 flex items-center justify-between bg-[#181A26]">
               <h2 className="text-lg font-editorial font-bold text-white tracking-tight">Foydalanish Shartlari (Terms of Use)</h2>
               <button 
+                type="button"
+                aria-label="Foydalanish shartlarini yopish"
                 onClick={() => setShowTermsModal(false)}
-                className="w-8 h-8 rounded-full bg-white/10 hover:bg-rose-500/20 text-zinc-300 hover:text-white flex items-center justify-center transition cursor-pointer"
+                className="min-w-[44px] min-h-[44px] w-11 h-11 rounded-full bg-white/10 hover:bg-rose-600 border border-white/15 text-zinc-200 hover:text-white flex items-center justify-center transition shrink-0 cursor-pointer"
               >
-                <X className="w-4 h-4" />
+                <X className="w-5 h-5" />
               </button>
             </div>
             
@@ -6623,7 +6812,7 @@ export default function App() {
       {/* --- PROFILE QUESTIONNAIRE / EDIT MODAL --- */}
       {showProfileModal && (
         <div
-          className="fixed inset-0 z-[130] flex items-end sm:items-center justify-center p-0 sm:p-4 bg-black/75 backdrop-blur-md"
+          className="fixed inset-0 z-[130] flex items-end sm:items-center justify-center p-0 pt-[var(--alov-safe-top,0px)] sm:p-4 bg-black/75 backdrop-blur-md"
           onClick={() => setShowProfileModal(false)}
           data-testid="edit-profile-modal-backdrop"
         >
@@ -6633,7 +6822,7 @@ export default function App() {
             transition={{ duration: 0.22, ease: [0.22, 1, 0.36, 1] }}
             onClick={(e) => e.stopPropagation()}
             data-testid="edit-profile-modal"
-            className="bg-[#11131C] rounded-t-[28px] sm:rounded-[28px] max-w-2xl w-full max-h-[92vh] flex flex-col overflow-hidden shadow-[0_28px_80px_rgba(0,0,0,0.8)] border border-white/10 text-zinc-100"
+            className="bg-[#11131C] rounded-t-[28px] sm:rounded-[28px] max-w-2xl w-full max-h-[92dvh] flex flex-col overflow-hidden shadow-[0_28px_80px_rgba(0,0,0,0.8)] border border-white/10 text-zinc-100"
           >
             {/* Mobile Drag Handle */}
             <div className="w-10 h-1 rounded-full bg-white/20 mx-auto mt-2.5 mb-0.5 sm:hidden shrink-0" />
@@ -6653,9 +6842,9 @@ export default function App() {
                 onClick={() => setShowProfileModal(false)}
                 aria-label="Oynani yopish"
                 data-testid="edit-profile-close-btn"
-                className="w-10 h-10 rounded-full bg-white/[0.06] hover:bg-rose-500/20 text-zinc-300 hover:text-white flex items-center justify-center transition-colors shrink-0 cursor-pointer"
+                className="min-w-[44px] min-h-[44px] w-11 h-11 rounded-full bg-white/[0.08] hover:bg-rose-600 border border-white/15 text-zinc-200 hover:text-white flex items-center justify-center transition-colors shrink-0 cursor-pointer"
               >
-                <X className="w-4 h-4" />
+                <X className="w-5 h-5" />
               </button>
             </div>
 
@@ -7407,11 +7596,14 @@ export default function App() {
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ user: updatedUser }),
                   });
-                  const finalUser = mergeAuthoritativeUserState(currentUser, syncData?.user || updatedUser);
-                  setCurrentUser(finalUser);
-                  setRegAvatar(resolveEffectiveProfileAvatar(finalUser));
-                  setUsersList(prev => upsertUniqueUserInList(prev, finalUser));
-                  writeAuthoritativeUserCache(localStorage, finalUser);
+                  const finalUser = applyAuthoritativeUserSession(syncData?.user || updatedUser, syncData?.token);
+                  if (finalUser) {
+                    void updateExistingUserInFirestore(
+                      currentUser.uid,
+                      { avatar: finalUser.avatar, faceId: finalUser.faceId, isVerified: true },
+                      currentUser
+                    );
+                  }
                   setShowProfileFaceIdModal(false);
                   showToast("Face ID surati profilingizga qo'yildi");
                 }}
@@ -7493,27 +7685,34 @@ export default function App() {
 
       {/* --- GIFT SELECTION MODAL --- */}
       {showGiftModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/75 backdrop-blur-md">
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center p-4 pt-[max(1rem,var(--alov-safe-top,0px))] bg-black/75 backdrop-blur-md"
+          onClick={() => setShowGiftModal(false)}
+        >
           <motion.div
             initial={{ opacity: 0, scale: 0.96, y: 12 }}
             animate={{ opacity: 1, scale: 1, y: 0 }}
-            className="bg-[#11131C] rounded-[28px] max-w-sm w-full p-6 space-y-4 relative border border-white/10 shadow-[0_28px_80px_rgba(0,0,0,0.85)] text-zinc-100"
+            onClick={(e) => e.stopPropagation()}
+            className="bg-[#11131C] rounded-[28px] max-w-sm w-full p-5 sm:p-6 space-y-4 relative border border-white/10 shadow-[0_28px_80px_rgba(0,0,0,0.85)] text-zinc-100"
           >
-            <button 
-              onClick={() => setShowGiftModal(false)}
-              className="absolute top-5 right-5 w-8 h-8 rounded-full bg-white/[0.06] hover:bg-rose-500/20 text-zinc-300 hover:text-white flex items-center justify-center transition cursor-pointer"
-            >
-              <X className="w-4 h-4" />
-            </button>
-
-            <div className="space-y-1 pr-8">
-              <h3 className="text-xl font-editorial font-bold text-white flex items-center space-x-2">
-                <Gift className="w-5 h-5 text-amber-400" />
-                <span>Sovg'a yuborish</span>
-              </h3>
-              <p className="text-xs text-zinc-400 font-medium">
-                {selectedChatUser?.name || 'Foydalanuvchi'}ga virtual sovg'a taqdim eting:
-              </p>
+            <div className="flex items-start justify-between gap-3">
+              <div className="space-y-1 min-w-0">
+                <h3 className="text-xl font-editorial font-bold text-white flex items-center space-x-2">
+                  <Gift className="w-5 h-5 text-amber-400 shrink-0" />
+                  <span>Sovg'a yuborish</span>
+                </h3>
+                <p className="text-xs text-zinc-400 font-medium">
+                  {selectedChatUser?.name || 'Foydalanuvchi'}ga virtual sovg'a taqdim eting:
+                </p>
+              </div>
+              <button 
+                type="button"
+                aria-label="Sovg'a oynasini yopish"
+                onClick={() => setShowGiftModal(false)}
+                className="min-w-[44px] min-h-[44px] w-11 h-11 rounded-full bg-white/[0.08] hover:bg-rose-600 border border-white/15 text-zinc-200 hover:text-white flex items-center justify-center transition shrink-0 cursor-pointer"
+              >
+                <X className="w-5 h-5" />
+              </button>
             </div>
 
             <div className="bg-amber-500/10 border border-amber-400/25 rounded-2xl p-2.5 flex items-center justify-between text-xs font-bold text-amber-200">
@@ -7559,35 +7758,38 @@ export default function App() {
       {/* --- COIN SHOP MODAL (Ariza yuborish orqali Moneta olish) --- */}
       {showTopUpModal && (
         <div
-          className="fixed inset-0 z-[120] flex items-center justify-center p-3 sm:p-4 bg-black/75 backdrop-blur-md animate-fadeIn"
+          className="fixed inset-0 z-[120] flex items-center justify-center p-3 sm:p-4 pt-[max(0.75rem,var(--alov-safe-top,0px))] bg-black/75 backdrop-blur-md animate-fadeIn"
           data-testid="coin-shop-modal"
           onClick={() => { setShowTopUpModal(false); setWalletNoticeMsg(''); }}
         >
           <div
             onClick={(e) => e.stopPropagation()}
-            className="bg-[#11131C] text-zinc-100 rounded-[28px] max-w-md w-full p-5 sm:p-6 space-y-4 relative shadow-[0_28px_80px_rgba(0,0,0,0.75)] border border-white/10 max-h-[90vh] overflow-y-auto"
+            className="bg-[#11131C] text-zinc-100 rounded-[28px] max-w-md w-full shadow-[0_28px_80px_rgba(0,0,0,0.75)] border border-white/10 max-h-[90dvh] flex flex-col overflow-hidden"
           >
-            <button
-              type="button"
-              onClick={() => { setShowTopUpModal(false); setWalletNoticeMsg(''); }}
-              aria-label="Do'konni yopish"
-              className="absolute top-4 right-4 w-9 h-9 rounded-xl bg-white/[0.06] hover:bg-rose-600 text-zinc-300 hover:text-white flex items-center justify-center transition cursor-pointer"
-            >
-              <X className="w-4 h-4" />
-            </button>
-
-            <div className="space-y-1 pr-10">
-              <div className="flex items-center gap-2 text-amber-400">
-                <Coins className="w-5 h-5 fill-amber-400 text-amber-500" />
-                <span className="text-[11px] font-bold uppercase tracking-[0.14em]">Moneta Do'koni</span>
+            <div className="shrink-0 px-5 sm:px-6 pt-5 pb-3.5 border-b border-white/[0.08] bg-[#141724] flex items-start justify-between gap-3">
+              <div className="space-y-1 min-w-0">
+                <div className="flex items-center gap-2 text-amber-400">
+                  <Coins className="w-5 h-5 fill-amber-400 text-amber-500 shrink-0" />
+                  <span className="text-[11px] font-bold uppercase tracking-[0.14em]">Moneta Do'koni</span>
+                </div>
+                <h3 className="text-xl font-editorial font-bold text-white">
+                  Moneta buyurtma qilish
+                </h3>
               </div>
-              <h3 className="text-xl font-editorial font-bold text-white">
-                Moneta buyurtma qilish
-              </h3>
+              <button
+                type="button"
+                onClick={() => { setShowTopUpModal(false); setWalletNoticeMsg(''); }}
+                aria-label="Do'konni yopish"
+                className="min-w-[44px] min-h-[44px] w-11 h-11 rounded-xl bg-white/[0.08] hover:bg-rose-600 border border-white/15 text-zinc-200 hover:text-white flex items-center justify-center transition shrink-0 cursor-pointer"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <div className="flex-1 min-h-0 overflow-y-auto overscroll-y-contain p-5 sm:p-6 pt-4 space-y-4">
               <p className="text-xs text-zinc-400">
                 Paketni tanlang va Telegram username yoki telefon raqamingizni qoldiring — admin bog'lanib to'lovdan so'ng monetani hisobingizga o'tkazib beradi.
               </p>
-            </div>
 
             {walletNoticeMsg && (
               <div className="p-3 bg-amber-500/15 border border-amber-400/30 rounded-2xl text-amber-200 text-xs font-semibold">
@@ -7745,36 +7947,42 @@ export default function App() {
                 </div>
               </div>
             )}
+            </div>
           </div>
         </div>
       )}
 
       {/* --- WITHDRAW DIAMONDS MODAL (FOR FEMALE USERS) --- */}
       {showWithdrawModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/75 backdrop-blur-md">
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center p-4 pt-[max(1rem,var(--alov-safe-top,0px))] bg-black/75 backdrop-blur-md"
+          onClick={() => setShowWithdrawModal(false)}
+        >
           <motion.div
             initial={{ opacity: 0, scale: 0.96, y: 12 }}
             animate={{ opacity: 1, scale: 1, y: 0 }}
-            className="bg-[#11131C] rounded-[28px] max-w-sm w-full p-6 space-y-4 relative border border-white/10 shadow-[0_28px_80px_rgba(0,0,0,0.85)] text-zinc-100 max-h-[90vh] overflow-y-auto"
+            onClick={(e) => e.stopPropagation()}
+            className="bg-[#11131C] rounded-[28px] max-w-sm w-full border border-white/10 shadow-[0_28px_80px_rgba(0,0,0,0.85)] text-zinc-100 max-h-[90dvh] flex flex-col overflow-hidden"
           >
-            <button 
-              type="button"
-              aria-label="Oynani yopish"
-              onClick={() => setShowWithdrawModal(false)}
-              className="absolute top-5 right-5 w-8 h-8 rounded-full bg-white/[0.06] hover:bg-rose-500/20 text-zinc-300 hover:text-white flex items-center justify-center transition cursor-pointer"
-            >
-              <X className="w-4 h-4" />
-            </button>
-
-            <div className="space-y-1 pr-8">
-              <h3 className="text-xl font-editorial font-bold text-white flex items-center space-x-2">
-                <Wallet className="w-5 h-5 text-cyan-400" />
-                <span>Pul yechib olish</span>
+            <div className="shrink-0 px-5 sm:px-6 pt-5 pb-3.5 border-b border-white/[0.08] bg-[#141724] flex items-center justify-between gap-3">
+              <h3 className="text-xl font-editorial font-bold text-white flex items-center space-x-2 min-w-0">
+                <Wallet className="w-5 h-5 text-cyan-400 shrink-0" />
+                <span className="truncate">Pul yechib olish</span>
               </h3>
+              <button 
+                type="button"
+                aria-label="Oynani yopish"
+                onClick={() => setShowWithdrawModal(false)}
+                className="min-w-[44px] min-h-[44px] w-11 h-11 rounded-full bg-white/[0.08] hover:bg-rose-600 border border-white/15 text-zinc-200 hover:text-white flex items-center justify-center transition shrink-0 cursor-pointer"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <div className="flex-1 min-h-0 overflow-y-auto overscroll-y-contain p-5 sm:p-6 pt-4 space-y-4">
               <p className="text-xs text-zinc-400 font-medium">
                 Karta va Telegram/telefon ma'lumotingizni qoldiring — admin bog'lanib pulni kartangizga qo'lda o'tkazib beradi:
               </p>
-            </div>
 
             <div className="bg-cyan-500/10 border border-cyan-400/25 rounded-2xl p-3.5 space-y-1">
               <div className="flex items-center justify-between text-xs font-bold text-cyan-100">
@@ -7847,6 +8055,7 @@ export default function App() {
                 <span>Buyurtma berish (Adminga yuborish)</span>
               </button>
             </form>
+            </div>
           </motion.div>
         </div>
       )}
@@ -7880,12 +8089,10 @@ export default function App() {
               if (!updatedUser?.uid) return;
               setUsersList((prev) => upsertUniqueUserInList(prev, updatedUser));
               if (updatedUser.uid === currentUser?.uid) {
-                const clean = mergeAuthoritativeUserState(currentUser, updatedUser);
-                setCurrentUser(clean);
-                if (clean.gender === 'male' || clean.gender === 'female') setRegGender(clean.gender);
-                if (clean.birthDate) setRegBirthDate(clean.birthDate);
-                if (clean.age) setRegAge(String(clean.age));
-                writeAuthoritativeUserCache(localStorage, clean);
+                const clean = applyAuthoritativeUserSession(updatedUser);
+                if (clean) {
+                  void saveOrBackfillUserInFirestore(clean);
+                }
               }
             }}
           />

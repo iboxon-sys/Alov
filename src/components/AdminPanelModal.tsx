@@ -607,7 +607,7 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
       animate={{ opacity: 1 }}
       exit={{ opacity: 0 }}
       transition={{ duration: 0.18 }}
-      className="fixed inset-0 z-[130] flex items-center justify-center p-2 sm:p-5 bg-black/80 backdrop-blur-md"
+      className="fixed inset-0 z-[130] flex items-center justify-center p-2 sm:p-5 pt-[max(0.5rem,var(--alov-safe-top,0px))] bg-black/80 backdrop-blur-md"
       data-testid="admin-panel-modal"
     >
       <motion.div
@@ -650,10 +650,11 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
               type="button"
               onClick={onClose}
               data-testid="admin-panel-close-btn"
-              className="w-9 h-9 rounded-xl bg-white/[0.06] hover:bg-rose-600 border border-white/10 text-zinc-200 hover:text-white flex items-center justify-center transition cursor-pointer"
+              aria-label="Admin panelni yopish"
+              className="min-w-[44px] min-h-[44px] w-11 h-11 rounded-xl bg-white/[0.08] hover:bg-rose-600 border border-white/15 text-zinc-200 hover:text-white flex items-center justify-center transition shrink-0 cursor-pointer"
               title="Yopish"
             >
-              <X className="w-4 h-4" />
+              <X className="w-5 h-5" />
             </button>
           </div>
         </div>

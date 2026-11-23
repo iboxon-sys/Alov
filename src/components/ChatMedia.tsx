@@ -43,15 +43,15 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({ url, className = '' })
           onClick={() => setIsLightboxOpen(true)}
           aria-label="Videoni kattalashtirish"
           title="Kattalashtirish"
-          className="absolute top-2 left-2 p-1.5 rounded-full bg-black/55 hover:bg-black/80 text-white/90 opacity-0 group-hover:opacity-100 transition cursor-pointer backdrop-blur-xs"
+          className="absolute top-2 left-2 min-w-[36px] min-h-[36px] p-2 rounded-full bg-black/65 hover:bg-black/85 text-white/95 opacity-95 sm:opacity-0 sm:group-hover:opacity-100 transition flex items-center justify-center cursor-pointer backdrop-blur-xs border border-white/15"
         >
-          <Maximize2 className="w-3.5 h-3.5" />
+          <Maximize2 className="w-4 h-4" />
         </button>
       </div>
 
       {isLightboxOpen && (
         <div
-          className="fixed inset-0 z-50 bg-black/90 backdrop-blur-md flex items-center justify-center p-4"
+          className="fixed inset-0 z-[180] bg-black/90 backdrop-blur-md flex items-center justify-center p-4 pt-[max(1rem,var(--alov-safe-top,0px))]"
           onClick={(e) => {
             if (e.target === e.currentTarget) setIsLightboxOpen(false);
           }}
@@ -60,7 +60,7 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({ url, className = '' })
             type="button"
             onClick={() => setIsLightboxOpen(false)}
             aria-label="Yopish"
-            className="absolute top-4 right-4 p-2.5 rounded-full bg-white/10 hover:bg-white/20 text-white cursor-pointer"
+            className="absolute top-[calc(1rem+var(--alov-safe-top,0px))] right-4 z-30 min-w-[44px] min-h-[44px] w-11 h-11 flex items-center justify-center rounded-full bg-black/70 hover:bg-rose-600 border border-white/25 text-white shadow-lg transition cursor-pointer"
           >
             <X className="w-5 h-5" />
           </button>

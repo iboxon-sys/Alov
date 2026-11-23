@@ -1373,7 +1373,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
                   type="button"
                   onClick={() => setChatSearchQuery('')}
                   aria-label="Qidiruvni tozalash"
-                  className="absolute right-1 w-10 h-10 rounded-full flex items-center justify-center text-zinc-400 hover:text-white cursor-pointer"
+                  className="absolute right-0.5 z-10 min-w-[44px] min-h-[44px] w-11 h-11 rounded-full flex items-center justify-center text-zinc-300 hover:text-white hover:bg-white/[0.08] cursor-pointer transition"
                 >
                   <X className="w-4 h-4" />
                 </button>
@@ -1557,7 +1557,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
       {/* Sticky Locked Top Bar (Avatar, Name, Status, Gift, Video Call) */}
       <div
         data-testid="chat-conversation-header"
-        className="shrink-0 sticky top-0 z-30 px-2 sm:px-4 pt-[max(0.45rem,env(safe-area-inset-top))] pb-2 border-b border-white/[0.08] flex items-center justify-between gap-1.5 sm:gap-3 bg-[#0F111A]/95 backdrop-blur-xl"
+        className="shrink-0 sticky top-0 z-30 px-2 sm:px-4 pt-[max(0.45rem,var(--alov-safe-top,env(safe-area-inset-top,0px)))] pb-2 border-b border-white/[0.08] flex items-center justify-between gap-1.5 sm:gap-3 bg-[#0F111A]/95 backdrop-blur-xl"
       >
         <div className="flex items-center gap-1 sm:gap-2 min-w-0 flex-1">
           <button
@@ -2247,7 +2247,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
       {/* Image Fullscreen Lightbox */}
       {lightboxImageUrl && (
         <div
-          className="fixed inset-0 z-50 bg-black/90 backdrop-blur-md flex items-center justify-center p-4"
+          className="fixed inset-0 z-[180] bg-black/90 backdrop-blur-md flex items-center justify-center p-4 pt-[max(1rem,var(--alov-safe-top,0px))]"
           onClick={(e) => {
             if (e.target === e.currentTarget) setLightboxImageUrl(null);
           }}
@@ -2256,7 +2256,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
             type="button"
             onClick={() => setLightboxImageUrl(null)}
             aria-label="Yopish"
-            className="absolute top-4 right-4 p-2.5 rounded-full bg-white/10 hover:bg-white/20 text-white cursor-pointer"
+            className="absolute top-[calc(1rem+var(--alov-safe-top,0px))] right-4 z-30 min-w-[44px] min-h-[44px] w-11 h-11 flex items-center justify-center rounded-full bg-black/70 hover:bg-rose-600 border border-white/25 text-white shadow-lg transition cursor-pointer"
           >
             <X className="w-5 h-5" />
           </button>

@@ -2,6 +2,7 @@ import {createRoot} from 'react-dom/client';
 import App from './App.tsx';
 import './index.css';
 import { initGoogleTagManager } from './utils/analytics';
+import { ErrorBoundary } from './components/ErrorBoundary';
 
 initGoogleTagManager(import.meta.env.VITE_GTM_ID);
 
@@ -51,4 +52,8 @@ document.addEventListener('touchmove', (e) => {
   }
 }, { passive: false });
 
-createRoot(document.getElementById('root')!).render(<App />);
+createRoot(document.getElementById('root')!).render(
+  <ErrorBoundary>
+    <App />
+  </ErrorBoundary>
+);

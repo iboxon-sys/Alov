@@ -92,7 +92,7 @@ export const PublicProfileModal: React.FC<PublicProfileModalProps> = ({
       animate={{ opacity: 1 }}
       exit={{ opacity: 0 }}
       transition={{ duration: 0.18 }}
-      className="fixed inset-0 z-[150] bg-black/75 backdrop-blur-md flex items-center justify-center p-2.5 sm:p-4"
+      className="fixed inset-0 z-[150] bg-black/75 backdrop-blur-md flex items-center justify-center p-2.5 sm:p-4 pt-[max(0.625rem,var(--alov-safe-top,0px))]"
       onClick={onClose}
       data-testid="public-profile-modal"
     >
@@ -101,9 +101,20 @@ export const PublicProfileModal: React.FC<PublicProfileModalProps> = ({
         animate={{ opacity: 1, scale: 1, y: 0 }}
         exit={{ opacity: 0, scale: 0.96, y: 10 }}
         transition={{ duration: 0.24, ease: [0.16, 1, 0.3, 1] }}
-        className="bg-[#0F1118] w-full max-w-2xl rounded-[28px] shadow-[0_30px_90px_rgba(0,0,0,0.85)] border border-white/10 overflow-hidden flex flex-col max-h-[92vh] text-zinc-100"
+        className="relative bg-[#0F1118] w-full max-w-2xl rounded-[28px] shadow-[0_30px_90px_rgba(0,0,0,0.85)] border border-white/10 overflow-hidden flex flex-col max-h-[92dvh] text-zinc-100"
         onClick={(e) => e.stopPropagation()}
       >
+        {/* Pinned Close button (always visible & clickable even while scrolled) */}
+        <button
+          type="button"
+          onClick={onClose}
+          aria-label="Profilni yopish"
+          data-testid="public-profile-close-btn"
+          className="absolute top-3 right-3 z-40 min-w-[44px] min-h-[44px] w-11 h-11 rounded-full bg-black/70 hover:bg-rose-600 backdrop-blur-md text-white flex items-center justify-center transition-colors border border-white/25 shadow-lg cursor-pointer"
+        >
+          <X className="w-5 h-5" />
+        </button>
+
         <div className="overflow-y-auto flex-1">
           {/* Large Profile Cover Banner */}
           <div className="relative h-44 sm:h-56 w-full bg-gradient-to-br from-[#1C141A] via-[#1A1624] to-[#121622] overflow-hidden">
@@ -142,17 +153,6 @@ export const PublicProfileModal: React.FC<PublicProfileModalProps> = ({
               />
               <span data-testid="public-profile-presence">{presenceLabel}</span>
             </div>
-
-            {/* Close button */}
-            <button
-              type="button"
-              onClick={onClose}
-              aria-label="Profilni yopish"
-              data-testid="public-profile-close-btn"
-              className="absolute top-3.5 right-4 z-10 w-9 h-9 rounded-full bg-black/55 hover:bg-rose-600 backdrop-blur-md text-white flex items-center justify-center transition-colors border border-white/15 cursor-pointer"
-            >
-              <X className="w-4 h-4" />
-            </button>
           </div>
 
           {/* Main Identity Card */}

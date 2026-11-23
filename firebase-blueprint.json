@@ -1,111 +1,352 @@
 {
   "entities": {
     "User": {
-      "title": "User Profile",
-      "description": "User profile data stored in Firestore",
+      "title": "User Core Profile",
+      "description": "Authoritative non-PII user identity, profile details, Face ID status, and presence state stored in Firestore.",
       "type": "object",
       "properties": {
-        "uid": { "type": "string" },
-        "id": { "type": "string" },
-        "name": { "type": "string", "maxLength": 100 },
+        "uid": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "id": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "name": { "type": "string", "minLength": 1, "maxLength": 100 },
+        "username": { "type": "string", "maxLength": 32 },
         "age": { "type": "number" },
-        "gender": { "type": "string", "enum": ["male", "female"] },
-        "region": { "type": "string" },
-        "district": { "type": "string" },
-        "neighborhood": { "type": "string" },
-        "phone": { "type": "string", "maxLength": 20 },
-        "telegram": { "type": "string", "maxLength": 50 },
-        "instagram": { "type": "string", "maxLength": 50 },
+        "birthDate": { "type": "string", "maxLength": 20, "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$" },
+        "gender": { "type": "string", "enum": ["male", "female", ""] },
+        "region": { "type": "string", "maxLength": 100 },
+        "district": { "type": "string", "maxLength": 100 },
+        "neighborhood": { "type": "string", "maxLength": 100 },
+        "telegram": { "type": "string", "maxLength": 1000 },
+        "instagram": { "type": "string", "maxLength": 32 },
         "bio": { "type": "string", "maxLength": 500 },
-        "avatar": { "type": "string" },
-        "startGifUrl": { "type": "string" },
-        "email": { "type": "string" },
-        "photoURL": { "type": "string" },
-        "role": { "type": "string" },
-        "createdAt": { "type": "string" },
+        "avatar": { "type": "string", "maxLength": 1000 },
+        "banner": { "type": "string", "maxLength": 1000 },
+        "videoUrl": { "type": "string", "maxLength": 1000 },
+        "startGifUrl": { "type": "string", "maxLength": 1000 },
+        "hasCustomAvatar": { "type": "boolean" },
+        "hasEditedProfile": { "type": "boolean" },
+        "isProfileCompleted": { "type": "boolean" },
+        "isVerified": { "type": "boolean" },
+        "role": { "type": "string", "enum": ["user", "admin"] },
+        "isAdmin": { "type": "boolean" },
+        "locationVisibility": { "type": "string", "enum": ["everyone", "mutual", "ghost"] },
+        "isLocationEnabled": { "type": "boolean" },
+        "location": { "type": "object" },
+        "isOnline": { "type": "boolean" },
+        "status": { "type": "string", "enum": ["online", "offline"] },
         "followersCount": { "type": "number" },
         "followingCount": { "type": "number" },
         "likesCount": { "type": "number" },
-        "status": { "type": "string", "enum": ["online", "offline"] },
-        "lastSeen": { "type": "string" },
-        "isLive": { "type": "boolean" },
-        "liveStreamId": { "type": "string" },
-        "liveTitle": { "type": "string" },
-        "isLocationEnabled": { "type": "boolean" },
-        "location": {
-          "type": "object",
-          "properties": {
-            "lat": { "type": "number" },
-            "lng": { "type": "number" }
-          }
-        },
-        "wallet": {
-          "type": "object",
-          "properties": {
-            "balanceDiamonds": { "type": "number" },
-            "pendingDiamonds": { "type": "number" },
-            "diamondProgress": { "type": "number" },
-            "balanceUzs": { "type": "number" },
-            "pendingUzs": { "type": "number" },
-            "totalEarnedDiamonds": { "type": "number" },
-            "totalWithdrawnUzs": { "type": "number" },
-            "exchangeRateUzs": { "type": "number" },
-            "unlockWindowHours": { "type": "number" }
-          }
-        }
+        "faceId": { "type": "object" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
       },
-      "required": ["uid", "id", "name"]
+      "required": [
+        "uid",
+        "id",
+        "name",
+        "username",
+        "age",
+        "birthDate",
+        "gender",
+        "region",
+        "district",
+        "neighborhood",
+        "telegram",
+        "instagram",
+        "bio",
+        "avatar",
+        "banner",
+        "videoUrl",
+        "startGifUrl",
+        "hasCustomAvatar",
+        "hasEditedProfile",
+        "isProfileCompleted",
+        "isVerified",
+        "role",
+        "isAdmin",
+        "locationVisibility",
+        "isLocationEnabled",
+        "isOnline",
+        "status",
+        "followersCount",
+        "followingCount",
+        "likesCount",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "UserPrivateInfo": {
+      "title": "User Private PII",
+      "description": "Strictly isolated PII fields (email, phone, bankCard, telegramChatId) accessible only to the owner or an admin.",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "email": { "type": "string", "maxLength": 160 },
+        "phone": { "type": "string", "maxLength": 32 },
+        "bankCard": { "type": "string", "maxLength": 32 },
+        "telegramChatId": { "type": "number" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["uid", "email", "phone", "bankCard", "telegramChatId", "createdAt", "updatedAt"]
+    },
+    "UserWallet": {
+      "title": "User Wallet",
+      "description": "Persistent coins and diamonds ledger snapshot preserved across deploys and updates.",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "coins": { "type": "number" },
+        "diamonds": { "type": "number" },
+        "diamondProgress": { "type": "number" },
+        "pendingDiamondBatches": { "type": "array" },
+        "totalEarnedDiamonds": { "type": "number" },
+        "totalWithdrawnUzs": { "type": "number" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "uid",
+        "coins",
+        "diamonds",
+        "diamondProgress",
+        "pendingDiamondBatches",
+        "totalEarnedDiamonds",
+        "totalWithdrawnUzs",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "PublicProfile": {
+      "title": "Public Discoverable Profile",
+      "description": "PII-free public profile card shown in Discover, Map, and Chats.",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "id": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "name": { "type": "string", "minLength": 1, "maxLength": 100 },
+        "username": { "type": "string", "maxLength": 32 },
+        "age": { "type": "number" },
+        "gender": { "type": "string", "enum": ["male", "female", ""] },
+        "region": { "type": "string", "maxLength": 100 },
+        "district": { "type": "string", "maxLength": 100 },
+        "bio": { "type": "string", "maxLength": 500 },
+        "avatar": { "type": "string", "maxLength": 1000 },
+        "banner": { "type": "string", "maxLength": 1000 },
+        "videoUrl": { "type": "string", "maxLength": 1000 },
+        "startGifUrl": { "type": "string", "maxLength": 1000 },
+        "isVerified": { "type": "boolean" },
+        "isProfileCompleted": { "type": "boolean" },
+        "locationVisibility": { "type": "string", "enum": ["everyone", "mutual", "ghost"] },
+        "isLocationEnabled": { "type": "boolean" },
+        "location": { "type": "object" },
+        "isOnline": { "type": "boolean" },
+        "status": { "type": "string", "enum": ["online", "offline"] },
+        "followersCount": { "type": "number" },
+        "followingCount": { "type": "number" },
+        "likesCount": { "type": "number" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "uid",
+        "id",
+        "name",
+        "username",
+        "age",
+        "gender",
+        "region",
+        "district",
+        "bio",
+        "avatar",
+        "banner",
+        "videoUrl",
+        "startGifUrl",
+        "isVerified",
+        "isProfileCompleted",
+        "locationVisibility",
+        "isLocationEnabled",
+        "isOnline",
+        "status",
+        "followersCount",
+        "followingCount",
+        "likesCount",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "UserSettings": {
+      "title": "User Settings",
+      "description": "Privacy, geolocation visibility, start GIF, and notification preferences per user.",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "locationVisibility": { "type": "string", "enum": ["everyone", "mutual", "ghost"] },
+        "isLocationEnabled": { "type": "boolean" },
+        "startGifUrl": { "type": "string", "maxLength": 1000 },
+        "language": { "type": "string", "maxLength": 10 },
+        "notificationsEnabled": { "type": "boolean" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "uid",
+        "locationVisibility",
+        "isLocationEnabled",
+        "startGifUrl",
+        "language",
+        "notificationsEnabled",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "AdminRecord": {
+      "title": "Admin RBAC Entry",
+      "description": "Trusted administrator allowlist documents.",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "role": { "type": "string", "enum": ["admin"] },
+        "grantedBy": { "type": "string", "maxLength": 128 },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["uid", "role", "grantedBy", "createdAt"]
     },
     "Chat": {
       "title": "Chat Dialogue",
-      "description": "Metadata for a 1-on-1 conversation",
+      "description": "Metadata for a 1-on-1 conversation between two participants.",
       "type": "object",
       "properties": {
         "participants": { "type": "array" },
-        "lastMessage": { "type": "string" },
-        "lastSenderId": { "type": "string" },
-        "updatedAt": { "type": "string" },
+        "lastMessage": { "type": "string", "maxLength": 4000 },
+        "lastSenderId": { "type": "string", "maxLength": 128 },
         "isTyping": { "type": "object" },
-        "unreadCount": { "type": "object" }
-      }
+        "unreadCount": { "type": "object" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["participants", "lastMessage", "lastSenderId", "createdAt", "updatedAt"]
     },
     "ChatMessage": {
       "title": "Chat Message",
-      "description": "1-on-1 private chat message",
+      "description": "Immutable 1-on-1 private chat message.",
       "type": "object",
       "properties": {
-        "senderId": { "type": "string" },
-        "senderName": { "type": "string" },
-        "text": { "type": "string" },
-        "type": { "type": "string", "enum": ["text", "meet", "image", "video", "audio", "voice"] },
-        "fileUrl": { "type": "string" },
-        "meetUrl": { "type": "string" },
+        "senderId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "recipientId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "senderName": { "type": "string", "maxLength": 100 },
+        "text": { "type": "string", "maxLength": 4000 },
+        "type": { "type": "string", "enum": ["text", "meet", "image", "video", "audio", "voice", "gif", "gift"] },
+        "fileUrl": { "type": "string", "maxLength": 1000 },
+        "meetUrl": { "type": "string", "maxLength": 1000 },
         "read": { "type": "boolean" },
-        "createdAt": { "type": "string" }
+        "createdAt": { "type": "string", "format": "date-time" }
       },
-      "required": ["senderId", "text"]
+      "required": ["senderId", "recipientId", "text", "type", "read", "createdAt"]
+    },
+    "Post": {
+      "title": "Community Post",
+      "description": "User feed post with media URLs, caption, and likes count.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "authorUid": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "authorName": { "type": "string", "maxLength": 100 },
+        "caption": { "type": "string", "maxLength": 2000 },
+        "mediaUrl": { "type": "string", "maxLength": 1000 },
+        "mediaType": { "type": "string", "enum": ["image", "video", "audio", "text"] },
+        "likesCount": { "type": "number" },
+        "likedBy": { "type": "array" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "authorUid", "authorName", "caption", "mediaUrl", "mediaType", "likesCount", "likedBy", "createdAt", "updatedAt"]
     },
     "LiveStream": {
       "title": "Live Stream Room",
-      "description": "Live broadcast streaming session",
+      "description": "Live broadcast streaming session.",
       "type": "object",
       "properties": {
-        "streamId": { "type": "string" },
-        "hostUid": { "type": "string" },
-        "hostName": { "type": "string" },
-        "hostAvatar": { "type": "string" },
-        "title": { "type": "string" },
+        "streamId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "hostUid": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "hostName": { "type": "string", "maxLength": 100 },
+        "hostAvatar": { "type": "string", "maxLength": 1000 },
+        "title": { "type": "string", "maxLength": 200 },
         "status": { "type": "string", "enum": ["active", "ended"] },
         "viewerCount": { "type": "number" },
-        "createdAt": { "type": "string" }
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
       },
-      "required": ["streamId", "hostUid", "status"]
+      "required": ["streamId", "hostUid", "hostName", "title", "status", "viewerCount", "createdAt", "updatedAt"]
+    },
+    "LiveStreamMessage": {
+      "title": "Live Stream Chat Message",
+      "description": "Message inside a live stream room.",
+      "type": "object",
+      "properties": {
+        "senderUid": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "senderName": { "type": "string", "maxLength": 100 },
+        "text": { "type": "string", "maxLength": 500 },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["senderUid", "senderName", "text", "createdAt"]
+    },
+    "LiveStreamViewer": {
+      "title": "Live Stream Viewer",
+      "description": "Viewer registration document under a live stream.",
+      "type": "object",
+      "properties": {
+        "viewerId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "joinedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["viewerId", "joinedAt"]
+    },
+    "WebRTCSignal": {
+      "title": "WebRTC Signaling Payload",
+      "description": "WebRTC offer/answer/ICE signaling record between host and viewer.",
+      "type": "object",
+      "properties": {
+        "senderUid": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "type": { "type": "string", "enum": ["offer", "answer", "candidate"] },
+        "payload": { "type": "string", "maxLength": 16000 },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["senderUid", "type", "payload", "createdAt"]
+    },
+    "ConnectionTest": {
+      "title": "Firestore Connection Probe",
+      "description": "Read-only connectivity probe document.",
+      "type": "object",
+      "properties": {
+        "ok": { "type": "boolean" }
+      },
+      "required": ["ok"]
     }
   },
   "firestore": {
     "/users/{userId}": {
       "schema": "User",
-      "description": "User profile documents"
+      "description": "Authoritative user profile records keyed by uid"
+    },
+    "/users/{userId}/private/{docId}": {
+      "schema": "UserPrivateInfo",
+      "description": "Isolated user PII (email, phone, bankCard, telegramChatId) stored at info"
+    },
+    "/users/{userId}/wallet/{docId}": {
+      "schema": "UserWallet",
+      "description": "User coins and diamonds balance stored at main"
+    },
+    "/public_profiles/{userId}": {
+      "schema": "PublicProfile",
+      "description": "Public discoverable profile cards without PII"
+    },
+    "/user_settings/{userId}": {
+      "schema": "UserSettings",
+      "description": "User privacy, location visibility, and Start GIF settings"
+    },
+    "/admins/{adminId}": {
+      "schema": "AdminRecord",
+      "description": "Trusted admin role allowlist documents"
     },
     "/chats/{chatId}": {
       "schema": "Chat",
@@ -115,9 +356,29 @@
       "schema": "ChatMessage",
       "description": "1-on-1 private messages"
     },
+    "/posts/{postId}": {
+      "schema": "Post",
+      "description": "User feed posts"
+    },
     "/live_streams/{streamId}": {
       "schema": "LiveStream",
-      "description": "Active and past live stream sessions"
+      "description": "Active and ended live stream sessions"
+    },
+    "/live_streams/{streamId}/messages/{messageId}": {
+      "schema": "LiveStreamMessage",
+      "description": "Live stream room chat messages"
+    },
+    "/live_streams/{streamId}/viewers/{viewerId}": {
+      "schema": "LiveStreamViewer",
+      "description": "Live stream viewer records"
+    },
+    "/live_streams/{streamId}/viewers/{viewerId}/signals/{signalId}": {
+      "schema": "WebRTCSignal",
+      "description": "WebRTC signaling records between host and viewer"
+    },
+    "/test/{docId}": {
+      "schema": "ConnectionTest",
+      "description": "Connectivity check probe"
     }
   }
 }

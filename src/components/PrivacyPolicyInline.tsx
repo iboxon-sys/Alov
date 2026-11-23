@@ -37,7 +37,7 @@ export const PrivacyPolicyInline: React.FC<PrivacyPolicyInlineProps> = ({
 
   return (
     <div className="space-y-3.5 relative z-10 text-left" data-testid="inline-privacy-policy">
-      <div className="flex items-center justify-between gap-2 pb-2.5 pr-10 border-b border-white/10">
+      <div className="flex items-center justify-between gap-2 pb-2.5 pr-14 border-b border-white/10">
         <div className="flex items-center gap-2 min-w-0">
           <div className="w-8 h-8 rounded-xl bg-rose-500/15 border border-rose-500/25 text-rose-400 flex items-center justify-center shrink-0">
             <ShieldCheck className="w-4 h-4" />
@@ -53,7 +53,7 @@ export const PrivacyPolicyInline: React.FC<PrivacyPolicyInlineProps> = ({
           type="button"
           onClick={onBack}
           data-testid="inline-privacy-back-btn"
-          className="px-2.5 py-1.5 rounded-xl bg-white/[0.06] hover:bg-white/[0.12] text-zinc-300 hover:text-white text-[11px] font-bold flex items-center gap-1 transition shrink-0 cursor-pointer"
+          className="min-h-[40px] px-3 py-1.5 rounded-xl bg-white/[0.06] hover:bg-white/[0.12] text-zinc-300 hover:text-white text-[11px] font-bold flex items-center gap-1 transition shrink-0 cursor-pointer"
         >
           <ArrowLeft className="w-3.5 h-3.5" />
           <span>Orqaga</span>

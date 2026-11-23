@@ -835,9 +835,9 @@ export const PostsFeed: React.FC<PostsFeedProps> = ({
                   onClick={() => setShowComposeModal(false)}
                   aria-label="Yopish"
                   data-testid="compose-modal-close-btn"
-                  className="w-8 h-8 rounded-full bg-white/[0.06] hover:bg-white/15 text-zinc-300 hover:text-white flex items-center justify-center transition-colors cursor-pointer"
+                  className="min-w-[44px] min-h-[44px] w-11 h-11 rounded-full bg-white/[0.08] hover:bg-rose-600 border border-white/15 text-zinc-200 hover:text-white flex items-center justify-center transition-colors shrink-0 cursor-pointer"
                 >
-                  <X className="w-4 h-4" />
+                  <X className="w-5 h-5" />
                 </button>
               </div>
 
@@ -989,9 +989,9 @@ export const PostsFeed: React.FC<PostsFeedProps> = ({
                             setEmbedUrl('');
                           }}
                           aria-label="Rasmni o'chirish"
-                          className="absolute top-2.5 right-2.5 z-10 w-8 h-8 rounded-full bg-black/70 hover:bg-black text-white flex items-center justify-center transition cursor-pointer"
+                          className="absolute top-2.5 right-2.5 z-20 min-w-[44px] min-h-[44px] w-11 h-11 rounded-full bg-black/75 hover:bg-rose-600 border border-white/20 text-white flex items-center justify-center transition cursor-pointer"
                         >
-                          <X className="w-4 h-4" />
+                          <X className="w-5 h-5" />
                         </button>
                         <img src={resolveApiMediaUrl(mediaUrl)} alt="Preview" className="w-full max-h-72 object-cover" />
                       </div>
@@ -1071,9 +1071,9 @@ export const PostsFeed: React.FC<PostsFeedProps> = ({
                               setLinkInputText('');
                             }}
                             aria-label="Videoni o'chirish"
-                            className="absolute top-2.5 right-2.5 z-20 w-8 h-8 rounded-full bg-black/80 hover:bg-black text-white flex items-center justify-center transition cursor-pointer"
+                            className="absolute top-2.5 right-2.5 z-20 min-w-[44px] min-h-[44px] w-11 h-11 rounded-full bg-black/80 hover:bg-rose-600 border border-white/20 text-white flex items-center justify-center transition cursor-pointer"
                           >
-                            <X className="w-4 h-4" />
+                            <X className="w-5 h-5" />
                           </button>
 
                           <div className={isVerticalVideo ? 'aspect-[9/16] max-w-[260px] mx-auto bg-black overflow-hidden' : 'w-full bg-black'}>

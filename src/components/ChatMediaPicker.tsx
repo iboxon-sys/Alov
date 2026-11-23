@@ -457,10 +457,11 @@ export const ChatMediaPicker: React.FC<ChatMediaPickerProps> = ({
               type="button"
               onClick={handleClear}
               data-testid="media-preview-close"
-              className="p-1.5 rounded-full bg-white/5 hover:bg-white/15 text-zinc-400 hover:text-white transition cursor-pointer"
+              aria-label="Media yuborishni bekor qilish"
+              className="min-w-[44px] min-h-[44px] w-11 h-11 rounded-full bg-white/[0.08] hover:bg-rose-600 border border-white/15 text-zinc-200 hover:text-white flex items-center justify-center transition shrink-0 cursor-pointer"
               title="Bekor qilish"
             >
-              <X className="w-4 h-4" />
+              <X className="w-5 h-5" />
             </button>
           </div>
 
@@ -585,10 +586,11 @@ export const ChatMediaPicker: React.FC<ChatMediaPickerProps> = ({
               <button
                 type="button"
                 onClick={onToggleOpen}
-                className="p-1 rounded-lg hover:bg-white/10 text-zinc-400 hover:text-white transition cursor-pointer"
+                aria-label="Galereyani yopish"
+                className="min-w-[44px] min-h-[44px] w-11 h-11 rounded-xl bg-white/[0.08] hover:bg-rose-600 border border-white/15 text-zinc-200 hover:text-white flex items-center justify-center transition shrink-0 cursor-pointer"
                 title="Yopish"
               >
-                <X className="w-4 h-4" />
+                <X className="w-5 h-5" />
               </button>
             </div>
           </div>

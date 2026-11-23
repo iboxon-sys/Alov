@@ -651,7 +651,7 @@ export const LiveStreamModal: React.FC<LiveStreamModalProps> = ({
 
   // Shared Top Bar (Host Avatar, Name, Red LIVE Badge, Eye + Real-Time Viewer Count)
   const renderTopBar = () => (
-    <div className="relative z-30 px-3.5 pt-4 pb-2 flex items-center justify-between gap-2 text-white">
+    <div className="relative z-30 px-3.5 pt-[calc(1rem+var(--alov-safe-top,0px))] pb-2 flex items-center justify-between gap-2 text-white">
       <div className="flex items-center gap-2.5 min-w-0 bg-black/45 backdrop-blur-md pl-1.5 pr-3 py-1.5 rounded-full border border-white/10">
         <div className="relative shrink-0">
           <img
@@ -701,9 +701,9 @@ export const LiveStreamModal: React.FC<LiveStreamModalProps> = ({
             type="button"
             onClick={onClose}
             aria-label="Efirdan chiqish"
-            className="p-2 rounded-full bg-black/50 backdrop-blur-md hover:bg-white/15 border border-white/10 transition cursor-pointer"
+            className="min-w-[44px] min-h-[44px] w-11 h-11 flex items-center justify-center rounded-full bg-black/55 backdrop-blur-md hover:bg-rose-600 border border-white/20 text-white transition shrink-0 cursor-pointer"
           >
-            <X className="w-4 h-4" />
+            <X className="w-5 h-5" />
           </button>
         )}
       </div>
@@ -831,8 +831,8 @@ export const LiveStreamModal: React.FC<LiveStreamModalProps> = ({
         {/* --- BROADCASTER (HOST) FLOW --- */}
         {mode === 'broadcaster' ? (
           !isLiveActive ? (
-            <div className="flex-1 flex flex-col justify-between p-6 text-white text-center bg-gradient-to-b from-[#13141C] to-[#09090D]">
-              <div className="flex justify-between items-center">
+            <div className="flex-1 flex flex-col justify-between p-6 pt-[calc(1.5rem+var(--alov-safe-top,0px))] text-white text-center bg-gradient-to-b from-[#13141C] to-[#09090D]">
+              <div className="flex justify-between items-center gap-3">
                 <div className="flex items-center gap-2">
                   <Radio className="w-5 h-5 text-rose-500 animate-pulse" />
                   <span className="font-bold text-xs tracking-wider uppercase">
@@ -842,7 +842,8 @@ export const LiveStreamModal: React.FC<LiveStreamModalProps> = ({
                 <button
                   type="button"
                   onClick={onClose}
-                  className="p-2 rounded-full bg-white/10 hover:bg-white/20 transition cursor-pointer"
+                  aria-label="Efir oynasini yopish"
+                  className="min-w-[44px] min-h-[44px] w-11 h-11 flex items-center justify-center rounded-full bg-white/10 hover:bg-rose-600 border border-white/15 text-white transition shrink-0 cursor-pointer"
                 >
                   <X className="w-5 h-5" />
                 </button>

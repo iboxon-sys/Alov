@@ -36,7 +36,7 @@
     "isOnline": false,
     "status": "offline",
     "updatedAt": "2026-11-17T15:46:33.003Z",
-    "lastSeen": "2026-11-19T14:57:13.470Z",
+    "lastSeen": "2026-11-23T00:02:31.083Z",
     "firstName": "Salikh",
     "birthDate": "2002-05-15",
     "neighborhood": "Mirzo Salimiy",
@@ -62,13 +62,14 @@
       "exchangeRateUzs": 100,
       "unlockWindowHours": 12,
       "nextUnlockAt": null,
-      "updatedAt": "2026-11-19T14:56:55.784Z"
+      "updatedAt": "2026-11-23T00:34:38.499Z"
     },
     "telegramUsername": "@Salikh_07",
     "first_name": "Salikh",
     "lastName": "",
     "last_name": "",
-    "hasCustomAvatar": false
+    "hasCustomAvatar": false,
+    "createdAt": "2026-11-17T15:46:33.003Z"
   },
   {
     "isVerified": true,
@@ -135,9 +136,10 @@
       "exchangeRateUzs": 100,
       "unlockWindowHours": 12,
       "nextUnlockAt": null,
-      "updatedAt": "2026-11-19T14:56:55.784Z"
+      "updatedAt": "2026-11-23T00:34:38.499Z"
     },
-    "lastSeen": "2026-11-18T09:30:09.267Z"
+    "lastSeen": "2026-11-18T09:30:09.267Z",
+    "createdAt": "2026-11-18T09:20:28.501Z"
   },
   {
     "isVerified": false,
@@ -204,7 +206,74 @@
       "exchangeRateUzs": 100,
       "unlockWindowHours": 12,
       "nextUnlockAt": null,
-      "updatedAt": "2026-11-19T14:56:55.784Z"
-    }
+      "updatedAt": "2026-11-23T00:34:38.499Z"
+    },
+    "createdAt": "2026-11-18T09:20:28.494Z"
+  },
+  {
+    "isVerified": false,
+    "bankCard": "",
+    "followersCount": 0,
+    "followingCount": 0,
+    "likesCount": 0,
+    "followers": [],
+    "following": [],
+    "diamondProgress": 0,
+    "pendingDiamondBatches": [],
+    "createdAt": "2026-11-23T00:31:27.617Z",
+    "uid": "ui_verify_sardor_2026",
+    "name": "Sardorbek",
+    "username": "sardor_ui",
+    "age": 24,
+    "birthDate": "2002-05-15",
+    "gender": "male",
+    "region": "Toshkent shahri",
+    "district": "Yunusobod tumani",
+    "bio": "UI verification account",
+    "avatar": "",
+    "isProfileCompleted": true,
+    "faceId": {
+      "verified": true,
+      "verifiedAt": 1795394065601,
+      "detectedGender": "male",
+      "genderLabelUz": "Yigit (Erkak)"
+    },
+    "coins": 1200,
+    "diamonds": 150,
+    "role": "user",
+    "isAdmin": false,
+    "phone": "",
+    "telegram": "",
+    "firstName": "Sardorbek",
+    "first_name": "Sardorbek",
+    "lastName": "",
+    "last_name": "",
+    "hasCustomAvatar": false,
+    "photoURL": "",
+    "banner": "",
+    "videoUrl": "",
+    "startGifUrl": "",
+    "locationVisibility": "everyone",
+    "isLocationEnabled": true,
+    "isOnline": false,
+    "status": "offline",
+    "updatedAt": "2026-11-23T00:34:25.607Z",
+    "wallet": {
+      "uid": "ui_verify_sardor_2026",
+      "balanceDiamonds": 150,
+      "pendingDiamonds": 0,
+      "diamondProgress": 0,
+      "dailyLimitTarget": 120,
+      "dailyLimitResetAt": null,
+      "balanceUzs": 15000,
+      "pendingUzs": 0,
+      "totalEarnedDiamonds": 150,
+      "totalWithdrawnUzs": 0,
+      "exchangeRateUzs": 100,
+      "unlockWindowHours": 12,
+      "nextUnlockAt": null,
+      "updatedAt": "2026-11-23T00:34:38.499Z"
+    },
+    "lastSeen": "2026-11-23T00:34:40.012Z"
   }
 ]

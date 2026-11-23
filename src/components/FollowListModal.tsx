@@ -108,7 +108,7 @@ export const FollowListModal: React.FC<FollowListModalProps> = ({
 
   return (
     <div
-      className="fixed inset-0 z-[150] bg-black/75 backdrop-blur-md flex items-center justify-center p-3 sm:p-4 animate-fadeIn"
+      className="fixed inset-0 z-[150] bg-black/75 backdrop-blur-md flex items-center justify-center p-3 sm:p-4 pt-[max(0.75rem,var(--alov-safe-top,0px))] animate-fadeIn"
       onClick={onClose}
       data-testid="follow-list-modal"
     >
@@ -137,9 +137,9 @@ export const FollowListModal: React.FC<FollowListModalProps> = ({
             type="button"
             onClick={onClose}
             aria-label="Yopish"
-            className="w-8 h-8 rounded-xl bg-white/[0.06] hover:bg-rose-600 text-zinc-300 hover:text-white flex items-center justify-center transition-colors shrink-0 cursor-pointer"
+            className="min-w-[44px] min-h-[44px] w-11 h-11 rounded-xl bg-white/[0.08] hover:bg-rose-600 border border-white/15 text-zinc-200 hover:text-white flex items-center justify-center transition-colors shrink-0 cursor-pointer"
           >
-            <X className="w-4 h-4" />
+            <X className="w-5 h-5" />
           </button>
         </div>
 

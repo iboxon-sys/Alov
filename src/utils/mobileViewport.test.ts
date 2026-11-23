@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   computeEffectiveViewportMetrics,
+  computeTelegramSafeAreaInsets,
   filterChatConversations,
   shouldHideMobileBottomDock,
   shouldShowOuterAppHeader,
@@ -132,3 +133,34 @@ test('filterChatConversations filters by partner name or last message text', () 
     ['c3']
   );
 });
+
+test('computeTelegramSafeAreaInsets safely computes Telegram top notch and header offsets', () => {
+  assert.deepEqual(computeTelegramSafeAreaInsets(null), {
+    safeTopPx: 0,
+    contentTopPx: 0,
+    totalTopPx: 0,
+  });
+  assert.deepEqual(
+    computeTelegramSafeAreaInsets({
+      safeAreaInset: { top: 44 },
+      contentSafeAreaInset: { top: 52 },
+    }),
+    {
+      safeTopPx: 44,
+      contentTopPx: 52,
+      totalTopPx: 96,
+    }
+  );
+  assert.deepEqual(
+    computeTelegramSafeAreaInsets({
+      safeAreaInset: { top: -10 },
+      contentSafeAreaInset: { top: Number.NaN },
+    }),
+    {
+      safeTopPx: 0,
+      contentTopPx: 0,
+      totalTopPx: 0,
+    }
+  );
+});
+

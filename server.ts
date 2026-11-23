@@ -3082,16 +3082,20 @@ Suhbatlashish qoidalaringiz:
     u.followersCount = u.followers.length > 0 ? u.followers.length : (typeof u.followersCount === 'number' ? u.followersCount : 0);
     u.followingCount = u.following.length > 0 ? u.following.length : (typeof u.followingCount === 'number' ? u.followingCount : 0);
     u.likesCount = typeof u.likesCount === 'number' ? u.likesCount : 0;
-    u.coins = typeof u.coins === 'number' ? u.coins : 100;
-    u.diamonds = typeof u.diamonds === 'number' ? roundDiamonds(u.diamonds) : 0;
-    u.diamondProgress = typeof u.diamondProgress === 'number' ? roundDiamonds(u.diamondProgress) : 0;
+    const rawCoins = u.coins !== undefined && u.coins !== null && u.coins !== '' ? Number(u.coins) : NaN;
+    u.coins = Number.isFinite(rawCoins) && rawCoins >= 0 ? Math.floor(rawCoins) : 100;
+    const rawDiamonds = u.diamonds !== undefined && u.diamonds !== null && u.diamonds !== '' ? Number(u.diamonds) : NaN;
+    u.diamonds = Number.isFinite(rawDiamonds) && rawDiamonds >= 0 ? roundDiamonds(rawDiamonds) : 0;
+    const rawProgress = u.diamondProgress !== undefined && u.diamondProgress !== null && u.diamondProgress !== '' ? Number(u.diamondProgress) : NaN;
+    u.diamondProgress = Number.isFinite(rawProgress) && rawProgress >= 0 ? roundDiamonds(rawProgress) : 0;
     if (typeof u.dailyLimitResetAt === 'number' && u.dailyLimitResetAt <= Date.now()) {
       u.diamondProgress = 0;
       u.dailyLimitResetAt = null;
     }
     if (!Array.isArray(u.pendingDiamondBatches)) u.pendingDiamondBatches = [];
     if (!u.locationVisibility) u.locationVisibility = 'everyone';
-    if (u.isLocationEnabled === undefined) u.isLocationEnabled = true;
+    if (u.isLocationEnabled === undefined) u.isLocationEnabled = u.locationVisibility !== 'ghost';
+    if (!u.createdAt) u.createdAt = u.updatedAt || new Date().toISOString();
 
     if (isAdminTelegramUser(u)) {
       u.role = 'admin';
@@ -3786,6 +3790,11 @@ Suhbatlashish qoidalaringiz:
         if (!canonicalUser) {
           return res.json({ success: true, exists: false, isNewUser: true, user: null });
         }
+        const { unlockedAmount } = normalizeAndReleaseUser(canonicalUser);
+        if (unlockedAmount > 0) {
+          usersStore.set(canonicalUser.uid, canonicalUser);
+          saveUsersToDisk();
+        }
         const online = presenceRegistry.isUidOnline(canonicalUser.uid);
         canonicalUser.isOnline = online;
         canonicalUser.status = online ? 'online' : 'offline';
@@ -3961,15 +3970,54 @@ Suhbatlashish qoidalaringiz:
           ? (String(user.telegram).trim() ? (normalizeTelegramUrl(String(user.telegram)) || String(user.telegram).trim()) : '')
           : (existing.telegram !== undefined ? existing.telegram : (user.telegram || ''));
 
-      // Strip undefined keys and client-controlled privilege fields so role/isAdmin never escalate via sync
+      // Strip undefined keys, client-controlled privilege fields, and never let sync overwrite existing wallet/settings/createdAt with defaults
+      const PROTECTED_EXISTING_FIELDS = new Set([
+        'coins',
+        'diamonds',
+        'diamondProgress',
+        'pendingDiamondBatches',
+        'totalEarnedDiamonds',
+        'totalWithdrawnUzs',
+        'wallet',
+        'followers',
+        'following',
+        'followersCount',
+        'followingCount',
+        'likesCount',
+        'createdAt',
+        'isBanned',
+        'bankCard',
+      ]);
+      const PROTECT_EDITED_PROFILE_FIELDS = new Set([
+        'name',
+        'firstName',
+        'first_name',
+        'lastName',
+        'last_name',
+        'displayName',
+        'username',
+        'avatar',
+        'photoURL',
+        'banner',
+        'region',
+        'district',
+        'neighborhood',
+        'bio',
+        'phone',
+        'telegram',
+        'instagram',
+        'videoUrl',
+        'startGifUrl',
+        'locationVisibility',
+        'isLocationEnabled',
+      ]);
       const cleanIncomingUser: Record<string, any> = {};
       for (const [k, v] of Object.entries(user)) {
-        if (v !== undefined && k !== 'role' && k !== 'isAdmin') {
-          if (
-            protectEditedProfile &&
-            ['name', 'firstName', 'first_name', 'lastName', 'last_name', 'displayName', 'username', 'avatar', 'photoURL', 'banner', 'region', 'district', 'neighborhood', 'bio', 'phone', 'telegram', 'instagram', 'videoUrl', 'startGifUrl'].includes(k) &&
-            existing[k] !== undefined
-          ) {
+        if (v !== undefined && k !== 'role' && k !== 'isAdmin' && k !== 'rehydrateFromExternalDb') {
+          if (canonicalUser && PROTECTED_EXISTING_FIELDS.has(k) && existing[k] !== undefined) {
+            continue;
+          }
+          if (protectEditedProfile && PROTECT_EDITED_PROFILE_FIELDS.has(k) && existing[k] !== undefined) {
             continue;
           }
           cleanIncomingUser[k] = v;
@@ -4015,6 +4063,7 @@ Suhbatlashish qoidalaringiz:
           following: [],
           diamondProgress: 0,
           pendingDiamondBatches: [],
+          createdAt: existing.createdAt || user.createdAt || new Date().toISOString(),
           ...existing,
         },
         {
@@ -4038,9 +4087,16 @@ Suhbatlashish qoidalaringiz:
           banner: (!protectEditedProfile && user.banner !== undefined) ? String(user.banner || '') : (existing.banner || ''),
           videoUrl: (!protectEditedProfile && user.videoUrl !== undefined) ? String(user.videoUrl || '') : (existing.videoUrl || ''),
           startGifUrl: (!protectEditedProfile && user.startGifUrl !== undefined) ? String(user.startGifUrl || '').trim() : String(existing.startGifUrl || '').trim(),
+          locationVisibility: existing.locationVisibility && protectEditedProfile
+            ? existing.locationVisibility
+            : (user.locationVisibility || existing.locationVisibility || 'everyone'),
+          isLocationEnabled: existing.isLocationEnabled !== undefined && protectEditedProfile
+            ? existing.isLocationEnabled
+            : (user.isLocationEnabled !== undefined ? Boolean(user.isLocationEnabled) : (existing.isLocationEnabled !== undefined ? existing.isLocationEnabled : true)),
           coins: (existing && existing.coins !== undefined) ? existing.coins : (user.coins !== undefined ? user.coins : 100),
           diamonds: (existing && existing.diamonds !== undefined) ? existing.diamonds : (user.diamonds !== undefined ? user.diamonds : 0),
           uid: targetUid,
+          createdAt: existing.createdAt || user.createdAt || new Date().toISOString(),
           telegramChatId: knownChatId || existing.telegramChatId,
           isOnline: currentlyOnline,
           status: currentlyOnline ? 'online' : 'offline',
@@ -4086,9 +4142,27 @@ Suhbatlashish qoidalaringiz:
       const existing = findUserByUidOrId(String(uid));
       if (existing) {
         const canonicalUid = existing.uid;
+        const IMMUTABLE_OR_WALLET_UPDATE_KEYS = new Set([
+          'role',
+          'isAdmin',
+          'coins',
+          'diamonds',
+          'diamondProgress',
+          'pendingDiamondBatches',
+          'totalEarnedDiamonds',
+          'totalWithdrawnUzs',
+          'wallet',
+          'followers',
+          'following',
+          'followersCount',
+          'followingCount',
+          'likesCount',
+          'createdAt',
+          'isBanned',
+        ]);
         const sanitizedUpdates: Record<string, any> = {};
         for (const [k, v] of Object.entries(updates)) {
-          if (v !== undefined && k !== 'role' && k !== 'isAdmin') sanitizedUpdates[k] = v;
+          if (v !== undefined && !IMMUTABLE_OR_WALLET_UPDATE_KEYS.has(k)) sanitizedUpdates[k] = v;
         }
         const targetIsAdmin = isAdminTelegramUser(existing);
         if (existing.isProfileCompleted === true && !targetIsAdmin) {
@@ -4847,6 +4921,7 @@ Suhbatlashish qoidalaringiz:
     usersStore.set(canonicalUser.uid, canonicalUser);
     saveUsersToDisk();
     await contentRepository.upsertUser(canonicalUser);
+    void walletRepository.syncUserWallet(canonicalUser);
 
     // Update or remove stale keys in telegram_bot_users.json
     const chatIdNum = Number(canonicalUser.telegramChatId || canonicalUser.chatId || 0);

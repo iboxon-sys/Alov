@@ -16,6 +16,27 @@ export interface EffectiveViewportMetrics {
   isKeyboardOpen: boolean;
 }
 
+export interface TelegramSafeAreaInsets {
+  safeTopPx: number;
+  contentTopPx: number;
+  totalTopPx: number;
+}
+
+export function computeTelegramSafeAreaInsets(tg?: {
+  safeAreaInset?: { top?: number | null } | null;
+  contentSafeAreaInset?: { top?: number | null } | null;
+} | null): TelegramSafeAreaInsets {
+  const rawSafe = Number(tg?.safeAreaInset?.top ?? 0);
+  const rawContent = Number(tg?.contentSafeAreaInset?.top ?? 0);
+  const safeTopPx = Number.isFinite(rawSafe) && rawSafe > 0 ? Math.round(rawSafe) : 0;
+  const contentTopPx = Number.isFinite(rawContent) && rawContent > 0 ? Math.round(rawContent) : 0;
+  return {
+    safeTopPx,
+    contentTopPx,
+    totalTopPx: safeTopPx + contentTopPx,
+  };
+}
+
 export function computeEffectiveViewportMetrics(
   input: ViewportMetricInput
 ): EffectiveViewportMetrics {
@@ -151,6 +172,9 @@ export function useVisualViewportLock(options?: {
       const rootStyle = document.documentElement.style;
       rootStyle.setProperty('--alov-vvh', `${next.heightPx}px`);
       rootStyle.setProperty('--alov-vv-top', `${next.offsetTopPx}px`);
+      const tgInsets = computeTelegramSafeAreaInsets((window as any).Telegram?.WebApp);
+      rootStyle.setProperty('--alov-tg-safe-top', `${tgInsets.safeTopPx}px`);
+      rootStyle.setProperty('--alov-tg-content-top', `${tgInsets.contentTopPx}px`);
 
       if (resetWindowScrollOnKeyboard && (next.isKeyboardOpen || next.offsetTopPx > 0 || window.scrollY > 0)) {
         if (window.scrollY !== 0 || window.scrollX !== 0) {
@@ -194,6 +218,9 @@ export function useVisualViewportLock(options?: {
     const tg = (window as any).Telegram?.WebApp;
     try {
       tg?.onEvent?.('viewportChanged', scheduleSync);
+      tg?.onEvent?.('safeAreaChanged', scheduleSync);
+      tg?.onEvent?.('contentSafeAreaChanged', scheduleSync);
+      tg?.onEvent?.('fullscreenChanged', scheduleSync);
     } catch {}
 
     return () => {
@@ -206,6 +233,9 @@ export function useVisualViewportLock(options?: {
       window.removeEventListener('focusout', scheduleSync);
       try {
         tg?.offEvent?.('viewportChanged', scheduleSync);
+        tg?.offEvent?.('safeAreaChanged', scheduleSync);
+        tg?.offEvent?.('contentSafeAreaChanged', scheduleSync);
+        tg?.offEvent?.('fullscreenChanged', scheduleSync);
       } catch {}
     };
   }, [enabled, resetWindowScrollOnKeyboard]);

@@ -755,10 +755,10 @@ export const FaceIdVerificationModal: React.FC<FaceIdVerificationModalProps> = (
               stopCamera();
               onCancel();
             }}
-            className="p-2 rounded-full text-zinc-400 hover:text-white hover:bg-white/10 transition shrink-0 cursor-pointer"
+            className="min-w-[44px] min-h-[44px] w-11 h-11 rounded-full bg-white/[0.08] hover:bg-rose-600 border border-white/15 text-zinc-200 hover:text-white flex items-center justify-center transition shrink-0 cursor-pointer"
             aria-label="Bekor qilish"
           >
-            <X className="w-4 h-4" />
+            <X className="w-5 h-5" />
           </button>
         )}
       </div>

@@ -392,7 +392,7 @@ export const ChatRouletteView: React.FC<ChatRouletteViewProps> = ({
       className="relative w-full h-full flex-1 min-h-0 bg-[#09090D] overflow-hidden flex flex-col justify-between text-white"
     >
       {/* Top Status Bar */}
-      <div className="relative z-20 px-4 pt-4 pb-3 flex items-center justify-between gap-2 bg-gradient-to-b from-black/80 via-black/45 to-transparent">
+      <div className="relative z-20 px-4 pt-[calc(1rem+var(--alov-safe-top,0px))] pb-3 flex items-center justify-between gap-2 bg-gradient-to-b from-black/80 via-black/45 to-transparent">
         <div className="flex items-center gap-2.5 min-w-0">
           <button
             type="button"

@@ -14,14 +14,19 @@ import {
 import {
   buildDemoFaceIdProfile,
   buildDemoFaceIdSvgDataUrl,
+  computeAdaptiveFaceFrame,
   computeAverageEAR,
+  computeObjectCoverProjection,
   computeSmileMetrics,
   createBlinkTrackerState,
   genderToUzLabel,
+  projectPointObjectCover,
   resolveDetectedGender,
+  smoothLandmarksEMA,
   updateBlinkTracker,
   type BlinkTrackerState,
   type FaceIdProfileData,
+  type FacePoint,
   type GenderVote,
 } from '../utils/faceId';
 
@@ -121,6 +126,7 @@ export const FaceIdVerificationModal: React.FC<FaceIdVerificationModalProps> = (
   const loopTimerRef = useRef<number | null>(null);
   const blinkStateRef = useRef<BlinkTrackerState>(createBlinkTrackerState());
   const genderVotesRef = useRef<GenderVote[]>([]);
+  const smoothedLandmarksRef = useRef<FacePoint[] | null>(null);
   const mountedRef = useRef<boolean>(true);
 
   const [modelsReady, setModelsReady] = useState(false);
@@ -189,6 +195,7 @@ export const FaceIdVerificationModal: React.FC<FaceIdVerificationModalProps> = (
       setModelsReady(false);
       blinkStateRef.current = createBlinkTrackerState();
       genderVotesRef.current = [];
+      smoothedLandmarksRef.current = null;
       latestHappyRef.current = 0;
 
       if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
@@ -274,7 +281,15 @@ export const FaceIdVerificationModal: React.FC<FaceIdVerificationModalProps> = (
 
   // Continuous low-latency biometric landmark + throttled gender/expression loop
   useEffect(() => {
-    if (verificationMode !== 'camera' || !modelsReady || !cameraReady) return;
+    if (verificationMode !== 'camera' || !modelsReady || !cameraReady) {
+      smoothedLandmarksRef.current = null;
+      const overlay = meshCanvasRef.current;
+      if (overlay) {
+        const ctx = overlay.getContext('2d');
+        ctx?.clearRect(0, 0, overlay.width, overlay.height);
+      }
+      return;
+    }
 
     let cancelled = false;
     let frameCounter = 0;
@@ -298,8 +313,8 @@ export const FaceIdVerificationModal: React.FC<FaceIdVerificationModalProps> = (
 
       if (video && offscreen && video.readyState >= 2 && video.videoWidth > 0 && video.videoHeight > 0) {
         try {
-          const targetW = 320;
-          const targetH = Math.max(180, Math.round((targetW * video.videoHeight) / video.videoWidth));
+          const targetW = 360;
+          const targetH = Math.max(200, Math.round((targetW * video.videoHeight) / video.videoWidth));
           if (offscreen.width !== targetW || offscreen.height !== targetH) {
             offscreen.width = targetW;
             offscreen.height = targetH;
@@ -309,14 +324,12 @@ export const FaceIdVerificationModal: React.FC<FaceIdVerificationModalProps> = (
             ctx.drawImage(video, 0, 0, targetW, targetH);
 
             // 1. Fast face + 68 tiny landmarks every tick (~40–80ms) so blinks are never missed
+            const detectorOpts = new faceapi.TinyFaceDetectorOptions({
+              inputSize: 224,
+              scoreThreshold: 0.2,
+            });
             const baseDet = await faceapi
-              .detectSingleFace(
-                offscreen,
-                new faceapi.TinyFaceDetectorOptions({
-                  inputSize: 192,
-                  scoreThreshold: 0.22,
-                })
-              )
+              .detectSingleFace(offscreen, detectorOpts)
               .withFaceLandmarks(true);
 
             if (!cancelled && mountedRef.current) {
@@ -324,51 +337,120 @@ export const FaceIdVerificationModal: React.FC<FaceIdVerificationModalProps> = (
               if (overlay) {
                 const oW = overlay.clientWidth || targetW;
                 const oH = overlay.clientHeight || targetH;
-                if (overlay.width !== oW || overlay.height !== oH) {
-                  overlay.width = oW;
-                  overlay.height = oH;
+                const dpr = Math.min(window.devicePixelRatio || 1, 2);
+                const backingW = Math.round(oW * dpr);
+                const backingH = Math.round(oH * dpr);
+                if (overlay.width !== backingW || overlay.height !== backingH) {
+                  overlay.width = backingW;
+                  overlay.height = backingH;
                 }
                 const oCtx = overlay.getContext('2d');
                 if (oCtx) {
+                  oCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
                   oCtx.clearRect(0, 0, oW, oH);
                   if (baseDet) {
-                    const scaleX = oW / targetW;
-                    const scaleY = oH / targetH;
-                    const isGreen = phaseRef.current === 'verified_ready';
-                    oCtx.strokeStyle = isGreen ? 'rgba(52, 211, 153, 0.72)' : 'rgba(251, 113, 133, 0.72)';
-                    oCtx.fillStyle = isGreen ? 'rgba(167, 243, 208, 0.92)' : 'rgba(254, 205, 211, 0.92)';
-                    oCtx.lineWidth = 1.25;
+                    const proj = computeObjectCoverProjection(targetW, targetH, oW, oH);
+                    const projectedPts = baseDet.landmarks.positions.map((pt) =>
+                      projectPointObjectCover({ x: pt.x, y: pt.y }, proj)
+                    );
+                    const pts = smoothLandmarksEMA(smoothedLandmarksRef.current, projectedPts, 0.55);
+                    smoothedLandmarksRef.current = pts;
 
-                    const pts = baseDet.landmarks.positions;
+                    const rawBox = baseDet.detection?.box;
+                    const projectedBox = rawBox
+                      ? {
+                          x: rawBox.x * proj.scale - proj.offsetX,
+                          y: rawBox.y * proj.scale - proj.offsetY,
+                          width: rawBox.width * proj.scale,
+                          height: rawBox.height * proj.scale,
+                        }
+                      : null;
+
+                    const isGreen = phaseRef.current === 'verified_ready';
+                    const accentStroke = isGreen ? 'rgba(52, 211, 153, 0.92)' : 'rgba(251, 113, 133, 0.9)';
+                    const lineStroke = isGreen ? 'rgba(52, 211, 153, 0.72)' : 'rgba(251, 113, 133, 0.72)';
+                    const dotFill = isGreen ? 'rgba(167, 243, 208, 0.95)' : 'rgba(254, 205, 211, 0.95)';
+
+                    const adaptiveFrame = computeAdaptiveFaceFrame(pts, projectedBox);
+                    if (adaptiveFrame) {
+                      // Adaptive rotated face-tracking oval
+                      oCtx.save();
+                      oCtx.strokeStyle = accentStroke;
+                      oCtx.lineWidth = 2.4;
+                      oCtx.shadowColor = isGreen ? 'rgba(16, 185, 129, 0.55)' : 'rgba(244, 63, 94, 0.5)';
+                      oCtx.shadowBlur = 12;
+                      oCtx.beginPath();
+                      oCtx.ellipse(
+                        adaptiveFrame.cx,
+                        adaptiveFrame.cy,
+                        adaptiveFrame.rx,
+                        adaptiveFrame.ry,
+                        adaptiveFrame.angleRad,
+                        0,
+                        Math.PI * 2
+                      );
+                      oCtx.stroke();
+
+                      // Dynamic corner brackets anchored to the tracked face tilt & scale
+                      oCtx.shadowBlur = 0;
+                      oCtx.translate(adaptiveFrame.cx, adaptiveFrame.cy);
+                      oCtx.rotate(adaptiveFrame.angleRad);
+                      const bx = adaptiveFrame.rx * 1.06;
+                      const by = adaptiveFrame.ry * 1.03;
+                      const arm = Math.max(12, Math.min(24, adaptiveFrame.rx * 0.24));
+                      oCtx.lineWidth = 2.2;
+                      oCtx.lineCap = 'round';
+                      const drawBracket = (sx: number, sy: number) => {
+                        oCtx.beginPath();
+                        oCtx.moveTo(sx * (bx - arm), sy * by);
+                        oCtx.lineTo(sx * bx, sy * by);
+                        oCtx.lineTo(sx * bx, sy * (by - arm));
+                        oCtx.stroke();
+                      };
+                      drawBracket(-1, -1);
+                      drawBracket(1, -1);
+                      drawBracket(-1, 1);
+                      drawBracket(1, 1);
+                      oCtx.restore();
+                    }
+
+                    oCtx.save();
+                    oCtx.strokeStyle = lineStroke;
+                    oCtx.fillStyle = dotFill;
+                    oCtx.lineWidth = 1.35;
+                    oCtx.lineJoin = 'round';
+                    oCtx.lineCap = 'round';
+
                     const connectChain = (indices: number[], close = false) => {
                       if (indices.length < 2) return;
                       oCtx.beginPath();
                       indices.forEach((idx, posIdx) => {
                         const pt = pts[idx];
                         if (!pt) return;
-                        const x = pt.x * scaleX;
-                        const y = pt.y * scaleY;
-                        if (posIdx === 0) oCtx.moveTo(x, y);
-                        else oCtx.lineTo(x, y);
+                        if (posIdx === 0) oCtx.moveTo(pt.x, pt.y);
+                        else oCtx.lineTo(pt.x, pt.y);
                       });
                       if (close) oCtx.closePath();
                       oCtx.stroke();
                     };
 
-                    // Jawline (0-16), eyebrows (17-21, 22-26), nose (27-35), eyes (36-41, 42-47), lips (48-59)
+                    // Full 68-landmark contours: jawline, brows, nose bridge + nostrils, eyes, outer + inner lips
                     connectChain(Array.from({ length: 17 }, (_, i) => i));
                     connectChain([17, 18, 19, 20, 21]);
                     connectChain([22, 23, 24, 25, 26]);
-                    connectChain([27, 28, 29, 30, 33]);
+                    connectChain([27, 28, 29, 30]);
+                    connectChain([30, 31, 32, 33, 34, 35, 30]);
                     connectChain([36, 37, 38, 39, 40, 41], true);
                     connectChain([42, 43, 44, 45, 46, 47], true);
                     connectChain([48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59], true);
+                    connectChain([60, 61, 62, 63, 64, 65, 66, 67], true);
 
                     for (let i = 0; i < pts.length; i += 2) {
                       oCtx.beginPath();
-                      oCtx.arc(pts[i].x * scaleX, pts[i].y * scaleY, 1.6, 0, Math.PI * 2);
+                      oCtx.arc(pts[i].x, pts[i].y, 1.5, 0, Math.PI * 2);
                       oCtx.fill();
                     }
+                    oCtx.restore();
                   }
                 }
               }
@@ -386,13 +468,7 @@ export const FaceIdVerificationModal: React.FC<FaceIdVerificationModalProps> = (
                 if (extraModelsLoaded && (frameCounter === 1 || frameCounter % 3 === 0 || genderVotesRef.current.length === 0)) {
                   try {
                     const fullDet = await faceapi
-                      .detectSingleFace(
-                        offscreen,
-                        new faceapi.TinyFaceDetectorOptions({
-                          inputSize: 192,
-                          scoreThreshold: 0.22,
-                        })
-                      )
+                      .detectSingleFace(offscreen, detectorOpts)
                       .withFaceLandmarks(true)
                       .withFaceExpressions()
                       .withAgeAndGender();
@@ -449,6 +525,9 @@ export const FaceIdVerificationModal: React.FC<FaceIdVerificationModalProps> = (
                 }
               } else {
                 consecutiveMisses += 1;
+                if (consecutiveMisses >= 4) {
+                  smoothedLandmarksRef.current = null;
+                }
                 if (consecutiveMisses >= 8 && phaseRef.current === 'scanning' && faceDetectedRef.current) {
                   faceDetectedRef.current = false;
                   setFaceDetected(false);
@@ -462,7 +541,7 @@ export const FaceIdVerificationModal: React.FC<FaceIdVerificationModalProps> = (
       }
 
       if (!cancelled && mountedRef.current) {
-        const nextDelay = phaseRef.current === 'verified_ready' ? 220 : 65;
+        const nextDelay = phaseRef.current === 'verified_ready' ? 160 : 60;
         loopTimerRef.current = window.setTimeout(tick, nextDelay);
       }
     };
@@ -476,7 +555,7 @@ export const FaceIdVerificationModal: React.FC<FaceIdVerificationModalProps> = (
         loopTimerRef.current = null;
       }
     };
-  }, [modelsReady, cameraReady]);
+  }, [modelsReady, cameraReady, verificationMode]);
 
   const handleManualCapture = async () => {
     const video = videoRef.current;
@@ -889,18 +968,14 @@ export const FaceIdVerificationModal: React.FC<FaceIdVerificationModalProps> = (
           </>
         )}
 
-        {/* Biometric Oval Frame Guide */}
+        {/* Initial Guide Oval (fades out once live adaptive face-tracking reticle locks on) */}
         {phase !== 'captured_preview' && !cameraError && (
-          <div className="absolute inset-0 pointer-events-none flex items-center justify-center">
-            <div
-              className={`w-[72%] h-[76%] rounded-[999px] border-[3px] transition-all duration-300 ${
-                isGreenVerified
-                  ? 'border-emerald-400 shadow-[0_0_0_9999px_rgba(6,44,30,0.28),0_0_28px_rgba(16,185,129,0.6)]'
-                  : faceDetected
-                  ? 'border-rose-300 shadow-[0_0_0_9999px_rgba(20,12,15,0.42)]'
-                  : 'border-white/60 border-dashed shadow-[0_0_0_9999px_rgba(20,12,15,0.52)]'
-              }`}
-            />
+          <div
+            className={`absolute inset-0 pointer-events-none flex items-center justify-center transition-all duration-300 ${
+              faceDetected ? 'opacity-0 scale-95' : 'opacity-100 scale-100'
+            }`}
+          >
+            <div className="w-[72%] h-[76%] rounded-[999px] border-[2.5px] border-white/55 border-dashed shadow-[0_0_0_9999px_rgba(20,12,15,0.46)]" />
           </div>
         )}
 

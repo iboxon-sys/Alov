@@ -138,6 +138,13 @@ import {
   parseAlovAiStructuredOutput,
   stripReasoningTags,
 } from './src/utils/alovAi';
+import {
+  mergeChatStores,
+  mergeFriendshipStores,
+  mergeMessageStores,
+  mergeRecordsByIdNewestFirst,
+  mergeTelegramBotUserMaps,
+} from './src/utils/persistenceMerge';
 
 dotenv.config();
 
@@ -288,6 +295,9 @@ async function startServer() {
       res.setHeader('Expires', '0');
     } else if (cleanPath === '/' || cleanPath === '/index.html' || cleanPath === '/sw.js') {
       res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+    } else if (cleanPath === '/manifest.json') {
+      res.setHeader('Cache-Control', 'no-cache');
+      res.setHeader('Content-Type', 'application/manifest+json; charset=utf-8');
     }
     next();
   });
@@ -1810,6 +1820,7 @@ async function startServer() {
     } catch (err) {
       console.warn("Could not save BOT_USERS_FILE:", err);
     }
+    void contentRepository.replaceAllBotUsers(map);
   }
 
   const telegramBotUsers = loadTelegramBotUsers();
@@ -3358,17 +3369,55 @@ Suhbatlashish qoidalaringiz:
   loadCoinRequestsFromDisk();
   loadPostsFromDisk();
 
-  if (contentRepository.getMode() === 'mongodb') {
-    const [mongoUsers, mongoPosts] = await Promise.all([
+  if (contentRepository.getMode() === 'mongodb' || walletRepository.getMode() === 'mongodb') {
+    const [
+      mongoUsers,
+      mongoPosts,
+      mongoChats,
+      mongoChatMessages,
+      mongoFriendships,
+      mongoCoinRequests,
+      mongoBotEntries,
+      mongoWallets,
+      mongoTxs,
+      mongoWithdrawals,
+    ] = await Promise.all([
       contentRepository.loadAllUsers(),
       contentRepository.loadAllPosts(),
+      contentRepository.loadAllChats(),
+      contentRepository.loadAllChatMessages(),
+      contentRepository.loadAllFriendships(),
+      contentRepository.loadAllCoinRequests(),
+      contentRepository.loadAllBotUsers(),
+      walletRepository.loadAllWallets(),
+      walletRepository.loadAllTransactions(),
+      walletRepository.loadAllWithdrawals(),
     ]);
-    const combinedUsers: any[] = [...Array.from(usersStore.values())];
+
+    // Put MongoDB users first so MongoDB wins any timestamp tie against repo-bundled disk files
+    const walletByUid = new Map<string, any>();
+    for (const w of mongoWallets) {
+      if (w?.uid) walletByUid.set(String(w.uid), w);
+    }
+
+    const combinedUsers: any[] = [];
     for (const mu of mongoUsers) {
       if (mu && mu.uid && canPersistUserProfile(mu)) {
+        const w = walletByUid.get(String(mu.uid));
+        if (w) {
+          mu.coins = typeof w.coins === 'number' ? w.coins : mu.coins;
+          mu.diamonds = typeof w.diamonds === 'number' ? w.diamonds : mu.diamonds;
+          mu.diamondProgress = typeof w.diamondProgress === 'number' ? w.diamondProgress : mu.diamondProgress;
+          mu.dailyLimitResetAt = w.dailyLimitResetAt !== undefined ? w.dailyLimitResetAt : mu.dailyLimitResetAt;
+          if (Array.isArray(w.pendingDiamondBatches)) mu.pendingDiamondBatches = w.pendingDiamondBatches;
+          if (typeof w.totalEarnedDiamonds === 'number') mu.totalEarnedDiamonds = w.totalEarnedDiamonds;
+          if (typeof w.totalWithdrawnUzs === 'number') mu.totalWithdrawnUzs = w.totalWithdrawnUzs;
+        }
         combinedUsers.push(mu);
       }
     }
+    combinedUsers.push(...Array.from(usersStore.values()));
+
     const { users: dedupedUsers, removedUids } = deduplicateUsersList(combinedUsers);
     usersStore.clear();
     for (const u of dedupedUsers) {
@@ -3382,12 +3431,88 @@ Suhbatlashish qoidalaringiz:
       saveUsersToDisk();
     } else if (mongoUsers.length > 0) {
       saveUsersToDisk();
+    } else if (usersStore.size > 0 && contentRepository.getMode() === 'mongodb') {
+      void contentRepository.replaceAllUsers(Array.from(usersStore.values()));
     }
+
     if (mongoPosts.length > 0 || postsStore.length > 0) {
       const mergedPosts = mergePostsLists(mongoPosts, postsStore);
       postsStore.length = 0;
       postsStore.push(...mergedPosts);
       savePostsToDisk();
+      if (mongoPosts.length === 0 && mergedPosts.length > 0) {
+        void contentRepository.replaceAllPosts(mergedPosts);
+      }
+    }
+
+    // Hydrate chats, messages, friendships, coin requests, transactions, withdrawals & bot users
+    const mergedChats = mergeChatStores(mongoChats, userChatsStore);
+    Object.keys(userChatsStore).forEach((k) => delete userChatsStore[k]);
+    Object.assign(userChatsStore, mergedChats);
+    if (Object.keys(mergedChats).length > 0) {
+      saveChatsToDisk();
+      if (Object.keys(mongoChats).length === 0) {
+        void contentRepository.replaceAllChats(userChatsStore);
+      }
+    }
+
+    const mergedMsgs = mergeMessageStores(mongoChatMessages, chatMessagesStore);
+    Object.keys(chatMessagesStore).forEach((k) => delete chatMessagesStore[k]);
+    Object.assign(chatMessagesStore, mergedMsgs);
+    if (Object.keys(mergedMsgs).length > 0) {
+      saveMessagesToDisk();
+      if (Object.keys(mongoChatMessages).length === 0) {
+        void contentRepository.replaceAllChatMessages(chatMessagesStore);
+      }
+    }
+
+    const mergedFriendships = mergeFriendshipStores(mongoFriendships, chatFriendshipsStore);
+    Object.keys(chatFriendshipsStore).forEach((k) => delete chatFriendshipsStore[k]);
+    Object.assign(chatFriendshipsStore, mergedFriendships);
+    if (Object.keys(mergedFriendships).length > 0) {
+      saveFriendshipsToDisk();
+      if (Object.keys(mongoFriendships).length === 0) {
+        void contentRepository.replaceAllFriendships(chatFriendshipsStore);
+      }
+    }
+
+    const mergedCoinReqs = mergeRecordsByIdNewestFirst<CoinPurchaseRequest>(mongoCoinRequests, coinRequestsStore);
+    coinRequestsStore.length = 0;
+    coinRequestsStore.push(...mergedCoinReqs);
+    if (mergedCoinReqs.length > 0) {
+      saveCoinRequestsToDisk();
+      if (mongoCoinRequests.length === 0) {
+        void contentRepository.replaceAllCoinRequests(coinRequestsStore);
+      }
+    }
+
+    const mergedTxs = mergeRecordsByIdNewestFirst(mongoTxs, transactionsStore);
+    transactionsStore.length = 0;
+    transactionsStore.push(...mergedTxs);
+    if (mergedTxs.length > 0) {
+      saveTransactionsToDisk();
+      if (mongoTxs.length === 0 && walletRepository.getMode() === 'mongodb') {
+        void walletRepository.replaceAllTransactions(transactionsStore);
+      }
+    }
+
+    const mergedWithdrawals = mergeRecordsByIdNewestFirst(mongoWithdrawals, withdrawalsStore);
+    withdrawalsStore.length = 0;
+    withdrawalsStore.push(...mergedWithdrawals);
+    if (mergedWithdrawals.length > 0) {
+      saveWithdrawalsToDisk();
+      if (mongoWithdrawals.length === 0 && walletRepository.getMode() === 'mongodb') {
+        void walletRepository.replaceAllWithdrawals(withdrawalsStore);
+      }
+    }
+
+    if (mongoBotEntries.length > 0 || telegramBotUsers.size > 0) {
+      const mergedBotMap = mergeTelegramBotUserMaps(mongoBotEntries, Array.from(telegramBotUsers.entries()));
+      telegramBotUsers.clear();
+      for (const [k, v] of mergedBotMap.entries()) {
+        telegramBotUsers.set(k, v);
+      }
+      saveTelegramBotUsers(telegramBotUsers);
     }
   } else {
     const { users: dedupedLocalUsers, removedUids } = deduplicateUsersList(Array.from(usersStore.values()));
@@ -3470,6 +3595,12 @@ Suhbatlashish qoidalaringiz:
 
     void contentRepository.replaceAllUsers(Array.from(usersStore.values()));
     void contentRepository.replaceAllPosts(postsStore);
+    void contentRepository.replaceAllChats(userChatsStore);
+    void contentRepository.replaceAllChatMessages(chatMessagesStore);
+    void contentRepository.replaceAllFriendships(chatFriendshipsStore);
+    void contentRepository.replaceAllCoinRequests(coinRequestsStore);
+    void walletRepository.replaceAllTransactions(transactionsStore);
+    void walletRepository.replaceAllWithdrawals(withdrawalsStore);
 
     return { removedUsersCount };
   }
@@ -3531,6 +3662,7 @@ Suhbatlashish qoidalaringiz:
         anyChanged = true;
         u.updatedAt = new Date().toISOString();
         usersStore.set(uid, u);
+        void contentRepository.upsertUser(u);
         void walletRepository.syncUserWallet(u);
         const unlockTx = {
           id: 'tx_unlock_' + Date.now() + Math.random().toString(36).substring(2, 5),
@@ -4364,6 +4496,7 @@ Suhbatlashish qoidalaringiz:
       };
       chatFriendshipsStore[chatId] = friendship;
       saveFriendshipsToDisk();
+      void contentRepository.upsertFriendship(chatId, friendship);
 
       io.to(chatId).emit('friendship_updated', { chatId, friendship });
       const parts = String(chatId).split('_');
@@ -4389,6 +4522,7 @@ Suhbatlashish qoidalaringiz:
         user.updatedAt = new Date().toISOString();
         usersStore.set(uid, user);
         saveUsersToDisk();
+        void contentRepository.upsertUser(user);
         void walletRepository.syncUserWallet(user);
         const unlockTx = {
           id: 'tx_unlock_' + Date.now() + Math.random().toString(36).substring(2, 5),
@@ -4470,6 +4604,7 @@ Suhbatlashish qoidalaringiz:
         caller.updatedAt = new Date().toISOString();
         normalizeAndReleaseUser(caller);
         usersStore.set(caller.uid, caller);
+        void contentRepository.upsertUser(caller);
         void walletRepository.syncUserWallet(caller);
       }
 
@@ -4492,6 +4627,7 @@ Suhbatlashish qoidalaringiz:
         diamondBeneficiary.updatedAt = new Date().toISOString();
         normalizeAndReleaseUser(diamondBeneficiary);
         usersStore.set(diamondBeneficiary.uid, diamondBeneficiary);
+        void contentRepository.upsertUser(diamondBeneficiary);
         void walletRepository.syncUserWallet(diamondBeneficiary);
 
         if (earnedDiamonds > 0) {
@@ -4568,6 +4704,7 @@ Suhbatlashish qoidalaringiz:
       normalizeAndReleaseUser(user);
       usersStore.set(uid, user);
       saveUsersToDisk();
+      void contentRepository.upsertUser(user);
       void walletRepository.syncUserWallet(user);
 
       const tx = {
@@ -4618,6 +4755,7 @@ Suhbatlashish qoidalaringiz:
 
       coinRequestsStore.unshift(coinReq);
       saveCoinRequestsToDisk();
+      void contentRepository.upsertCoinRequest(coinReq);
 
       const tx = {
         id: 'tx_cr_' + Date.now() + Math.random().toString(36).substring(2, 6),
@@ -4677,6 +4815,7 @@ Suhbatlashish qoidalaringiz:
       normalizeAndReleaseUser(user);
       usersStore.set(uid, user);
       saveUsersToDisk();
+      void contentRepository.upsertUser(user);
       void walletRepository.syncUserWallet(user);
 
       const wReq = {
@@ -4755,6 +4894,8 @@ Suhbatlashish qoidalaringiz:
       usersStore.set(recipientUid, recipient);
 
       saveUsersToDisk();
+      void contentRepository.upsertUser(sender);
+      void contentRepository.upsertUser(recipient);
       void walletRepository.syncUserWallet(sender);
       void walletRepository.syncUserWallet(recipient);
 
@@ -4774,7 +4915,7 @@ Suhbatlashish qoidalaringiz:
       void walletRepository.recordTransaction(tx);
       saveTransactionsToDisk();
 
-      const chatId = [senderUid, recipientUid].sort().join('_');
+      const chatId = buildCanonicalChatId(senderUid, recipientUid);
       const giftMsg = {
         id: 'msg_' + Date.now() + Math.random().toString(36).substring(2, 5),
         senderId: senderUid,
@@ -4782,23 +4923,33 @@ Suhbatlashish qoidalaringiz:
         text: `🎁 Sovg'a yuborildi: ${giftName} ${giftIcon || '✨'} (+${diamondEarned} Almaz)`,
         type: 'gift',
         giftInfo: { giftId, giftName, giftIcon, coinPrice: cost, diamondEarned },
-        status: 'read',
-        read: true,
+        status: 'sent',
+        read: false,
         createdAt: new Date().toISOString(),
         time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
       };
 
       if (!chatMessagesStore[chatId]) chatMessagesStore[chatId] = [];
       chatMessagesStore[chatId].push(giftMsg);
+      const prevGiftChat = userChatsStore[chatId];
       userChatsStore[chatId] = {
+        ...(prevGiftChat || {}),
         id: chatId,
-        participants: [senderUid, recipientUid],
+        participants: Array.from(new Set([...(prevGiftChat?.participants || []), senderUid, recipientUid])),
         lastMessage: giftMsg.text,
         lastSenderId: senderUid,
+        createdAt: prevGiftChat?.createdAt || new Date().toISOString(),
+        unreadCount: {
+          ...(prevGiftChat?.unreadCount || {}),
+          [senderUid]: 0,
+          [recipientUid]: Number(prevGiftChat?.unreadCount?.[recipientUid] || 0) + 1,
+        },
         updatedAt: new Date().toISOString()
       };
       saveMessagesToDisk();
       saveChatsToDisk();
+      void contentRepository.upsertChatMessages(chatId, chatMessagesStore[chatId]);
+      void contentRepository.upsertChat(userChatsStore[chatId]);
 
       const payload = { chatId, message: giftMsg, senderId: senderUid, recipientId: recipientUid };
       io.to(chatId).emit('receive_message', payload);
@@ -5635,7 +5786,7 @@ Suhbatlashish qoidalaringiz:
         if (pendingTotal > 0) {
           target.diamonds = roundDiamonds((target.diamonds || 0) + pendingTotal);
           target.pendingDiamondBatches = [];
-          transactionsStore.unshift({
+          const adminUnlockTx = {
             id: 'tx_admin_unlock_' + Date.now(),
             receiver: canonicalTargetUid,
             type: 'diamond_unlock',
@@ -5643,7 +5794,9 @@ Suhbatlashish qoidalaringiz:
             status: 'completed',
             note: `Admin tomonidan ${pendingTotal} almaz walletga chiqarildi`,
             createdAt: new Date().toISOString()
-          });
+          };
+          transactionsStore.unshift(adminUnlockTx);
+          void walletRepository.recordTransaction(adminUnlockTx);
           saveTransactionsToDisk();
         }
       } else if (action === 'toggle_verify') {
@@ -5713,6 +5866,7 @@ Suhbatlashish qoidalaringiz:
       wReq.reviewedAt = new Date().toISOString();
       wReq.reviewedBy = adminUid;
       saveWithdrawalsToDisk();
+      void walletRepository.recordWithdrawal(wReq);
 
       let updatedUser: any = null;
       const user = usersStore.get(wReq.userUid);
@@ -5726,6 +5880,7 @@ Suhbatlashish qoidalaringiz:
         normalizeAndReleaseUser(user);
         usersStore.set(user.uid, user);
         saveUsersToDisk();
+        void contentRepository.upsertUser(user);
         void walletRepository.syncUserWallet(user);
         io.emit('user_updated', user);
         updatedUser = user;
@@ -5759,6 +5914,7 @@ Suhbatlashish qoidalaringiz:
       reqItem.reviewedAt = new Date().toISOString();
       reqItem.reviewedBy = adminUid;
       saveCoinRequestsToDisk();
+      void contentRepository.upsertCoinRequest(reqItem);
 
       let updatedUser: any = null;
       if (action === 'approve' || action === 'complete_manual') {
@@ -5769,6 +5925,7 @@ Suhbatlashish qoidalaringiz:
           normalizeAndReleaseUser(user);
           usersStore.set(user.uid, user);
           saveUsersToDisk();
+          void contentRepository.upsertUser(user);
           void walletRepository.syncUserWallet(user);
           io.emit('user_updated', user);
           updatedUser = user;
@@ -5837,8 +5994,18 @@ Suhbatlashish qoidalaringiz:
     } catch (e) {
       console.warn('Could not save mandatory_subscription.json:', e);
     }
+    void contentRepository.setSetting('mandatory_subscription', mandatorySubConfig);
   }
   loadMandatorySubFromDisk();
+  if (contentRepository.getMode() === 'mongodb') {
+    const mongoSub = await contentRepository.getSetting<MandatorySubscriptionConfig>('mandatory_subscription');
+    if (mongoSub && typeof mongoSub === 'object') {
+      mandatorySubConfig = { ...DEFAULT_MANDATORY_SUBSCRIPTION_CONFIG, ...mongoSub };
+      saveMandatorySubToDisk();
+    } else if (fs.existsSync(MANDATORY_SUBSCRIPTION_FILE)) {
+      void contentRepository.setSetting('mandatory_subscription', mandatorySubConfig);
+    }
+  }
 
   async function verifyBotAdminInChannel(channelLink: string, channelChatId?: string): Promise<{
     botIsAdmin: boolean;
@@ -6250,19 +6417,54 @@ Suhbatlashish qoidalaringiz:
   app.get('/api/chats/:chatId/messages', (req, res) => {
     const { chatId } = req.params;
     const viewerUid = String(req.query.viewerUid || '').trim();
-    const messages = chatMessagesStore[chatId] || [];
-    const friendship = chatFriendshipsStore[chatId] || { active: false };
-    let partnerStartGifUrl = '';
-    const chatRecord = userChatsStore[chatId];
+    const viewerUser = viewerUid ? findUserByUidOrId(viewerUid) : undefined;
+    const canonicalViewerUid = viewerUser?.uid || viewerUid;
     const viewerAliases = viewerUid ? getUserAliasSet(viewerUid) : new Set<string>();
+    const chatRecord = userChatsStore[chatId];
     const partnerUid = viewerUid
       ? resolvePartnerUidForChat(chatRecord || { id: chatId }, viewerUid, Array.from(viewerAliases))
       : '';
-    if (partnerUid) {
-      const partnerUser = findUserByUidOrId(partnerUid);
-      if (partnerUser?.startGifUrl) {
-        partnerStartGifUrl = String(partnerUser.startGifUrl).trim();
+    const partnerUser = partnerUid ? findUserByUidOrId(partnerUid) : undefined;
+    const canonicalPartnerUid = partnerUser?.uid || partnerUid;
+
+    const candidateChatIds = new Set<string>([chatId]);
+    if (canonicalViewerUid && canonicalPartnerUid) {
+      candidateChatIds.add(buildCanonicalChatId(canonicalViewerUid, canonicalPartnerUid));
+    }
+    if (viewerUid && partnerUid) {
+      candidateChatIds.add(buildCanonicalChatId(viewerUid, partnerUid));
+    }
+    if (partnerUser?.id && canonicalViewerUid) {
+      candidateChatIds.add(buildCanonicalChatId(canonicalViewerUid, String(partnerUser.id)));
+    }
+    if (viewerUser?.id && canonicalPartnerUid) {
+      candidateChatIds.add(buildCanonicalChatId(String(viewerUser.id), canonicalPartnerUid));
+    }
+
+    const msgById = new Map<string, any>();
+    for (const cid of candidateChatIds) {
+      const list = chatMessagesStore[cid];
+      if (!Array.isArray(list)) continue;
+      for (const m of list) {
+        if (!m || typeof m !== 'object') continue;
+        const key = String(m.id || `${m.createdAt}_${m.senderId}_${m.text}`);
+        if (!msgById.has(key)) msgById.set(key, m);
       }
+    }
+    const messages = Array.from(msgById.values()).sort((a, b) => {
+      const ta = new Date(a.createdAt || 0).getTime() || 0;
+      const tb = new Date(b.createdAt || 0).getTime() || 0;
+      return ta - tb;
+    });
+
+    const canonicalId =
+      canonicalViewerUid && canonicalPartnerUid
+        ? buildCanonicalChatId(canonicalViewerUid, canonicalPartnerUid)
+        : chatId;
+    const friendship = chatFriendshipsStore[canonicalId] || chatFriendshipsStore[chatId] || { active: false };
+    let partnerStartGifUrl = '';
+    if (partnerUser?.startGifUrl) {
+      partnerStartGifUrl = String(partnerUser.startGifUrl).trim();
     }
     res.json({ success: true, messages, friendship, partnerStartGifUrl });
   });
@@ -6306,7 +6508,7 @@ Suhbatlashish qoidalaringiz:
   }
 
   // POST /api/chats/open — persistently register an opened chat on server so list never drops items
-  app.post('/api/chats/open', (req, res) => {
+  app.post('/api/chats/open', async (req, res) => {
     try {
       const { myUid, targetUid, partnerSnapshot } = req.body || {};
       if (!myUid || !targetUid) {
@@ -6338,11 +6540,18 @@ Suhbatlashish qoidalaringiz:
           }
         : partnerSnapshot;
 
+      const nextUnread = { ...(existing?.unreadCount || {}) };
+      nextUnread[canonicalMyUid] = 0;
+      if (me?.id) nextUnread[String(me.id)] = 0;
+      nextUnread[String(myUid)] = 0;
+
       if (!existing) {
         userChatsStore[chatId] = {
           id: chatId,
           participants: [canonicalMyUid, canonicalTargetUid],
           lastMessage: 'Yangi suhbat boshlandi',
+          unreadCount: nextUnread,
+          createdAt: new Date().toISOString(),
           updatedAt: new Date().toISOString(),
           partner: hydratedPartner,
         };
@@ -6351,429 +6560,310 @@ Suhbatlashish qoidalaringiz:
           ...existing,
           id: chatId,
           participants: Array.from(new Set([...(existing.participants || []), canonicalMyUid, canonicalTargetUid])),
+          unreadCount: nextUnread,
+          createdAt: existing.createdAt || new Date().toISOString(),
           partner: hydratedPartner || existing.partner,
         };
       }
       saveChatsToDisk();
+      await contentRepository.upsertChat(userChatsStore[chatId]);
       res.json({ success: true, chat: userChatsStore[chatId] });
     } catch (err: any) {
       res.status(500).json({ success: false, error: err?.message || 'Chatni ochishda xatolik' });
     }
   });
 
-  // GET /api/chats/user/:uid — return all chats (unlimited, hydrated, deduplicated, newest first)
-  app.get('/api/chats/user/:uid', (req, res) => {
-    const { uid } = req.params;
-    const aliases = getUserAliasSet(uid);
-    const matched = Object.values(userChatsStore)
-      .filter((chat: any) => {
-        const parts: string[] = Array.isArray(chat?.participants) ? chat.participants.map(String) : [];
-        if (parts.some((p) => aliases.has(p))) return true;
-        const idStr = String(chat?.id || '');
-        return Array.from(aliases).some((a) => a && (idStr.startsWith(`${a}_`) || idStr.endsWith(`_${a}`)));
-      })
-      .map((chat: any) => hydrateChatForUser(chat, aliases));
-
-    const userRecord = findUserByUidOrId(uid);
-    const canonicalMyUid = userRecord?.uid || uid;
-    const merged = mergeChatLists([matched], canonicalMyUid, {
-      myAliases: Array.from(aliases),
-      usersList: Array.from(usersStore.values()),
-    });
-    res.json({ success: true, chats: merged });
-  });
-
-  app.get('/robots.txt', (_req, res) => {
-    const robotsPath = path.resolve(__dirname, 'public', 'robots.txt');
-    if (fs.existsSync(robotsPath)) {
-      res.setHeader('Content-Type', 'text/plain; charset=utf-8');
-      return res.sendFile(robotsPath);
+  async function processIncomingChatMessage(data: any): Promise<{
+    success: boolean;
+    messageId?: string;
+    status?: string;
+    message?: any;
+    chat?: any;
+    sender?: any;
+    error?: string;
+    requiredCoins?: number;
+    startGifUrl?: string;
+    errorMessage?: string;
+  }> {
+    const rawChatId = String(data?.chatId || '').trim();
+    const message = data?.message;
+    const rawSenderId = String(data?.senderId || message?.senderId || '').trim();
+    const rawRecipientId = String(data?.recipientId || '').trim();
+    if (!message || !rawSenderId) {
+      return { success: false, error: 'invalid_payload', errorMessage: "Xabar ma'lumotlari to'liq emas." };
     }
-    res.type('text/plain').send('User-agent: *\nAllow: /\nDisallow: /api/\nSitemap: https://alov.uz/sitemap.xml\n');
-  });
 
-  app.get('/llms.txt', (_req, res) => {
-    const llmsPath = path.resolve(__dirname, 'public', 'llms.txt');
-    if (fs.existsSync(llmsPath)) {
-      res.setHeader('Content-Type', 'text/markdown; charset=utf-8');
-      return res.sendFile(llmsPath);
+    const senderUser = findUserByUidOrId(rawSenderId) || usersStore.get(rawSenderId);
+    const recipientUser = rawRecipientId
+      ? findUserByUidOrId(rawRecipientId) || usersStore.get(rawRecipientId)
+      : undefined;
+    const senderId = senderUser?.uid || rawSenderId;
+    const recipientId = recipientUser?.uid || rawRecipientId;
+    const chatId =
+      senderId && recipientId
+        ? buildCanonicalChatId(senderId, recipientId)
+        : rawChatId;
+
+    const isAIBot =
+      chatId.includes('user_kamola_006') ||
+      recipientId === 'user_kamola_006' ||
+      chatId.includes('ALOV-006') ||
+      recipientId === 'ALOV-006' ||
+      chatId.includes('alov_ai_bot') ||
+      recipientId === 'alov_ai_bot';
+
+    if (senderUser?.isBanned) {
+      return {
+        success: false,
+        error: 'user_banned',
+        errorMessage: 'Sizning hisobingiz admin tomonidan bloklangan.',
+      };
     }
-    res.setHeader('Content-Type', 'text/markdown; charset=utf-8');
-    return res.send("# Alov.uz\n\nO'zbekistonning Face ID bilan tasdiqlangan tanishuv va jonli muloqot platformasi.\n");
-  });
 
-  app.get('/ai-catalog.json', (_req, res) => {
-    const catalogPath = path.resolve(__dirname, 'public', 'ai-catalog.json');
-    if (fs.existsSync(catalogPath)) {
-      res.setHeader('Content-Type', 'application/json; charset=utf-8');
-      return res.sendFile(catalogPath);
+    // Idempotent duplicate protection: if message.id already persisted (e.g., socket ACK missed + HTTP fallback), return immediately
+    const existingList = chatMessagesStore[chatId] || chatMessagesStore[rawChatId] || [];
+    const alreadyStored = message?.id ? existingList.find((m: any) => m.id === message.id) : undefined;
+    if (alreadyStored) {
+      return {
+        success: true,
+        messageId: alreadyStored.id,
+        status: alreadyStored.status || 'sent',
+        message: alreadyStored,
+        chat: userChatsStore[chatId] || userChatsStore[rawChatId],
+        sender: senderUser,
+      };
     }
-    const ardPath = path.resolve(__dirname, 'public', '.well-known', 'ard.json');
-    if (fs.existsSync(ardPath)) {
-      res.setHeader('Content-Type', 'application/json; charset=utf-8');
-      return res.sendFile(ardPath);
-    }
-    return res.json({
-      specVersion: '1.0',
-      host: {
-        displayName: 'Alov.uz',
-        identifier: 'alov.uz',
-        description: "O'zbekistonning Face ID bilan tasdiqlangan zamonaviy tanishuv, postlar va jonli efir platformasi.",
-        url: 'https://alov.uz',
-        language: 'uz',
-      },
-      entries: [
-        {
-          identifier: 'urn:air:alov.uz:web:platform',
-          displayName: 'Alov.uz Platformasi',
-          type: 'text/html',
-          url: 'https://alov.uz/',
-        },
-      ],
-    });
-  });
 
-  app.get('/.well-known/ard.json', (_req, res) => {
-    const ardPath = path.resolve(__dirname, 'public', '.well-known', 'ard.json');
-    if (fs.existsSync(ardPath)) {
-      res.setHeader('Content-Type', 'application/json; charset=utf-8');
-      return res.sendFile(ardPath);
-    }
-    return res.json({
-      specVersion: '1.0',
-      host: {
-        displayName: 'Alov.uz',
-        identifier: 'alov.uz',
-        description: "O'zbekistonning Face ID bilan tasdiqlangan zamonaviy tanishuv, postlar va jonli efir platformasi.",
-        url: 'https://alov.uz',
-        language: 'uz',
-      },
-      entries: [
-        {
-          identifier: 'urn:air:alov.uz:web:platform',
-          displayName: 'Alov.uz Platformasi',
-          type: 'text/html',
-          url: 'https://alov.uz/',
-        },
-      ],
-    });
-  });
-
-  // Setup Vite in development or static serve in production
-  if (!isProduction) {
-    const vite = await createViteServer({
-      server: { middlewareMode: true },
-      appType: 'spa',
-    });
-    app.use(vite.middlewares);
-  } else {
-    app.use(
-      express.static(path.resolve(__dirname, 'dist'), {
-        setHeaders: (res, filePath) => {
-          if (filePath.endsWith('index.html') || filePath.endsWith('sw.js')) {
-            res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
-          }
-        },
-      })
-    );
-    app.get('*', (_req, res) => {
-      res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
-      res.sendFile(path.resolve(__dirname, 'dist', 'index.html'));
-    });
-  }
-
-  io.on('connection', (socket) => {
-    console.log('Client connected via Socket.io:', socket.id);
-    presenceRegistry.connectSocket(socket.id);
-    broadcastActiveUsersCount();
-
-    // Register user socket for direct personal messaging bridge & true presence
-    socket.on('register_user', (uid) => {
-      if (uid) {
-        socket.join(`user_${uid}`);
-        const res = presenceRegistry.registerUser(socket.id, uid);
-
-        if (res.previousUid && res.removedPreviousUidOffline) {
-          socket.leave(`user_${res.previousUid}`);
-          const prevUser = usersStore.get(res.previousUid);
-          if (prevUser) {
-            prevUser.isOnline = false;
-            prevUser.status = 'offline';
-            prevUser.lastSeen = new Date().toISOString();
-            usersStore.set(res.previousUid, prevUser);
-            io.emit('user_updated', prevUser);
-          }
-        }
-
-        const user = usersStore.get(uid);
-        if (user) {
-          user.isOnline = true;
-          user.status = 'online';
-          user.lastSeen = new Date().toISOString();
-          usersStore.set(uid, user);
-          io.emit('user_updated', user);
-        }
-        broadcastActiveUsersCount();
-      }
-    });
-
-    socket.on('unregister_user', (uid) => {
-      const targetUid = typeof uid === 'string' ? uid : undefined;
-      if (targetUid) socket.leave(`user_${targetUid}`);
-      const res = presenceRegistry.unregisterUser(socket.id, targetUid);
-      if (res.becameOffline && res.uid) {
-        const user = usersStore.get(res.uid);
-        if (user) {
-          user.isOnline = false;
-          user.status = 'offline';
-          user.lastSeen = new Date().toISOString();
-          usersStore.set(res.uid, user);
-          saveUsersToDisk();
-          io.emit('user_updated', user);
-        }
-      }
-      broadcastActiveUsersCount();
-    });
-
-    socket.on('presence_heartbeat', ({ uid }: { uid?: string } = {}) => {
-      presenceRegistry.heartbeat(socket.id, uid);
-    });
-
-    socket.on('join_chat', (chatId) => {
-      socket.join(chatId);
-    });
-
-    // Real-time GPS Location Update Event for ALL users (Telegram & Firebase)
-    socket.on('update_location', ({ uid, location, isLocationEnabled, locationVisibility }) => {
-      if (!uid || !location || location.lat == null || location.lng == null) return;
-      const user = usersStore.get(uid);
-      if (user) {
-        user.location = {
-          lat: Number(location.lat),
-          lng: Number(location.lng),
-          accuracy: location.accuracy,
+    // Mandatory Start GIF Gate
+    const requiredStartGif = !isAIBot ? String(recipientUser?.startGifUrl || '').trim() : '';
+    if (existingList.length === 0 && requiredStartGif) {
+      const sentGifUrl = String(message?.fileUrl || message?.content || '').trim();
+      if (message?.type !== 'gif' || !sentGifUrl || sentGifUrl !== requiredStartGif) {
+        return {
+          success: false,
+          error: 'start_gif_required',
+          startGifUrl: requiredStartGif,
+          errorMessage: 'Suhbatni boshlash uchun avval tanlangan Start GIF ni yuboring!',
         };
-        if (isLocationEnabled !== undefined) user.isLocationEnabled = Boolean(isLocationEnabled);
-        if (locationVisibility) user.locationVisibility = locationVisibility;
-        user.isOnline = true;
-        user.status = 'online';
-        user.updatedAt = new Date().toISOString();
-        usersStore.set(uid, user);
-        saveUsersToDisk();
-        io.emit('user_updated', user);
       }
-    });
+    }
 
-    const handleIncomingMessage = async (data: any, callback?: Function) => {
-      const { chatId, message, senderId, recipientId } = data;
-      const senderUser = findUserByUidOrId(String(senderId || '')) || usersStore.get(senderId);
-      const recipientUser = findUserByUidOrId(String(recipientId || '')) || usersStore.get(recipientId);
-      const isAIBot = chatId.includes('user_kamola_006') || recipientId === 'user_kamola_006' || chatId.includes('ALOV-006') || recipientId === 'ALOV-006' || chatId.includes('alov_ai_bot') || recipientId === 'alov_ai_bot';
+    const isFriendFreeChat = Boolean(chatFriendshipsStore[chatId]?.active || chatFriendshipsStore[rawChatId]?.active);
+    const isAdminSender = isAdminTelegramUser(senderUser);
 
-      if (senderUser?.isBanned) {
-        if (typeof callback === 'function') {
-          callback({ success: false, error: 'user_banned', message: 'Sizning hisobingiz admin tomonidan bloklangan.' });
-        }
-        return;
+    const msgCoinCost = getMessageCoinCost(message?.type);
+    if (senderUser && canChargeForMessage({ senderGender: senderUser?.gender, isAIBot, isFriendFreeChat, isAdminSender })) {
+      const currentCoins = senderUser.coins !== undefined ? senderUser.coins : 100;
+      if (currentCoins < msgCoinCost) {
+        io.to(`user_${senderId}`).emit('insufficient_coins', {
+          requiredCoins: msgCoinCost,
+          message: `Monetalaringiz yetarli emas! Ushbu xabar narxi ${msgCoinCost} moneta.`
+        });
+        return {
+          success: false,
+          error: 'insufficient_coins',
+          requiredCoins: msgCoinCost,
+          errorMessage: `Monetangiz yetarli emas! Ushbu xabar turi uchun ${msgCoinCost} moneta kerak.`
+        };
       }
 
-      // Mandatory Start GIF Gate: on an empty non-AI chat where recipient configured startGifUrl,
-      // the very first message MUST be that exact Start GIF before unlocking regular messages.
-      const existingChatMsgs = chatMessagesStore[chatId] || [];
-      const requiredStartGif = !isAIBot ? String(recipientUser?.startGifUrl || '').trim() : '';
-      if (existingChatMsgs.length === 0 && requiredStartGif) {
-        const sentGifUrl = String(message?.fileUrl || message?.content || '').trim();
-        if (message?.type !== 'gif' || !sentGifUrl || sentGifUrl !== requiredStartGif) {
-          if (typeof callback === 'function') {
-            callback({
-              success: false,
-              error: 'start_gif_required',
-              startGifUrl: requiredStartGif,
-              message: 'Suhbatni boshlash uchun avval tanlangan Start GIF ni yuboring!',
-            });
-          }
-          return;
+      senderUser.coins = currentCoins - msgCoinCost;
+      usersStore.set(senderId, senderUser);
+      saveUsersToDisk();
+      void contentRepository.upsertUser(senderUser);
+      void walletRepository.syncUserWallet(senderUser);
+
+      const pendingTx = {
+        id: 'tx_msg_' + message.id,
+        sender: senderId,
+        receiver: recipientId,
+        type: 'message_paid',
+        messageType: message?.type || 'text',
+        coinAmount: msgCoinCost,
+        diamondAmount: MESSAGE_DIAMOND_REWARD,
+        status: 'pending',
+        note: `Xabar uchun to'lov (${msgCoinCost} moneta — javob kutilmoqda)`,
+        createdAt: new Date().toISOString()
+      };
+      transactionsStore.unshift(pendingTx);
+      void walletRepository.recordTransaction(pendingTx);
+      saveTransactionsToDisk();
+
+      io.to(`user_${senderId}`).emit('user_updated', senderUser);
+      io.emit('user_updated', senderUser);
+    }
+
+    if (senderUser && senderUser.gender === 'female' && recipientUser && recipientUser.gender === 'male') {
+      let totalNewDiamonds = 0;
+      for (const tx of transactionsStore) {
+        if (tx.sender === recipientId && tx.receiver === senderId && tx.type === 'message_paid' && tx.status === 'pending') {
+          tx.status = 'completed';
+          tx.note = "Xabarga javob berildi (limitga qo'shildi)";
+          void walletRepository.recordTransaction(tx);
+          totalNewDiamonds = roundDiamonds(totalNewDiamonds + roundDiamonds(tx.diamondAmount || MESSAGE_DIAMOND_REWARD));
         }
       }
-
-      const isFriendFreeChat = Boolean(chatFriendshipsStore[chatId]?.active);
-      const isAdminSender = isAdminTelegramUser(senderUser);
-
-      // --- PAID MESSAGE & TOKENOMICS LOGIC (10 text/gif/img, 5 voice, 20 audio/video; female reward unchanged at 2.5) ---
-      const msgCoinCost = getMessageCoinCost(message?.type);
-      if (canChargeForMessage({ senderGender: senderUser?.gender, isAIBot, isFriendFreeChat, isAdminSender })) {
-        const currentCoins = senderUser.coins !== undefined ? senderUser.coins : 100;
-        if (currentCoins < msgCoinCost) {
-          if (typeof callback === 'function') {
-            callback({
-              success: false,
-              error: 'insufficient_coins',
-              requiredCoins: msgCoinCost,
-              message: `Monetangiz yetarli emas! Ushbu xabar turi uchun ${msgCoinCost} moneta kerak.`
-            });
-          }
-          io.to(`user_${senderId}`).emit('insufficient_coins', {
-            requiredCoins: msgCoinCost,
-            message: `Monetalaringiz yetarli emas! Ushbu xabar narxi ${msgCoinCost} moneta.`
-          });
-          return;
+      if (totalNewDiamonds > 0) {
+        const progressResult = applyDiamondProgress(
+          senderUser.diamondProgress || 0,
+          senderUser.pendingDiamondBatches || [],
+          totalNewDiamonds,
+          Date.now(),
+          senderUser.dailyLimitResetAt
+        );
+        senderUser.diamondProgress = progressResult.diamondProgress;
+        senderUser.dailyLimitResetAt = progressResult.dailyLimitResetAt;
+        senderUser.pendingDiamondBatches = progressResult.pendingDiamondBatches;
+        senderUser.totalEarnedDiamonds = roundDiamonds((senderUser.totalEarnedDiamonds || 0) + progressResult.acceptedDiamonds);
+        normalizeAndReleaseUser(senderUser);
+        if (progressResult.limitReached && progressResult.acceptedDiamonds > 0) {
+          const lockTx = {
+            id: 'tx_limit_' + Date.now() + Math.random().toString(36).substring(2, 5),
+            receiver: senderId,
+            type: 'diamond_limit_locked',
+            diamondAmount: DIAMOND_LIMIT_TARGET,
+            uzsAmount: calculateDiamondsToUzs(DIAMOND_LIMIT_TARGET),
+            status: 'pending',
+            note: `Kunlik ${DIAMOND_LIMIT_TARGET} ta olmos limiti to'ldi — yig'ilgan olmoslar 12 soat ichida hamyonga qo'shiladi`,
+            createdAt: new Date().toISOString()
+          };
+          transactionsStore.unshift(lockTx);
+          void walletRepository.recordTransaction(lockTx);
         }
-
-        senderUser.coins = currentCoins - msgCoinCost;
         usersStore.set(senderId, senderUser);
         saveUsersToDisk();
-
-        // Create Pending Transaction (female diamond reward stays MESSAGE_DIAMOND_REWARD = 2.5 unchanged)
-        const pendingTx = {
-          id: 'tx_msg_' + message.id,
-          sender: senderId,
-          receiver: recipientId,
-          type: 'message_paid',
-          messageType: message?.type || 'text',
-          coinAmount: msgCoinCost,
-          diamondAmount: MESSAGE_DIAMOND_REWARD,
-          status: 'pending',
-          note: `Xabar uchun to'lov (${msgCoinCost} moneta — javob kutilmoqda)`,
-          createdAt: new Date().toISOString()
-        };
-        transactionsStore.unshift(pendingTx);
+        void contentRepository.upsertUser(senderUser);
         saveTransactionsToDisk();
-
+        void walletRepository.syncUserWallet(senderUser);
         io.to(`user_${senderId}`).emit('user_updated', senderUser);
         io.emit('user_updated', senderUser);
       }
+    }
 
-      // If female user replies to a male user, convert pending transactions and credit daily 120-diamond 24h cap (all earned diamonds queue into wallet even if < 120)
-      if (senderUser && senderUser.gender === 'female' && recipientUser && recipientUser.gender === 'male') {
-        let totalNewDiamonds = 0;
-        for (const tx of transactionsStore) {
-          if (tx.sender === recipientId && tx.receiver === senderId && tx.type === 'message_paid' && tx.status === 'pending') {
-            tx.status = 'completed';
-            tx.note = 'Xabarga javob berildi (limitga qo\'shildi)';
-            totalNewDiamonds = roundDiamonds(totalNewDiamonds + roundDiamonds(tx.diamondAmount || MESSAGE_DIAMOND_REWARD));
-          }
-        }
-        if (totalNewDiamonds > 0) {
-          const progressResult = applyDiamondProgress(
-            senderUser.diamondProgress || 0,
-            senderUser.pendingDiamondBatches || [],
-            totalNewDiamonds,
-            Date.now(),
-            senderUser.dailyLimitResetAt
-          );
-          senderUser.diamondProgress = progressResult.diamondProgress;
-          senderUser.dailyLimitResetAt = progressResult.dailyLimitResetAt;
-          senderUser.pendingDiamondBatches = progressResult.pendingDiamondBatches;
-          senderUser.totalEarnedDiamonds = roundDiamonds((senderUser.totalEarnedDiamonds || 0) + progressResult.acceptedDiamonds);
-          normalizeAndReleaseUser(senderUser);
-          if (progressResult.limitReached && progressResult.acceptedDiamonds > 0) {
-            const lockTx = {
-              id: 'tx_limit_' + Date.now() + Math.random().toString(36).substring(2, 5),
-              receiver: senderId,
-              type: 'diamond_limit_locked',
-              diamondAmount: DIAMOND_LIMIT_TARGET,
-              uzsAmount: calculateDiamondsToUzs(DIAMOND_LIMIT_TARGET),
-              status: 'pending',
-              note: `Kunlik ${DIAMOND_LIMIT_TARGET} ta olmos limiti to'ldi — yig'ilgan olmoslar 12 soat ichida hamyonga qo'shiladi`,
-              createdAt: new Date().toISOString()
-            };
-            transactionsStore.unshift(lockTx);
-            void walletRepository.recordTransaction(lockTx);
-          }
-          usersStore.set(senderId, senderUser);
-          saveUsersToDisk();
-          saveTransactionsToDisk();
-          void walletRepository.syncUserWallet(senderUser);
-          io.to(`user_${senderId}`).emit('user_updated', senderUser);
-          io.emit('user_updated', senderUser);
+    const normalizedFileUrl =
+      message.fileUrl || (message.type === 'gif' ? message.content : null) || null;
+    const deliveredMessage = {
+      ...message,
+      fileUrl: normalizedFileUrl,
+      ...(message.type === 'gif' && normalizedFileUrl ? { content: normalizedFileUrl } : {}),
+      senderId,
+      senderName: message.senderName || senderUser?.name || 'Foydalanuvchi',
+      senderAvatar: message.senderAvatar || senderUser?.avatar || '',
+      sender: {
+        _id: senderId,
+        uid: senderId,
+        name: message.senderName || senderUser?.name || 'Foydalanuvchi',
+        avatar: message.senderAvatar || senderUser?.avatar || ''
+      },
+      status: 'sent',
+      read: false,
+      createdAt: message.createdAt || new Date().toISOString(),
+    };
+    const payload = { chatId, message: deliveredMessage, senderId, recipientId };
+
+    // Permanent Render storage — NEVER truncate chat history
+    if (!chatMessagesStore[chatId]) {
+      chatMessagesStore[chatId] = [];
+    }
+    if (rawChatId && rawChatId !== chatId && Array.isArray(chatMessagesStore[rawChatId])) {
+      for (const oldM of chatMessagesStore[rawChatId]) {
+        if (oldM?.id && !chatMessagesStore[chatId].some((m: any) => m.id === oldM.id)) {
+          chatMessagesStore[chatId].push(oldM);
         }
       }
+    }
+    if (!chatMessagesStore[chatId].some((m: any) => m.id === deliveredMessage.id)) {
+      chatMessagesStore[chatId].push(deliveredMessage);
+    }
 
-      const normalizedFileUrl =
-        message.fileUrl || (message.type === 'gif' ? message.content : null) || null;
-      const deliveredMessage = {
-        ...message,
-        fileUrl: normalizedFileUrl,
-        ...(message.type === 'gif' && normalizedFileUrl ? { content: normalizedFileUrl } : {}),
-        senderId: senderId,
-        senderName: message.senderName || senderUser?.name || 'Foydalanuvchi',
-        senderAvatar: message.senderAvatar || senderUser?.avatar || '',
-        sender: {
-          _id: senderId,
-          uid: senderId,
-          name: message.senderName || senderUser?.name || 'Foydalanuvchi',
-          avatar: message.senderAvatar || senderUser?.avatar || ''
-        },
-        status: 'sent',
-        read: false
-      };
-      const payload = { chatId, message: deliveredMessage, senderId, recipientId };
-
-      // Ack callback to sender immediately
-      if (typeof callback === 'function') {
-        callback({ success: true, messageId: message.id, status: 'sent' });
-      }
-
-      // Store in server memory
-      if (!chatMessagesStore[chatId]) {
-        chatMessagesStore[chatId] = [];
-      }
-      // Deduplicate by message id if sent rapidly
-      if (!chatMessagesStore[chatId].some((m: any) => m.id === message.id)) {
-        chatMessagesStore[chatId].push(payload.message);
-        if (chatMessagesStore[chatId].length > 250) {
-          chatMessagesStore[chatId].shift(); // limit history buffer
+    const existingChat = userChatsStore[chatId] || (rawChatId ? userChatsStore[rawChatId] : undefined);
+    const partnerIsAdmin = Boolean(recipientUser && isAdminTelegramUser(recipientUser));
+    const hydratedPartner = recipientUser
+      ? {
+          uid: recipientUser.uid,
+          id: recipientUser.id,
+          name: recipientUser.name,
+          username: recipientUser.username,
+          avatar: recipientUser.avatar,
+          gender: recipientUser.gender,
+          isOnline: recipientUser.isOnline,
+          status: recipientUser.status,
+          isVerified: recipientUser.isVerified,
+          role: partnerIsAdmin ? 'admin' : 'user',
+          isAdmin: partnerIsAdmin,
+          faceId: recipientUser.faceId,
+          startGifUrl: String(recipientUser.startGifUrl || ''),
         }
-      }
+      : existingChat?.partner;
 
-      userChatsStore[chatId] = {
-        id: chatId,
-        participants: [senderId, recipientId].filter(Boolean),
-        lastMessage:
-          message.type === 'gif'
-            ? 'GIF 🎬'
-            : message.type === 'voice'
-            ? '🎤 Ovozli xabar'
-            : message.type === 'audio'
-            ? `🎵 ${message.fileName || 'Audio fayl'}`
-            : message.type === 'image'
-            ? '🖼️ Rasm'
-            : message.type === 'video'
-            ? '🎥 Video'
-            : message.text || 'Xabar',
-        lastSenderId: senderId,
-        updatedAt: new Date().toISOString()
-      };
-      saveChatsToDisk();
-      saveMessagesToDisk();
+    const prevUnread = { ...(existingChat?.unreadCount || {}) };
+    prevUnread[senderId] = 0;
+    if (senderUser?.id) prevUnread[String(senderUser.id)] = 0;
+    if (recipientId && recipientId !== senderId) {
+      prevUnread[recipientId] = Number(prevUnread[recipientId] || 0) + 1;
+    }
 
-      // Broadcast message to room and to personal user channels for guaranteed delivery
-      io.to(chatId).emit('receive_message', payload);
-      io.to(chatId).emit('chat:message', payload);
-      if (recipientId) {
-        io.to(`user_${recipientId}`).emit('receive_message', payload);
-        io.to(`user_${recipientId}`).emit('chat:message', payload);
-      }
-      if (senderId) {
-        io.to(`user_${senderId}`).emit('message_ack', { chatId, messageId: message.id, status: 'sent' });
-        io.to(`user_${senderId}`).emit('receive_message', payload);
-        io.to(`user_${senderId}`).emit('chat:message', payload);
-      }
+    userChatsStore[chatId] = {
+      ...(existingChat || {}),
+      id: chatId,
+      participants: Array.from(new Set([...(existingChat?.participants || []), senderId, recipientId].filter(Boolean))),
+      lastMessage:
+        message.type === 'gif'
+          ? 'GIF 🎬'
+          : message.type === 'voice'
+          ? '🎤 Ovozli xabar'
+          : message.type === 'audio'
+          ? `🎵 ${message.fileName || 'Audio fayl'}`
+          : message.type === 'image'
+          ? '🖼️ Rasm'
+          : message.type === 'video'
+          ? '🎥 Video'
+          : message.text || 'Xabar',
+      lastSenderId: senderId,
+      unreadCount: prevUnread,
+      partner: hydratedPartner,
+      createdAt: existingChat?.createdAt || new Date().toISOString(),
+      updatedAt: new Date().toISOString()
+    };
 
-      // Check if chatting with Kamola Saidova OR Alov AI bot
-      const isKamolaChat = chatId.includes('user_kamola_006') || recipientId === 'user_kamola_006' || chatId.includes('ALOV-006') || recipientId === 'ALOV-006';
-      const isAlovAiBot = chatId.includes('alov_ai_bot') || recipientId === 'alov_ai_bot';
+    saveChatsToDisk();
+    saveMessagesToDisk();
+    await Promise.all([
+      contentRepository.upsertChat(userChatsStore[chatId]),
+      contentRepository.upsertChatMessages(chatId, chatMessagesStore[chatId]),
+    ]);
 
-      if (!isKamolaChat && !isAlovAiBot && recipientUser) {
-        void sendChatSpoilerTelegramNotification({
-          senderUser,
-          recipientUser,
-          messageText: deliveredMessage.text,
-          mediaType: deliveredMessage.type,
-        });
-      }
+    // Broadcast message to room and to personal user channels for guaranteed delivery
+    io.to(chatId).emit('receive_message', payload);
+    io.to(chatId).emit('chat:message', payload);
+    if (rawChatId && rawChatId !== chatId) {
+      io.to(rawChatId).emit('receive_message', payload);
+      io.to(rawChatId).emit('chat:message', payload);
+    }
+    if (recipientId) {
+      io.to(`user_${recipientId}`).emit('receive_message', payload);
+      io.to(`user_${recipientId}`).emit('chat:message', payload);
+    }
+    if (senderId) {
+      io.to(`user_${senderId}`).emit('message_ack', { chatId, messageId: deliveredMessage.id, status: 'sent' });
+      io.to(`user_${senderId}`).emit('receive_message', payload);
+      io.to(`user_${senderId}`).emit('chat:message', payload);
+    }
 
-      if ((isKamolaChat || isAlovAiBot) && message.type === 'text') {
+    const isKamolaChat = chatId.includes('user_kamola_006') || recipientId === 'user_kamola_006' || chatId.includes('ALOV-006') || recipientId === 'ALOV-006';
+    const isAlovAiBot = chatId.includes('alov_ai_bot') || recipientId === 'alov_ai_bot';
+
+    if (!isKamolaChat && !isAlovAiBot && recipientUser) {
+      void sendChatSpoilerTelegramNotification({
+        senderUser,
+        recipientUser,
+        messageText: deliveredMessage.text,
+        mediaType: deliveredMessage.type,
+      });
+    }
+
+    if ((isKamolaChat || isAlovAiBot) && message.type === 'text') {
+      void (async () => {
         const botUid = isKamolaChat ? 'user_kamola_006' : 'alov_ai_bot';
         const botName = isKamolaChat ? 'Kamola Saidova' : 'Alov AI';
         const botAvatar = '/assets/aistudio/image_e20a1307.webp';
@@ -6962,13 +7052,16 @@ Suhbatlashish qoidalaringiz:
             });
             chatMessagesStore[chatId].push(aiReply);
             userChatsStore[chatId] = {
-              ...(userChatsStore[chatId] || { id: chatId, participants: [senderId, botUid] }),
+              ...(userChatsStore[chatId] || { id: chatId, participants: [senderId, botUid], createdAt: new Date().toISOString() }),
               lastMessage: aiReply.text,
               lastSenderId: botUid,
+              createdAt: userChatsStore[chatId]?.createdAt || new Date().toISOString(),
               updatedAt: new Date().toISOString(),
             };
             saveMessagesToDisk();
             saveChatsToDisk();
+            void contentRepository.upsertChatMessages(chatId, chatMessagesStore[chatId]);
+            void contentRepository.upsertChat(userChatsStore[chatId]);
           }
 
           const aiPayload = { chatId, message: aiReply, senderId: botUid, recipientId: senderId };
@@ -7000,6 +7093,7 @@ Suhbatlashish qoidalaringiz:
           if (chatMessagesStore[chatId]) {
             chatMessagesStore[chatId].push(errorNotice);
             saveMessagesToDisk();
+            void contentRepository.upsertChatMessages(chatId, chatMessagesStore[chatId]);
           }
           const errPayload = { chatId, message: errorNotice, senderId: botUid, recipientId: senderId };
           io.to(chatId).emit('receive_message', errPayload);
@@ -7009,6 +7103,279 @@ Suhbatlashish qoidalaringiz:
             io.to(`user_${senderId}`).emit('chat:message', errPayload);
           }
         }
+      })();
+    }
+
+    return {
+      success: true,
+      messageId: deliveredMessage.id,
+      status: 'sent',
+      message: deliveredMessage,
+      chat: userChatsStore[chatId],
+      sender: senderUser,
+    };
+  }
+
+  // POST /api/chats/send — authoritative Render HTTP fallback + persistent delivery
+  app.post('/api/chats/send', async (req, res) => {
+    try {
+      const result = await processIncomingChatMessage(req.body || {});
+      if (!result.success) {
+        const statusCode = result.error === 'user_banned' ? 403 : result.error === 'insufficient_coins' || result.error === 'start_gif_required' ? 400 : 400;
+        return res.status(statusCode).json({
+          success: false,
+          error: result.error,
+          requiredCoins: result.requiredCoins,
+          startGifUrl: result.startGifUrl,
+          message: result.errorMessage || 'Xabar yuborilmadi',
+        });
+      }
+      return res.json(result);
+    } catch (err: any) {
+      return res.status(500).json({ success: false, error: err?.message || 'Xabar yuborishda xatolik' });
+    }
+  });
+
+  // GET /api/chats/user/:uid — return all chats (unlimited, hydrated, deduplicated, newest first)
+  app.get('/api/chats/user/:uid', (req, res) => {
+    const { uid } = req.params;
+    const aliases = getUserAliasSet(uid);
+    const matched = Object.values(userChatsStore)
+      .filter((chat: any) => {
+        const parts: string[] = Array.isArray(chat?.participants) ? chat.participants.map(String) : [];
+        if (parts.some((p) => aliases.has(p))) return true;
+        const idStr = String(chat?.id || '');
+        return Array.from(aliases).some((a) => a && (idStr.startsWith(`${a}_`) || idStr.endsWith(`_${a}`)));
+      })
+      .map((chat: any) => hydrateChatForUser(chat, aliases));
+
+    const userRecord = findUserByUidOrId(uid);
+    const canonicalMyUid = userRecord?.uid || uid;
+    const merged = mergeChatLists([matched], canonicalMyUid, {
+      myAliases: Array.from(aliases),
+      usersList: Array.from(usersStore.values()),
+    });
+    res.json({ success: true, chats: merged });
+  });
+
+  app.get('/robots.txt', (_req, res) => {
+    const robotsPath = path.resolve(__dirname, 'public', 'robots.txt');
+    if (fs.existsSync(robotsPath)) {
+      res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+      return res.sendFile(robotsPath);
+    }
+    res.type('text/plain').send('User-agent: *\nAllow: /\nDisallow: /api/\nSitemap: https://alov.uz/sitemap.xml\n');
+  });
+
+  app.get('/llms.txt', (_req, res) => {
+    const llmsPath = path.resolve(__dirname, 'public', 'llms.txt');
+    if (fs.existsSync(llmsPath)) {
+      res.setHeader('Content-Type', 'text/markdown; charset=utf-8');
+      return res.sendFile(llmsPath);
+    }
+    res.setHeader('Content-Type', 'text/markdown; charset=utf-8');
+    return res.send("# Alov.uz\n\nO'zbekistonning Face ID bilan tasdiqlangan tanishuv va jonli muloqot platformasi.\n");
+  });
+
+  app.get('/ai-catalog.json', (_req, res) => {
+    const catalogPath = path.resolve(__dirname, 'public', 'ai-catalog.json');
+    if (fs.existsSync(catalogPath)) {
+      res.setHeader('Content-Type', 'application/json; charset=utf-8');
+      return res.sendFile(catalogPath);
+    }
+    const ardPath = path.resolve(__dirname, 'public', '.well-known', 'ard.json');
+    if (fs.existsSync(ardPath)) {
+      res.setHeader('Content-Type', 'application/json; charset=utf-8');
+      return res.sendFile(ardPath);
+    }
+    return res.json({
+      specVersion: '1.0',
+      host: {
+        displayName: 'Alov.uz',
+        identifier: 'alov.uz',
+        description: "O'zbekistonning Face ID bilan tasdiqlangan zamonaviy tanishuv, postlar va jonli efir platformasi.",
+        url: 'https://alov.uz',
+        language: 'uz',
+      },
+      entries: [
+        {
+          identifier: 'urn:air:alov.uz:web:platform',
+          displayName: 'Alov.uz Platformasi',
+          type: 'text/html',
+          url: 'https://alov.uz/',
+        },
+      ],
+    });
+  });
+
+  app.get('/.well-known/ard.json', (_req, res) => {
+    const ardPath = path.resolve(__dirname, 'public', '.well-known', 'ard.json');
+    if (fs.existsSync(ardPath)) {
+      res.setHeader('Content-Type', 'application/json; charset=utf-8');
+      return res.sendFile(ardPath);
+    }
+    return res.json({
+      specVersion: '1.0',
+      host: {
+        displayName: 'Alov.uz',
+        identifier: 'alov.uz',
+        description: "O'zbekistonning Face ID bilan tasdiqlangan zamonaviy tanishuv, postlar va jonli efir platformasi.",
+        url: 'https://alov.uz',
+        language: 'uz',
+      },
+      entries: [
+        {
+          identifier: 'urn:air:alov.uz:web:platform',
+          displayName: 'Alov.uz Platformasi',
+          type: 'text/html',
+          url: 'https://alov.uz/',
+        },
+      ],
+    });
+  });
+
+  // Serve canonical PWA manifest & service worker explicitly with compliant headers (both dev & prod)
+  app.get('/manifest.json', (_req, res) => {
+    const distManifest = path.resolve(__dirname, 'dist', 'manifest.json');
+    const pubManifest = path.resolve(__dirname, 'public', 'manifest.json');
+    const targetManifest = isProduction && fs.existsSync(distManifest) ? distManifest : pubManifest;
+    res.setHeader('Content-Type', 'application/manifest+json; charset=utf-8');
+    res.setHeader('Cache-Control', 'no-cache');
+    return res.sendFile(targetManifest);
+  });
+
+  app.get('/sw.js', (_req, res) => {
+    const distSw = path.resolve(__dirname, 'dist', 'sw.js');
+    const pubSw = path.resolve(__dirname, 'public', 'sw.js');
+    const targetSw = isProduction && fs.existsSync(distSw) ? distSw : pubSw;
+    res.setHeader('Content-Type', 'application/javascript; charset=utf-8');
+    res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+    return res.sendFile(targetSw);
+  });
+
+  // Setup Vite in development or static serve in production
+  if (!isProduction) {
+    const vite = await createViteServer({
+      server: { middlewareMode: true },
+      appType: 'spa',
+    });
+    app.use(vite.middlewares);
+  } else {
+    app.use(
+      express.static(path.resolve(__dirname, 'dist'), {
+        setHeaders: (res, filePath) => {
+          if (filePath.endsWith('index.html') || filePath.endsWith('sw.js')) {
+            res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+          }
+        },
+      })
+    );
+    app.get('*', (_req, res) => {
+      res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+      res.sendFile(path.resolve(__dirname, 'dist', 'index.html'));
+    });
+  }
+
+  io.on('connection', (socket) => {
+    console.log('Client connected via Socket.io:', socket.id);
+    presenceRegistry.connectSocket(socket.id);
+    broadcastActiveUsersCount();
+
+    // Register user socket for direct personal messaging bridge & true presence
+    socket.on('register_user', (uid) => {
+      if (uid) {
+        socket.join(`user_${uid}`);
+        const res = presenceRegistry.registerUser(socket.id, uid);
+
+        if (res.previousUid && res.removedPreviousUidOffline) {
+          socket.leave(`user_${res.previousUid}`);
+          const prevUser = usersStore.get(res.previousUid);
+          if (prevUser) {
+            prevUser.isOnline = false;
+            prevUser.status = 'offline';
+            prevUser.lastSeen = new Date().toISOString();
+            usersStore.set(res.previousUid, prevUser);
+            io.emit('user_updated', prevUser);
+          }
+        }
+
+        const user = usersStore.get(uid);
+        if (user) {
+          user.isOnline = true;
+          user.status = 'online';
+          user.lastSeen = new Date().toISOString();
+          usersStore.set(uid, user);
+          io.emit('user_updated', user);
+        }
+        broadcastActiveUsersCount();
+      }
+    });
+
+    socket.on('unregister_user', (uid) => {
+      const targetUid = typeof uid === 'string' ? uid : undefined;
+      if (targetUid) socket.leave(`user_${targetUid}`);
+      const res = presenceRegistry.unregisterUser(socket.id, targetUid);
+      if (res.becameOffline && res.uid) {
+        const user = usersStore.get(res.uid);
+        if (user) {
+          user.isOnline = false;
+          user.status = 'offline';
+          user.lastSeen = new Date().toISOString();
+          usersStore.set(res.uid, user);
+          saveUsersToDisk();
+          io.emit('user_updated', user);
+        }
+      }
+      broadcastActiveUsersCount();
+    });
+
+    socket.on('presence_heartbeat', ({ uid }: { uid?: string } = {}) => {
+      presenceRegistry.heartbeat(socket.id, uid);
+    });
+
+    socket.on('join_chat', (chatId) => {
+      socket.join(chatId);
+    });
+
+    // Real-time GPS Location Update Event for ALL users (Telegram & Firebase)
+    socket.on('update_location', ({ uid, location, isLocationEnabled, locationVisibility }) => {
+      if (!uid || !location || location.lat == null || location.lng == null) return;
+      const user = usersStore.get(uid);
+      if (user) {
+        user.location = {
+          lat: Number(location.lat),
+          lng: Number(location.lng),
+          accuracy: location.accuracy,
+        };
+        if (isLocationEnabled !== undefined) user.isLocationEnabled = Boolean(isLocationEnabled);
+        if (locationVisibility) user.locationVisibility = locationVisibility;
+        user.isOnline = true;
+        user.status = 'online';
+        user.updatedAt = new Date().toISOString();
+        usersStore.set(uid, user);
+        saveUsersToDisk();
+        io.emit('user_updated', user);
+      }
+    });
+
+    const handleIncomingMessage = async (data: any, callback?: Function) => {
+      try {
+        const result = await processIncomingChatMessage(data || {});
+        if (typeof callback === 'function') {
+          callback({
+            success: result.success,
+            messageId: result.messageId,
+            status: result.status,
+            error: result.error,
+            requiredCoins: result.requiredCoins,
+            startGifUrl: result.startGifUrl,
+            message: result.errorMessage,
+          });
+        }
+      } catch (err: any) {
+        if (typeof callback === 'function') {
+          callback({ success: false, error: 'server_error', message: err?.message || 'Xabar yuborishda xatolik' });
+        }
       }
     };
 
@@ -7016,18 +7383,59 @@ Suhbatlashish qoidalaringiz:
     socket.on('chat:message', handleIncomingMessage);
 
     const handleMarkRead = ({ chatId, messageIds, senderId, recipientId }: any) => {
-      if (chatId && chatMessagesStore[chatId]) {
-        chatMessagesStore[chatId].forEach((m: any) => {
-          if (!messageIds || messageIds.includes(m.id)) {
-            m.status = 'read';
-            m.read = true;
-          }
-        });
-        saveMessagesToDisk();
+      const targetChatIds = new Set<string>();
+      if (chatId) targetChatIds.add(String(chatId));
+      const readerUser = recipientId ? findUserByUidOrId(String(recipientId)) : undefined;
+      const senderUser = senderId ? findUserByUidOrId(String(senderId)) : undefined;
+      const canonicalReader = readerUser?.uid || String(recipientId || '').trim();
+      const canonicalSender = senderUser?.uid || String(senderId || '').trim();
+      if (canonicalReader && canonicalSender) {
+        targetChatIds.add(buildCanonicalChatId(canonicalReader, canonicalSender));
       }
-      io.to(chatId).emit('message_read', { chatId, messageIds, recipientId });
+
+      let messagesChanged = false;
+      let chatsChanged = false;
+
+      for (const cid of targetChatIds) {
+        if (chatMessagesStore[cid]) {
+          chatMessagesStore[cid].forEach((m: any) => {
+            if (!messageIds || messageIds.includes(m.id)) {
+              if (!m.read || m.status !== 'read') {
+                m.status = 'read';
+                m.read = true;
+                messagesChanged = true;
+              }
+            }
+          });
+          if (messagesChanged) {
+            void contentRepository.upsertChatMessages(cid, chatMessagesStore[cid]);
+          }
+        }
+        if (userChatsStore[cid] && canonicalReader) {
+          const unreadMap = { ...(userChatsStore[cid].unreadCount || {}) };
+          unreadMap[canonicalReader] = 0;
+          if (readerUser?.id) unreadMap[String(readerUser.id)] = 0;
+          if (recipientId) unreadMap[String(recipientId)] = 0;
+          userChatsStore[cid] = {
+            ...userChatsStore[cid],
+            unreadCount: unreadMap,
+          };
+          chatsChanged = true;
+          void contentRepository.upsertChat(userChatsStore[cid]);
+        }
+      }
+
+      if (messagesChanged) saveMessagesToDisk();
+      if (chatsChanged) saveChatsToDisk();
+
+      for (const cid of targetChatIds) {
+        io.to(cid).emit('message_read', { chatId: cid, messageIds, recipientId });
+      }
       if (senderId) {
         io.to(`user_${senderId}`).emit('message_read', { chatId, messageIds, recipientId });
+      }
+      if (canonicalSender && canonicalSender !== senderId) {
+        io.to(`user_${canonicalSender}`).emit('message_read', { chatId, messageIds, recipientId });
       }
     };
 

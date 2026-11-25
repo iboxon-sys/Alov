@@ -11,17 +11,19 @@ export function generateUniqueMessageId(prefix = 'msg'): string {
 }
 
 const STATUS_RANK: Record<string, number> = {
-  sending: 0,
-  sent: 1,
-  read: 2,
+  failed: 0,
+  sending: 1,
+  sent: 2,
+  read: 3,
 };
 
-function pickHigherStatus(a?: string, b?: string): 'sending' | 'sent' | 'read' {
+function pickHigherStatus(a?: string, b?: string): 'failed' | 'sending' | 'sent' | 'read' {
   const rankA = STATUS_RANK[String(a || '')] ?? -1;
   const rankB = STATUS_RANK[String(b || '')] ?? -1;
-  if (rankB > rankA && (b === 'sending' || b === 'sent' || b === 'read')) return b;
-  if (a === 'sending' || a === 'sent' || a === 'read') return a;
-  if (b === 'sending' || b === 'sent' || b === 'read') return b;
+  if (b === 'failed' && a !== 'sent' && a !== 'read') return 'failed';
+  if (rankB > rankA && (b === 'failed' || b === 'sending' || b === 'sent' || b === 'read')) return b;
+  if (a === 'failed' || a === 'sending' || a === 'sent' || a === 'read') return a;
+  if (b === 'failed' || b === 'sending' || b === 'sent' || b === 'read') return b;
   return 'sent';
 }
 

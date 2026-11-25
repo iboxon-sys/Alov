@@ -185,4 +185,59 @@ describe('Firestore persistent sync & non-destructive merge helpers', () => {
     assert.equal(res3.preserve, false);
     assert.equal(res3.reason, 'deleted_or_banned');
   });
+
+  it('allows admin actor patches for gender, age, birthDate, isVerified and preserves all edited profile fields', () => {
+    const existing = {
+      uid: 'u_member',
+      name: 'Ali',
+      gender: 'male',
+      birthDate: '2000-01-01',
+      age: 26,
+      isProfileCompleted: true,
+    };
+
+    const adminPatch = buildFirestoreProfilePatch(
+      existing,
+      {
+        name: 'Aliyax',
+        gender: 'female',
+        birthDate: '1999-03-15',
+        age: 27,
+        isVerified: true,
+        bio: 'Salom',
+        banner: '/api/media/banner_1.jpg',
+        videoUrl: 'https://cdn.example.com/intro.mp4',
+        startGifUrl: 'https://static.klipy.com/wave.gif',
+        region: 'Samarqand viloyati',
+        district: 'Urgut tumani',
+        neighborhood: 'Bogishamol',
+        telegram: 'https://t.me/aliyax',
+        instagram: 'aliyax_uz',
+        phone: '+998 90 555 44 33',
+        email: 'aliyax@example.com',
+        bankCard: '8600 1111 2222 3333',
+        location: { lat: 39.65, lng: 66.96 },
+        locationVisibility: 'mutual',
+        faceId: { verified: true, capturedPhotoUrl: '/api/media/face.jpg' },
+      },
+      { isAdminActor: true }
+    );
+
+    assert.equal(adminPatch.userPatch.gender, 'female');
+    assert.equal(adminPatch.publicPatch.gender, 'female');
+    assert.equal(adminPatch.userPatch.age, 27);
+    assert.equal(adminPatch.publicPatch.age, 27);
+    assert.equal(adminPatch.userPatch.birthDate, '1999-03-15');
+    assert.equal(adminPatch.userPatch.isVerified, true);
+    assert.equal(adminPatch.publicPatch.isVerified, true);
+    assert.equal(adminPatch.userPatch.bio, 'Salom');
+    assert.equal(adminPatch.userPatch.banner, '/api/media/banner_1.jpg');
+    assert.equal(adminPatch.userPatch.videoUrl, 'https://cdn.example.com/intro.mp4');
+    assert.equal(adminPatch.settingsPatch.startGifUrl, 'https://static.klipy.com/wave.gif');
+    assert.deepEqual(adminPatch.userPatch.location, { lat: 39.65, lng: 66.96 });
+    assert.equal(adminPatch.privatePatch.phone, '+998 90 555 44 33');
+    assert.equal(adminPatch.privatePatch.email, 'aliyax@example.com');
+    assert.equal(adminPatch.privatePatch.bankCard, '8600 1111 2222 3333');
+  });
 });
+

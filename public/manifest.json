@@ -1,32 +1,82 @@
 {
   "id": "/",
-  "name": "Alov.uz - Zamonaviy Tanishuv va Video Qo'ng'iroq",
+  "name": "Alov.uz - Zamonaviy Tanishuv va Jonli Muloqot",
   "short_name": "Alov.uz",
-  "description": "O'zbekistondagi eng zamonaviy tanishuv, obuna, jonli ovozli xonalar va video/audio qo'ng'iroqlar platformasi.",
+  "description": "O'zbekistondagi eng zamonaviy tanishuv, jonli ovozli xonalar, chat va video qo'ng'iroqlar platformasi.",
   "start_url": "/",
   "scope": "/",
   "display": "standalone",
   "orientation": "portrait",
-  "background_color": "#0F172A",
-  "theme_color": "#E8474A",
+  "lang": "uz",
+  "dir": "ltr",
+  "background_color": "#09090D",
+  "theme_color": "#09090D",
+  "categories": ["social", "lifestyle"],
+  "shortcuts": [
+    {
+      "name": "Yaqindagilar",
+      "short_name": "Yaqinlar",
+      "description": "Atrofdagi foydalanuvchilar va xaritalarni ko'rish",
+      "url": "/?tab=discover",
+      "icons": [
+        {
+          "src": "/assets/images/icon-192.png",
+          "sizes": "192x192",
+          "type": "image/png"
+        }
+      ]
+    },
+    {
+      "name": "Suhbatlar",
+      "short_name": "Chatlar",
+      "description": "Shaxsiy xabarlar va chatlarni ochish",
+      "url": "/?tab=chats",
+      "icons": [
+        {
+          "src": "/assets/images/icon-192.png",
+          "sizes": "192x192",
+          "type": "image/png"
+        }
+      ]
+    },
+    {
+      "name": "Postlar",
+      "short_name": "Postlar",
+      "description": "Yangi postlar va tasmaga o'tish",
+      "url": "/?tab=posts",
+      "icons": [
+        {
+          "src": "/assets/images/icon-192.png",
+          "sizes": "192x192",
+          "type": "image/png"
+        }
+      ]
+    }
+  ],
   "icons": [
     {
-      "src": "/assets/images/alov_app_logo_1793451330582.webp",
+      "src": "/assets/images/icon-192.png",
       "sizes": "192x192",
-      "type": "image/webp",
+      "type": "image/png",
       "purpose": "any"
     },
     {
-      "src": "/assets/images/alov_app_logo_1793451330582.webp",
+      "src": "/assets/images/icon-512.png",
       "sizes": "512x512",
-      "type": "image/webp",
+      "type": "image/png",
       "purpose": "any"
     },
     {
-      "src": "/assets/images/alov_app_logo_1793451330582.webp",
+      "src": "/assets/images/icon-maskable-512.png",
       "sizes": "512x512",
-      "type": "image/webp",
+      "type": "image/png",
       "purpose": "maskable"
+    },
+    {
+      "src": "/assets/images/alov_app_logo_1793451330582.webp",
+      "sizes": "256x256",
+      "type": "image/webp",
+      "purpose": "any"
     }
   ]
 }

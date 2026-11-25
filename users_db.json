@@ -62,7 +62,7 @@
       "exchangeRateUzs": 100,
       "unlockWindowHours": 12,
       "nextUnlockAt": null,
-      "updatedAt": "2026-11-23T00:34:38.499Z"
+      "updatedAt": "2026-11-25T16:15:25.272Z"
     },
     "telegramUsername": "@Salikh_07",
     "first_name": "Salikh",
@@ -136,7 +136,7 @@
       "exchangeRateUzs": 100,
       "unlockWindowHours": 12,
       "nextUnlockAt": null,
-      "updatedAt": "2026-11-23T00:34:38.499Z"
+      "updatedAt": "2026-11-25T16:15:25.273Z"
     },
     "lastSeen": "2026-11-18T09:30:09.267Z",
     "createdAt": "2026-11-18T09:20:28.501Z"
@@ -206,7 +206,7 @@
       "exchangeRateUzs": 100,
       "unlockWindowHours": 12,
       "nextUnlockAt": null,
-      "updatedAt": "2026-11-23T00:34:38.499Z"
+      "updatedAt": "2026-11-25T16:15:25.273Z"
     },
     "createdAt": "2026-11-18T09:20:28.494Z"
   },
@@ -272,8 +272,76 @@
       "exchangeRateUzs": 100,
       "unlockWindowHours": 12,
       "nextUnlockAt": null,
-      "updatedAt": "2026-11-23T00:34:38.499Z"
+      "updatedAt": "2026-11-25T16:15:25.273Z"
     },
     "lastSeen": "2026-11-23T00:34:40.012Z"
+  },
+  {
+    "isVerified": true,
+    "bankCard": "",
+    "followersCount": 0,
+    "followingCount": 0,
+    "likesCount": 0,
+    "followers": [],
+    "following": [],
+    "diamondProgress": 0,
+    "pendingDiamondBatches": [],
+    "createdAt": "2026-11-25T16:09:42.443Z",
+    "uid": "pw_verify_user",
+    "id": "ALOV-PW1",
+    "name": "Test Foydalanuvchi",
+    "username": "pw_verify_user",
+    "age": 24,
+    "birthDate": "2002-05-15",
+    "gender": "male",
+    "region": "Toshkent shahri",
+    "district": "Yunusobod tumani",
+    "bio": "Test profili",
+    "avatar": "/assets/images/alov_app_logo_1793451330582.webp",
+    "coins": 500,
+    "diamonds": 0,
+    "isProfileCompleted": true,
+    "hasEditedProfile": true,
+    "faceId": {
+      "verified": true,
+      "detectedGender": "male",
+      "confidence": 96,
+      "genderLabelUz": "Yigit (Erkak)"
+    },
+    "role": "user",
+    "isAdmin": false,
+    "phone": "",
+    "telegram": "",
+    "firstName": "Test Foydalanuvchi",
+    "first_name": "Test Foydalanuvchi",
+    "lastName": "",
+    "last_name": "",
+    "hasCustomAvatar": false,
+    "photoURL": "/assets/images/alov_app_logo_1793451330582.webp",
+    "banner": "",
+    "videoUrl": "",
+    "startGifUrl": "",
+    "locationVisibility": "everyone",
+    "isLocationEnabled": true,
+    "isOnline": false,
+    "status": "offline",
+    "updatedAt": "2026-11-25T16:15:00.270Z",
+    "wallet": {
+      "uid": "pw_verify_user",
+      "balanceDiamonds": 0,
+      "pendingDiamonds": 0,
+      "diamondProgress": 0,
+      "dailyLimitTarget": 120,
+      "dailyLimitResetAt": null,
+      "balanceUzs": 0,
+      "pendingUzs": 0,
+      "totalEarnedDiamonds": 0,
+      "totalWithdrawnUzs": 0,
+      "exchangeRateUzs": 100,
+      "unlockWindowHours": 12,
+      "nextUnlockAt": null,
+      "updatedAt": "2026-11-25T16:15:25.273Z"
+    },
+    "lastSeen": "2026-11-25T16:15:30.751Z"
   }
 ]

@@ -469,5 +469,103 @@
       "createdAt": "2026-11-18T09:20:30.901Z",
       "time": "09:20 AM"
     }
+  ],
+  "alov_ai_bot_pw_verify_user": [
+    {
+      "id": "msg_1795623040500_1_21844980",
+      "senderId": "pw_verify_user",
+      "senderName": "Test Foydalanuvchi",
+      "text": "Salom Render Xotira 1795623040421",
+      "type": "text",
+      "fileUrl": null,
+      "status": "read",
+      "read": true,
+      "createdAt": "2026-11-25T16:10:40.500Z",
+      "time": "04:10 PM",
+      "senderAvatar": "/assets/images/alov_app_logo_1793451330582.webp",
+      "sender": {
+        "_id": "pw_verify_user",
+        "uid": "pw_verify_user",
+        "name": "Test Foydalanuvchi",
+        "avatar": "/assets/images/alov_app_logo_1793451330582.webp"
+      }
+    },
+    {
+      "id": "ai_err_17956230409751bp",
+      "senderId": "alov_ai_bot",
+      "senderName": "Alov AI",
+      "senderAvatar": "/assets/aistudio/image_e20a1307.webp",
+      "text": "Kechirasiz, hozir javob yuborishda qisqa uzilish bo'ldi. Bir ozdan keyin yana yozib ko'ring 😊",
+      "type": "text",
+      "isError": true,
+      "status": "read",
+      "read": true,
+      "createdAt": "2026-11-25T16:10:40.975Z",
+      "time": "04:10 PM"
+    },
+    {
+      "id": "msg_1795623184730_1_559bb159",
+      "senderId": "pw_verify_user",
+      "senderName": "Test Foydalanuvchi",
+      "text": "Offline Xato Test 1795623184633",
+      "type": "text",
+      "fileUrl": null,
+      "status": "read",
+      "read": true,
+      "createdAt": "2026-11-25T16:13:04.730Z",
+      "time": "04:13 PM",
+      "senderAvatar": "/assets/images/alov_app_logo_1793451330582.webp",
+      "sender": {
+        "_id": "pw_verify_user",
+        "uid": "pw_verify_user",
+        "name": "Test Foydalanuvchi",
+        "avatar": "/assets/images/alov_app_logo_1793451330582.webp"
+      }
+    },
+    {
+      "id": "ai_err_1795623192321ak6",
+      "senderId": "alov_ai_bot",
+      "senderName": "Alov AI",
+      "senderAvatar": "/assets/aistudio/image_e20a1307.webp",
+      "text": "Kechirasiz, hozir javob yuborishda qisqa uzilish bo'ldi. Bir ozdan keyin yana yozib ko'ring 😊",
+      "type": "text",
+      "isError": true,
+      "status": "read",
+      "read": true,
+      "createdAt": "2026-11-25T16:13:12.321Z",
+      "time": "04:13 PM"
+    },
+    {
+      "id": "msg_1795623309895_1_0a15ff8c",
+      "senderId": "pw_verify_user",
+      "senderName": "Test Foydalanuvchi",
+      "text": "Offline FastFail 1795623309778",
+      "type": "text",
+      "fileUrl": null,
+      "status": "sent",
+      "read": false,
+      "createdAt": "2026-11-25T16:15:09.895Z",
+      "time": "04:15 PM",
+      "senderAvatar": "/assets/images/alov_app_logo_1793451330582.webp",
+      "sender": {
+        "_id": "pw_verify_user",
+        "uid": "pw_verify_user",
+        "name": "Test Foydalanuvchi",
+        "avatar": "/assets/images/alov_app_logo_1793451330582.webp"
+      }
+    },
+    {
+      "id": "ai_err_17956233202539n4",
+      "senderId": "alov_ai_bot",
+      "senderName": "Alov AI",
+      "senderAvatar": "/assets/aistudio/image_e20a1307.webp",
+      "text": "Kechirasiz, hozir javob yuborishda qisqa uzilish bo'ldi. Bir ozdan keyin yana yozib ko'ring 😊",
+      "type": "text",
+      "isError": true,
+      "status": "read",
+      "read": true,
+      "createdAt": "2026-11-25T16:15:20.253Z",
+      "time": "04:15 PM"
+    }
   ]
 }

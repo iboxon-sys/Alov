@@ -21,6 +21,7 @@ import {
 } from 'lucide-react';
 import { GenderStatsBar } from './components/GenderStatsBar';
 import { SpringPetalsBackground } from './components/SpringPetalsBackground';
+import { PWAInstallButton } from './components/PWAInstallButton';
 import { buildAutoplayYouTubeEmbedUrl } from './utils/mediaLinks';
 
 const LANDING_PROMO_VIDEO_URL = 'https://youtu.be/KE1-tslT2DM?si=b_eI_Ppp__ojU9uo';
@@ -219,6 +220,8 @@ export const LandingPage: React.FC<LandingPageProps> = ({ onLogin }) => {
                 </svg>
                 <span>Telegram Bot (@alovuz_bot)</span>
               </a>
+
+              <PWAInstallButton variant="compact" />
             </div>
 
             <div className="pt-5 flex flex-wrap items-center gap-x-4 gap-y-2 text-xs text-zinc-400 font-medium border-t border-white/10">

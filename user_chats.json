@@ -88,5 +88,30 @@
       "status": "online",
       "isAI": true
     }
+  },
+  "alov_ai_bot_pw_verify_user": {
+    "id": "alov_ai_bot_pw_verify_user",
+    "participants": [
+      "pw_verify_user",
+      "alov_ai_bot"
+    ],
+    "lastMessage": "Offline FastFail 1795623309778",
+    "unreadCount": {
+      "pw_verify_user": 0,
+      "ALOV-PW1": 0,
+      "alov_ai_bot": 3
+    },
+    "createdAt": "2026-11-25T16:10:39.552Z",
+    "updatedAt": "2026-11-25T16:15:19.857Z",
+    "partner": {
+      "uid": "alov_ai_bot",
+      "id": "ALOV-AI",
+      "name": "Alov AI",
+      "avatar": "/assets/aistudio/image_e20a1307.webp",
+      "bio": "Samimiy do'st va hayotiy suhbatdosh.",
+      "status": "online",
+      "isAI": true
+    },
+    "lastSenderId": "pw_verify_user"
   }
 }

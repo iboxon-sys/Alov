@@ -18,6 +18,8 @@ import { twMerge } from 'tailwind-merge';
 import { LandingPage } from './LandingPage';
 import type { FaceIdVerificationResult } from './components/FaceIdVerificationModal';
 import { SmartPhoneInput } from './components/SmartPhoneInput';
+import { PWAInstallButton, OfflineIndicator } from './components/PWAInstallButton';
+import { getCachesToDeleteOnActivate } from './utils/pwaHelpers';
 import { callNotification } from './services/callNotification';
 import { CandidateSkeleton } from './components/Skeleton';
 import { 
@@ -101,6 +103,7 @@ import {
   shouldPreserveLocalSessionOnSyncResult,
 } from './utils/firestoreSync';
 import {
+  canAccessFirestoreAsUser,
   loadAuthoritativeUserFromFirestore,
   saveOrBackfillUserInFirestore,
   syncAuthoritativeWalletToFirestore,
@@ -980,7 +983,7 @@ export default function App() {
         if (versionState.versionChanged && typeof window !== 'undefined') {
           if ('caches' in window && window.caches) {
             window.caches.keys()
-              .then((keys) => Promise.all(keys.map((key) => window.caches.delete(key))))
+              .then((keys) => Promise.all(getCachesToDeleteOnActivate(keys).map((key) => window.caches.delete(key))))
               .catch(() => {});
           }
           if ('serviceWorker' in navigator && navigator.serviceWorker) {
@@ -1729,6 +1732,11 @@ export default function App() {
           }
         })
       }).catch(() => {});
+      void updateExistingUserInFirestore(
+        activeUid,
+        { location: coords, isLocationEnabled: true, isOnline: true },
+        currentUserRef.current
+      ).catch(() => {});
     };
 
     const tgLocMgr = (window as any).Telegram?.WebApp?.LocationManager;
@@ -2389,6 +2397,11 @@ export default function App() {
           locationVisibility: updates.locationVisibility || regLocationVisibility
         });
       }
+      void updateExistingUserInFirestore(
+        activeUid,
+        updates,
+        currentUserRef.current
+      ).catch(() => {});
       try {
         await fetch(getApiUrl('/api/users/update'), {
           method: 'POST',
@@ -2586,7 +2599,23 @@ export default function App() {
       const formattedPhone = trimmedPhone && trimmedPhone !== '+' && trimmedPhone !== '+998' ? formatPhoneNumberPretty(trimmedPhone) : '';
       const trimmedTelegram = regTelegram.trim();
       const normalizedTelegram = trimmedTelegram ? (normalizeTelegramUrl(trimmedTelegram) || trimmedTelegram) : '';
-      const resolvedBannerValue = showProfileModal ? regBanner : (regBanner || currentUser?.banner || '');
+      let resolvedBannerValue = showProfileModal ? regBanner : (regBanner || currentUser?.banner || '');
+      if (resolvedBannerValue && resolvedBannerValue.startsWith('data:image/')) {
+        try {
+          const bannerUploadRes = await safeFetchJson(getApiUrl('/api/media/upload'), {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              dataUrl: resolvedBannerValue,
+              fileName: `banner_${activeUid}_${Date.now()}.jpg`,
+              mimeType: 'image/jpeg',
+            }),
+          });
+          if (bannerUploadRes?.success && bannerUploadRes.url) {
+            resolvedBannerValue = bannerUploadRes.url;
+          }
+        } catch {}
+      }
       const resolvedVideoValue = showProfileModal ? regVideoUrl.trim() : (regVideoUrl.trim() || currentUser?.videoUrl || '');
       const resolvedStartGifValue = showProfileModal ? regStartGifUrl.trim() : (regStartGifUrl.trim() || currentUser?.startGifUrl || '');
 
@@ -2682,9 +2711,22 @@ export default function App() {
       }
 
       // Persist to Firestore (non-destructive merge/update only for changed profile fields)
-      void updateExistingUserInFirestore(activeUid, profileEditPayload, currentUser).catch(() => {});
       if (!currentUser?.isProfileCompleted) {
-        void saveOrBackfillUserInFirestore(savedUser);
+        await saveOrBackfillUserInFirestore(savedUser, { isAdminActor: isCurrentUserAdmin }).catch(() => {});
+      } else {
+        await updateExistingUserInFirestore(
+          activeUid,
+          {
+            ...profileEditPayload,
+            avatar: savedUser.avatar,
+            banner: savedUser.banner,
+            videoUrl: savedUser.videoUrl,
+            startGifUrl: savedUser.startGifUrl,
+            ...(savedUser.faceId ? { faceId: savedUser.faceId } : {}),
+          },
+          currentUser,
+          { isAdminActor: isCurrentUserAdmin }
+        ).catch(() => {});
       }
 
       isProfileHydratedRef.current = true;
@@ -2838,15 +2880,14 @@ export default function App() {
         const applied = applyAuthoritativeUserSession(userData, serverLoginRes.token);
         const targetEmail = String(userData.email || (authEmail.includes('@') && !authEmail.startsWith('@') ? authEmail.trim() : '')).trim();
         if (!auth.currentUser && targetEmail) {
-          void signInWithEmailAndPassword(auth, targetEmail, authPassword.trim())
-            .then((cred) => {
-              if (cred?.user && applied) {
-                void saveOrBackfillUserInFirestore({ ...applied, uid: cred.user.uid });
-              }
-            })
-            .catch(() => {});
+          try {
+            const cred = await signInWithEmailAndPassword(auth, targetEmail, authPassword.trim());
+            if (cred?.user && applied) {
+              await saveOrBackfillUserInFirestore({ ...applied, uid: cred.user.uid }).catch(() => {});
+            }
+          } catch {}
         } else if (applied) {
-          void saveOrBackfillUserInFirestore(applied);
+          await saveOrBackfillUserInFirestore(applied).catch(() => {});
         }
         setShowAuthModal(false);
         setActiveTab('discover');
@@ -3817,15 +3858,22 @@ export default function App() {
     return true;
   });
 
-  // Dashboard content inside Obsidian Midnight shell
   const dashboardContent = (
-    <div className="h-full bg-[#09090D] text-[#F4F4F6] font-sans flex flex-col w-full relative overflow-hidden">
+    <div
+      data-viewport-scroll-lock="true"
+      className="h-full bg-[#09090D] text-[#F4F4F6] font-sans flex flex-col w-full relative overflow-clip"
+    >
       {/* Subtle Ambient Rose Glow */}
       <div className="pointer-events-none absolute -top-24 left-1/2 -translate-x-1/2 w-[540px] h-[180px] rounded-full bg-rose-600/10 blur-[90px]" />
 
-      {/* Top Header (hidden during full-screen Efirlar, Chatruletka & mobile Chat conversation) */}
-      {shouldShowOuterAppHeader({ isMobileViewport, activeTab, chatView }) && (
-      <header className="shrink-0 bg-[#0D0F17]/92 backdrop-blur-xl border-b border-white/[0.08] px-3 sm:px-5 pt-[var(--alov-safe-top,env(safe-area-inset-top,0px))] min-h-14 flex items-center justify-between gap-2 z-40 overflow-hidden">
+      {/* Top Header (hidden during full-screen Efirlar, Chatruletka, mobile Chat conversation, or mobile chat search keyboard) */}
+      {shouldShowOuterAppHeader({
+        isMobileViewport,
+        activeTab,
+        chatView,
+        isKeyboardOpen: appViewportMetrics.isKeyboardOpen,
+      }) && (
+      <header className="shrink-0 bg-[#0D0F17]/92 backdrop-blur-xl border-b border-white/[0.08] px-3 sm:px-5 pt-[max(0.5rem,var(--alov-safe-top,env(safe-area-inset-top,0px)))] pb-2 min-h-[calc(3.5rem+var(--alov-safe-top,env(safe-area-inset-top,0px)))] flex items-center justify-between gap-2 z-40 overflow-clip">
         <div
           className="flex items-center gap-2 sm:gap-2.5 min-w-0 shrink-0 cursor-pointer group"
           onClick={() => setActiveTab('discover')}
@@ -4711,14 +4759,17 @@ export default function App() {
                           </div>
                         </div>
 
-                        <button
-                          type="button"
-                          onClick={openEditProfileModal}
-                          className="w-full py-2.5 px-4 rounded-xl bg-white/[0.06] hover:bg-white/[0.11] text-white border border-white/[0.1] font-bold text-xs flex items-center justify-center gap-2 transition active:scale-[0.98] cursor-pointer"
-                        >
-                          <Edit3 className="w-3.5 h-3.5 text-rose-400" />
-                          <span>Anketa ma'lumotlarini tahrirlash</span>
-                        </button>
+                        <div className="space-y-2">
+                          <button
+                            type="button"
+                            onClick={openEditProfileModal}
+                            className="w-full py-2.5 px-4 rounded-xl bg-white/[0.06] hover:bg-white/[0.11] text-white border border-white/[0.1] font-bold text-xs flex items-center justify-center gap-2 transition active:scale-[0.98] cursor-pointer"
+                          >
+                            <Edit3 className="w-3.5 h-3.5 text-rose-400" />
+                            <span>Anketa ma'lumotlarini tahrirlash</span>
+                          </button>
+                          <PWAInstallButton variant="card" />
+                        </div>
                       </div>
                     </div>
 
@@ -4764,7 +4815,11 @@ export default function App() {
 
         {/* --- CHATS INLINE VIEW (when inside iframe or microfrontend=0) --- */}
         {activeTab === 'chats' && (
-          <div className="flex-1 min-h-0 w-full flex flex-col overflow-hidden" data-testid="inline-chats-container">
+          <div
+            data-viewport-scroll-lock="true"
+            className="flex-1 min-h-0 w-full flex flex-col overflow-clip"
+            data-testid="inline-chats-container"
+          >
             <Suspense fallback={<div className="flex-1 flex items-center justify-center text-xs text-zinc-400">Chat yuklanmoqda...</div>}>
               <ChatView
                 currentUser={currentUser}
@@ -5346,9 +5401,10 @@ export default function App() {
       {embedRouteInfo.isEmbedRoute && embedRouteInfo.section ? (
         <div
           data-testid={`embed-section-root-${embedRouteInfo.section}`}
+          data-viewport-scroll-lock="true"
           style={{
             height: `${appViewportMetrics.heightPx}px`,
-            ...(appViewportMetrics.offsetTopPx > 0
+            ...(embedRouteInfo.section === 'chat' || appViewportMetrics.offsetTopPx > 0
               ? {
                   position: 'fixed',
                   top: `${appViewportMetrics.offsetTopPx}px`,
@@ -5357,7 +5413,7 @@ export default function App() {
                 }
               : {}),
           }}
-          className="h-app-viewport w-full bg-[#09090D] flex flex-col overflow-hidden"
+          className="h-app-viewport w-full bg-[#09090D] flex flex-col overflow-clip"
         >
           {embedRouteInfo.section === 'postlar' && (
             <div className="flex-1 overflow-y-auto p-3 sm:p-5 space-y-4">
@@ -5503,6 +5559,7 @@ export default function App() {
         <LandingPage onLogin={() => openAuthModalClean('login')} />
       ) : (
         <div
+          data-viewport-scroll-lock="true"
           style={
             isMobileViewport
               ? {
@@ -5511,7 +5568,7 @@ export default function App() {
                 }
               : undefined
           }
-          className="fixed inset-x-0 md:static md:min-h-screen bg-[#09090D] flex flex-col items-center justify-center p-0 md:p-4 overflow-hidden"
+          className="fixed inset-x-0 md:static md:min-h-screen bg-[#09090D] flex flex-col items-center justify-start md:justify-center p-0 md:p-4 overflow-clip"
         >
           <div className="pointer-events-none fixed inset-0 bg-[radial-gradient(ellipse_at_top,rgba(225,29,72,0.12),transparent_55%)]" />
           {showUpdateBanner && (
@@ -7575,7 +7632,23 @@ export default function App() {
                 userUid={currentUser.uid}
                 userName={getSafeUserDisplayName(currentUser, currentUser.name || 'Foydalanuvchi')}
                 onVerified={async (result) => {
-                  const facePhoto = result.photoUrl || result.photoDataUrl;
+                  let facePhoto = result.photoUrl || result.photoDataUrl;
+                  if (facePhoto && facePhoto.startsWith('data:image/')) {
+                    try {
+                      const upRes = await safeFetchJson(getApiUrl('/api/media/upload'), {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                          dataUrl: facePhoto,
+                          fileName: `face_${currentUser.uid}_${Date.now()}.jpg`,
+                          mimeType: 'image/jpeg',
+                        }),
+                      });
+                      if (upRes?.success && upRes.url) {
+                        facePhoto = upRes.url;
+                      }
+                    } catch {}
+                  }
                   const preservedGender =
                     currentUser.gender === 'male' || currentUser.gender === 'female'
                       ? currentUser.gender
@@ -7586,6 +7659,7 @@ export default function App() {
                     gender: preservedGender,
                     faceId: {
                       ...result.faceId,
+                      ...(facePhoto && !facePhoto.startsWith('data:') ? { capturedPhotoUrl: facePhoto } : {}),
                       detectedGender: preservedGender || result.faceId?.detectedGender || null,
                       genderLabelUz: preservedGender ? genderToUzLabel(preservedGender) : result.faceId?.genderLabelUz,
                     },
@@ -7598,11 +7672,16 @@ export default function App() {
                   });
                   const finalUser = applyAuthoritativeUserSession(syncData?.user || updatedUser, syncData?.token);
                   if (finalUser) {
-                    void updateExistingUserInFirestore(
+                    await updateExistingUserInFirestore(
                       currentUser.uid,
-                      { avatar: finalUser.avatar, faceId: finalUser.faceId, isVerified: true },
+                      {
+                        avatar: finalUser.avatar,
+                        gender: finalUser.gender,
+                        faceId: finalUser.faceId,
+                        isVerified: true,
+                      },
                       currentUser
-                    );
+                    ).catch(() => {});
                   }
                   setShowProfileFaceIdModal(false);
                   showToast("Face ID surati profilingizga qo'yildi");
@@ -8091,8 +8170,14 @@ export default function App() {
               if (updatedUser.uid === currentUser?.uid) {
                 const clean = applyAuthoritativeUserSession(updatedUser);
                 if (clean) {
-                  void saveOrBackfillUserInFirestore(clean);
+                  void saveOrBackfillUserInFirestore(clean, { isAdminActor: true }).catch(() => {});
+                  void syncAuthoritativeWalletToFirestore(clean.uid, clean).catch(() => {});
                 }
+              } else if (canAccessFirestoreAsUser(updatedUser.uid, true)) {
+                void updateExistingUserInFirestore(updatedUser.uid, updatedUser, null, {
+                  isAdminActor: true,
+                }).catch(() => {});
+                void syncAuthoritativeWalletToFirestore(updatedUser.uid, updatedUser).catch(() => {});
               }
             }}
           />
@@ -8151,6 +8236,8 @@ export default function App() {
           <span>{toastMsg}</span>
         </motion.div>
       )}
+
+      <OfflineIndicator />
 
     </div>
     </MotionConfig>

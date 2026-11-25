@@ -263,7 +263,7 @@ describe('Profile persistence, identity deduplication & DB propagation', () => {
     assert.equal('staleExtra' in mergedAuth, false);
   });
 
-  it('clears ONLY stale profile caches on app version bump while strictly preserving chats, messages, posts, and login identity', () => {
+  it('clears stale profile and legacy local chat caches on app version bump while strictly preserving posts and login identity', () => {
     const storage = createMemoryStorage({
       alov_app_version: '1.1.1',
       alov_user_id: 'tg_777',
@@ -288,9 +288,10 @@ describe('Profile persistence, identity deduplication & DB propagation', () => {
     assert.equal(storage.getItem('alov_current_user'), null);
     assert.equal(storage.getItem('alov_user_tg_777'), null);
     assert.equal(storage.getItem('alov_user_old_alias'), null);
-    // Chats, messages, posts, and auth identity MUST NEVER be wiped on version update
-    assert.equal(storage.getItem('alov_chats_tg_777'), '[{"id":"c1"}]');
-    assert.equal(storage.getItem('alov_msgs_tg_777_u2'), '[{"id":"m1","text":"Salom"}]');
+    // Legacy local chat caches MUST be wiped because chats persist strictly on Render server
+    assert.equal(storage.getItem('alov_chats_tg_777'), null);
+    assert.equal(storage.getItem('alov_msgs_tg_777_u2'), null);
+    // Posts and auth identity MUST NEVER be wiped on version update
     assert.equal(storage.getItem('alov_posts_feed'), '[{"id":"p1"}]');
     assert.equal(storage.getItem('alov_user_id'), 'tg_777');
     assert.equal(storage.getItem('alov_auth_token'), 'alov_session_tg_777');

@@ -142,7 +142,14 @@ export interface SplitFirestoreDocuments {
 
 function sanitizeSafeUrl(raw: unknown): string {
   const s = typeof raw === 'string' ? raw.trim() : '';
-  if (!s || s.startsWith('data:')) return '';
+  if (!s || s.startsWith('data:') || s.startsWith('blob:')) return '';
+  if (
+    !s.startsWith('https://') &&
+    !/^http:\/\/localhost(:[0-9]+)?\//.test(s) &&
+    !/^\/[a-zA-Z0-9_\-./]+$/.test(s)
+  ) {
+    return '';
+  }
   return s.length > FIRESTORE_LIMITS.URL_MAX ? s.slice(0, FIRESTORE_LIMITS.URL_MAX) : s;
 }
 
@@ -461,12 +468,25 @@ export function buildFirestoreProfilePatch(
     }
   }
 
+  if (typeof changes.isVerified === 'boolean' && (options.isAdminActor || changes.isVerified === true)) {
+    userPatch.isVerified = changes.isVerified;
+    publicPatch.isVerified = changes.isVerified;
+  }
+
+  if (typeof changes.isOnline === 'boolean') {
+    userPatch.isOnline = changes.isOnline;
+    userPatch.status = changes.isOnline ? 'online' : 'offline';
+    publicPatch.isOnline = changes.isOnline;
+    publicPatch.status = userPatch.status;
+  }
+
   if (changes.faceId && typeof changes.faceId === 'object') {
     const sanitizedFace = sanitizeFaceId(changes.faceId);
     if (sanitizedFace) {
       userPatch.faceId = sanitizedFace;
       if (sanitizedFace.verified) {
         userPatch.isVerified = true;
+        publicPatch.isVerified = true;
       }
     }
   }

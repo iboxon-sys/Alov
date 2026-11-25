@@ -70,9 +70,21 @@ async function getDocPreferServer(path: string, segments: [string, ...string[]])
   }
 }
 
-export function canAccessFirestoreAsUser(uid?: string | null): boolean {
+const BOOTSTRAPPED_ADMIN_EMAIL = 'zuhriddinoblaqul@gmail.com';
+
+export function isBootstrappedAdminSession(): boolean {
+  const email = String(auth.currentUser?.email || '').trim().toLowerCase();
+  return Boolean(
+    auth.currentUser &&
+      auth.currentUser.emailVerified === true &&
+      email === BOOTSTRAPPED_ADMIN_EMAIL
+  );
+}
+
+export function canAccessFirestoreAsUser(uid?: string | null, allowAdmin: boolean = false): boolean {
   if (!uid || !auth.currentUser) return false;
-  return auth.currentUser.uid === uid;
+  if (auth.currentUser.uid === uid) return true;
+  return allowAdmin && isBootstrappedAdminSession();
 }
 
 /**
@@ -119,9 +131,13 @@ export async function loadAuthoritativeUserFromFirestore(uid: string): Promise<R
  * If the document already exists in Firestore, merges only non-destructive changed fields and NEVER
  * resets coins, diamonds, createdAt, or edited profile data.
  */
-export async function saveOrBackfillUserInFirestore(user: Record<string, any>): Promise<void> {
+export async function saveOrBackfillUserInFirestore(
+  user: Record<string, any>,
+  options: { isAdminActor?: boolean } = {}
+): Promise<void> {
   const uid = String(user?.uid || '').trim();
-  if (!canAccessFirestoreAsUser(uid)) return;
+  const isAdminActor = Boolean(options.isAdminActor) || isBootstrappedAdminSession();
+  if (!canAccessFirestoreAsUser(uid, isAdminActor)) return;
 
   const userPath = `users/${uid}`;
   const userRef = doc(db, 'users', uid);
@@ -139,7 +155,12 @@ export async function saveOrBackfillUserInFirestore(user: Record<string, any>): 
   if (existingSnap && existingSnap.exists()) {
     // Document already exists — do NOT overwrite initial fields, coins, or createdAt!
     const existingData = existingSnap.data() || {};
-    await updateExistingUserInFirestore(uid, user, existingData);
+    await updateExistingUserInFirestore(uid, user, existingData, { isAdminActor });
+    return;
+  }
+
+  // Firestore rules allow document creation only for the document owner (isOwner(userId))
+  if (auth.currentUser?.uid !== uid) {
     return;
   }
 
@@ -222,16 +243,23 @@ export async function saveOrBackfillUserInFirestore(user: Record<string, any>): 
 export async function updateExistingUserInFirestore(
   uid: string,
   changes: Record<string, any>,
-  existingData?: Record<string, any> | null
+  existingData?: Record<string, any> | null,
+  options: { isAdminActor?: boolean } = {}
 ): Promise<void> {
-  if (!canAccessFirestoreAsUser(uid)) return;
+  const isAdminActor = Boolean(options.isAdminActor) || isBootstrappedAdminSession();
+  if (!canAccessFirestoreAsUser(uid, isAdminActor)) return;
 
   const userRef = doc(db, 'users', uid);
   let resolvedExisting = existingData;
   if (!resolvedExisting) {
     try {
       const snap = await getDoc(userRef);
-      if (!snap.exists()) return;
+      if (!snap.exists()) {
+        if (auth.currentUser?.uid === uid) {
+          await saveOrBackfillUserInFirestore({ ...changes, uid }, { isAdminActor });
+        }
+        return;
+      }
       resolvedExisting = snap.data() || {};
     } catch (err) {
       if (isPermissionDeniedError(err)) {
@@ -243,7 +271,8 @@ export async function updateExistingUserInFirestore(
 
   const { userPatch, publicPatch, privatePatch, settingsPatch } = buildFirestoreProfilePatch(
     resolvedExisting,
-    changes
+    changes,
+    { isAdminActor }
   );
 
   const splitFull = splitUserToFirestoreDocs(
@@ -258,7 +287,12 @@ export async function updateExistingUserInFirestore(
       updateDoc(userRef, {
         ...userPatch,
         updatedAt: serverTimestamp(),
-      }).catch((err) => {
+      }).catch(async (err) => {
+        const code = String((err as any)?.code || '').toLowerCase();
+        if (code.includes('not-found') && auth.currentUser?.uid === uid && splitFull) {
+          await saveOrBackfillUserInFirestore({ ...resolvedExisting, ...changes, uid }, { isAdminActor });
+          return;
+        }
         if (isPermissionDeniedError(err)) handleFirestoreError(err, OperationType.UPDATE, `users/${uid}`);
       })
     );
@@ -332,7 +366,7 @@ export async function syncAuthoritativeWalletToFirestore(
   uid: string,
   userWithWallet: Record<string, any>
 ): Promise<void> {
-  if (!canAccessFirestoreAsUser(uid) || !userWithWallet) return;
+  if (!canAccessFirestoreAsUser(uid, true) || !userWithWallet) return;
   if (typeof userWithWallet.coins !== 'number' && typeof userWithWallet.diamonds !== 'number') return;
 
   const walletRef = doc(db, 'users', uid, 'wallet', 'main');

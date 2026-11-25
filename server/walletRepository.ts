@@ -106,9 +106,10 @@ class WalletRepository {
   async recordTransaction(tx: WalletTransactionRecord): Promise<void> {
     if (!this.txsCol || !tx?.id) return;
     try {
-      await this.txsCol.updateOne(
-        { id: tx.id },
-        { $setOnInsert: tx },
+      const { _id, ...cleanTx } = tx as any;
+      await this.txsCol.replaceOne(
+        { id: cleanTx.id },
+        cleanTx,
         { upsert: true }
       );
     } catch (err) {
@@ -119,13 +120,76 @@ class WalletRepository {
   async recordWithdrawal(withdrawal: WalletWithdrawalRecord): Promise<void> {
     if (!this.withdrawalsCol || !withdrawal?.id) return;
     try {
-      await this.withdrawalsCol.updateOne(
-        { id: withdrawal.id },
-        { $set: withdrawal },
+      const { _id, ...cleanW } = withdrawal as any;
+      await this.withdrawalsCol.replaceOne(
+        { id: cleanW.id },
+        cleanW,
         { upsert: true }
       );
     } catch (err) {
       console.warn('MongoDB recordWithdrawal error:', err);
+    }
+  }
+
+  async loadAllWallets(): Promise<UserWalletSnapshot[]> {
+    if (!this.walletsCol) return [];
+    try {
+      return await this.walletsCol.find({}, { projection: { _id: 0 } }).toArray();
+    } catch (err) {
+      console.warn('MongoDB loadAllWallets error:', err);
+      return [];
+    }
+  }
+
+  async loadAllTransactions(): Promise<WalletTransactionRecord[]> {
+    if (!this.txsCol) return [];
+    try {
+      return await this.txsCol
+        .find({}, { projection: { _id: 0 } })
+        .sort({ createdAt: -1 })
+        .toArray();
+    } catch (err) {
+      console.warn('MongoDB loadAllTransactions error:', err);
+      return [];
+    }
+  }
+
+  async loadAllWithdrawals(): Promise<WalletWithdrawalRecord[]> {
+    if (!this.withdrawalsCol) return [];
+    try {
+      return await this.withdrawalsCol
+        .find({}, { projection: { _id: 0 } })
+        .sort({ createdAt: -1 })
+        .toArray();
+    } catch (err) {
+      console.warn('MongoDB loadAllWithdrawals error:', err);
+      return [];
+    }
+  }
+
+  async replaceAllTransactions(list: WalletTransactionRecord[]): Promise<void> {
+    if (!this.txsCol) return;
+    try {
+      const docs = (list || []).filter((t) => Boolean(t?.id)).map(({ _id, ...rest }: any) => rest);
+      await this.txsCol.deleteMany({});
+      if (docs.length > 0) {
+        await this.txsCol.insertMany(docs);
+      }
+    } catch (err) {
+      console.warn('MongoDB replaceAllTransactions error:', err);
+    }
+  }
+
+  async replaceAllWithdrawals(list: WalletWithdrawalRecord[]): Promise<void> {
+    if (!this.withdrawalsCol) return;
+    try {
+      const docs = (list || []).filter((w) => Boolean(w?.id)).map(({ _id, ...rest }: any) => rest);
+      await this.withdrawalsCol.deleteMany({});
+      if (docs.length > 0) {
+        await this.withdrawalsCol.insertMany(docs);
+      }
+    } catch (err) {
+      console.warn('MongoDB replaceAllWithdrawals error:', err);
     }
   }
 

@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
+import { resolvePartnerUidForChat } from './chatList.ts';
 
 export interface ViewportMetricInput {
   innerHeight: number;
@@ -85,28 +86,59 @@ export function shouldShowOuterAppHeader(params: {
   isMobileViewport: boolean;
   activeTab: string;
   chatView: 'list' | 'conversation';
+  isKeyboardOpen?: boolean;
 }): boolean {
   if (params.activeTab === 'reels' || params.activeTab === 'chatruletka') return false;
-  if (params.isMobileViewport && params.activeTab === 'chats' && params.chatView === 'conversation') {
-    return false;
+  if (params.isMobileViewport && params.activeTab === 'chats') {
+    if (params.chatView === 'conversation') return false;
+    if (params.isKeyboardOpen) return false;
   }
   return true;
+}
+
+export function shouldUseCompactKeyboardChrome(params: {
+  isCompactViewport: boolean;
+  isKeyboardOpen: boolean;
+  heightPx?: number;
+}): boolean {
+  if (!params.isCompactViewport) return false;
+  if (params.isKeyboardOpen) return true;
+  if (typeof params.heightPx === 'number' && Number.isFinite(params.heightPx) && params.heightPx > 0 && params.heightPx <= 520) {
+    return true;
+  }
+  return false;
+}
+
+export function resetViewportScrollOffsets(): void {
+  if (typeof window === 'undefined' || typeof document === 'undefined') return;
+  if (window.scrollY !== 0 || window.scrollX !== 0) {
+    window.scrollTo(0, 0);
+  }
+  if (document.documentElement && document.documentElement.scrollTop !== 0) {
+    document.documentElement.scrollTop = 0;
+  }
+  if (document.body && document.body.scrollTop !== 0) {
+    document.body.scrollTop = 0;
+  }
+  const lockedContainers = document.querySelectorAll<HTMLElement>('[data-viewport-scroll-lock="true"]');
+  lockedContainers.forEach((el) => {
+    if (el.scrollTop !== 0) el.scrollTop = 0;
+    if (el.scrollLeft !== 0) el.scrollLeft = 0;
+  });
 }
 
 export function filterChatConversations<T extends Record<string, any>>(
   chats: T[],
   rawQuery: string,
   currentUid: string | undefined,
-  usersList: any[]
+  usersList: any[],
+  myAliases: string[] = []
 ): T[] {
   const q = String(rawQuery || '').trim().toLowerCase();
   if (!q) return chats;
 
   return chats.filter((chat) => {
-    const partnerUid =
-      chat.participants?.find((p: string) => p !== currentUid) ||
-      chat.partner?.uid ||
-      chat.partner?.id;
+    const partnerUid = resolvePartnerUidForChat(chat, currentUid || '', myAliases, usersList);
     const matchedUser =
       usersList.find((u) => (u.uid && u.uid === partnerUid) || (u.id && u.id === partnerUid)) ||
       chat.partner;
@@ -149,6 +181,7 @@ export function useVisualViewportLock(options?: {
     if (!enabled || typeof window === 'undefined') return;
 
     let rafId: number | null = null;
+    const settleTimers = new Set<number>();
 
     const syncMetrics = () => {
       const vv = window.visualViewport;
@@ -177,9 +210,7 @@ export function useVisualViewportLock(options?: {
       rootStyle.setProperty('--alov-tg-content-top', `${tgInsets.contentTopPx}px`);
 
       if (resetWindowScrollOnKeyboard && (next.isKeyboardOpen || next.offsetTopPx > 0 || window.scrollY > 0)) {
-        if (window.scrollY !== 0 || window.scrollX !== 0) {
-          window.scrollTo(0, 0);
-        }
+        resetViewportScrollOffsets();
       }
 
       setMetrics((prev) =>
@@ -200,6 +231,18 @@ export function useVisualViewportLock(options?: {
       });
     };
 
+    const handleFocusIn = () => {
+      scheduleSync();
+      // Mobile browsers animate the virtual keyboard over ~100-300ms; re-sync to clamp any focus scroll drift.
+      [80, 260].forEach((delay) => {
+        const t = window.setTimeout(() => {
+          settleTimers.delete(t);
+          syncMetrics();
+        }, delay);
+        settleTimers.add(t);
+      });
+    };
+
     const handleOrientationReset = () => {
       baselineHeightRef.current = window.innerHeight || 640;
       scheduleSync();
@@ -212,7 +255,7 @@ export function useVisualViewportLock(options?: {
     vv?.addEventListener('scroll', scheduleSync);
     window.addEventListener('resize', scheduleSync);
     window.addEventListener('orientationchange', handleOrientationReset);
-    window.addEventListener('focusin', scheduleSync);
+    window.addEventListener('focusin', handleFocusIn);
     window.addEventListener('focusout', scheduleSync);
 
     const tg = (window as any).Telegram?.WebApp;
@@ -225,11 +268,13 @@ export function useVisualViewportLock(options?: {
 
     return () => {
       if (rafId !== null) cancelAnimationFrame(rafId);
+      settleTimers.forEach((t) => window.clearTimeout(t));
+      settleTimers.clear();
       vv?.removeEventListener('resize', scheduleSync);
       vv?.removeEventListener('scroll', scheduleSync);
       window.removeEventListener('resize', scheduleSync);
       window.removeEventListener('orientationchange', handleOrientationReset);
-      window.removeEventListener('focusin', scheduleSync);
+      window.removeEventListener('focusin', handleFocusIn);
       window.removeEventListener('focusout', scheduleSync);
       try {
         tg?.offEvent?.('viewportChanged', scheduleSync);

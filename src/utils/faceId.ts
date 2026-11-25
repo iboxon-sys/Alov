@@ -5,6 +5,186 @@ export interface FacePoint {
   y: number;
 }
 
+export interface FaceBox {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+export interface ObjectCoverProjection {
+  scale: number;
+  offsetX: number;
+  offsetY: number;
+  srcW: number;
+  srcH: number;
+  dstW: number;
+  dstH: number;
+}
+
+export interface AdaptiveFaceFrame {
+  cx: number;
+  cy: number;
+  rx: number;
+  ry: number;
+  angleRad: number;
+  left: number;
+  top: number;
+  right: number;
+  bottom: number;
+}
+
+export function computeObjectCoverProjection(
+  srcW: number,
+  srcH: number,
+  dstW: number,
+  dstH: number
+): ObjectCoverProjection {
+  const safeSrcW = Number.isFinite(srcW) && srcW > 0 ? srcW : 1;
+  const safeSrcH = Number.isFinite(srcH) && srcH > 0 ? srcH : 1;
+  const safeDstW = Number.isFinite(dstW) && dstW > 0 ? dstW : 1;
+  const safeDstH = Number.isFinite(dstH) && dstH > 0 ? dstH : 1;
+  const scale = Math.max(safeDstW / safeSrcW, safeDstH / safeSrcH);
+  const offsetX = (safeSrcW * scale - safeDstW) / 2;
+  const offsetY = (safeSrcH * scale - safeDstH) / 2;
+  return {
+    scale,
+    offsetX,
+    offsetY,
+    srcW: safeSrcW,
+    srcH: safeSrcH,
+    dstW: safeDstW,
+    dstH: safeDstH,
+  };
+}
+
+export function projectPointObjectCover(
+  pt: FacePoint,
+  proj: ObjectCoverProjection
+): FacePoint {
+  return {
+    x: pt.x * proj.scale - proj.offsetX,
+    y: pt.y * proj.scale - proj.offsetY,
+  };
+}
+
+export function smoothLandmarksEMA(
+  prev: FacePoint[] | null | undefined,
+  next: FacePoint[],
+  alpha = 0.55
+): FacePoint[] {
+  if (!Array.isArray(next) || next.length === 0) return [];
+  const a = Number.isFinite(alpha) ? Math.max(0.05, Math.min(1, alpha)) : 0.55;
+  if (!Array.isArray(prev) || prev.length !== next.length) {
+    return next.map((p) => ({ x: p.x, y: p.y }));
+  }
+  return next.map((p, idx) => {
+    const prevPt = prev[idx];
+    if (!prevPt || !Number.isFinite(prevPt.x) || !Number.isFinite(prevPt.y)) {
+      return { x: p.x, y: p.y };
+    }
+    return {
+      x: prevPt.x + (p.x - prevPt.x) * a,
+      y: prevPt.y + (p.y - prevPt.y) * a,
+    };
+  });
+}
+
+function averagePoints(points: FacePoint[]): FacePoint {
+  if (points.length === 0) return { x: 0, y: 0 };
+  let sx = 0;
+  let sy = 0;
+  for (const p of points) {
+    sx += p.x;
+    sy += p.y;
+  }
+  return { x: sx / points.length, y: sy / points.length };
+}
+
+export function computeAdaptiveFaceFrame(
+  pts: FacePoint[],
+  fallbackBox?: FaceBox | null
+): AdaptiveFaceFrame | null {
+  if (Array.isArray(pts) && pts.length >= 48) {
+    const leftEyeCenter = averagePoints(pts.slice(36, 42));
+    const rightEyeCenter = averagePoints(pts.slice(42, 48));
+    const dx = rightEyeCenter.x - leftEyeCenter.x;
+    const dy = rightEyeCenter.y - leftEyeCenter.y;
+    const angleRad = Math.hypot(dx, dy) > 1 ? Math.atan2(dy, dx) : 0;
+
+    const pivot = {
+      x: (leftEyeCenter.x + rightEyeCenter.x) / 2,
+      y: (leftEyeCenter.y + rightEyeCenter.y) / 2,
+    };
+    const cosA = Math.cos(-angleRad);
+    const sinA = Math.sin(-angleRad);
+
+    let minX = Infinity;
+    let maxX = -Infinity;
+    let minY = Infinity;
+    let maxY = -Infinity;
+
+    for (const p of pts) {
+      const rx = p.x - pivot.x;
+      const ry = p.y - pivot.y;
+      const lx = rx * cosA - ry * sinA;
+      const ly = rx * sinA + ry * cosA;
+      if (lx < minX) minX = lx;
+      if (lx > maxX) maxX = lx;
+      if (ly < minY) minY = ly;
+      if (ly > maxY) maxY = ly;
+    }
+
+    const faceW = Math.max(20, maxX - minX);
+    const lowerH = Math.max(24, maxY - minY);
+    const foreheadPad = lowerH * 0.42;
+    const headTopLocal = minY - foreheadPad;
+    const headH = maxY - headTopLocal;
+
+    const localCx = (minX + maxX) / 2;
+    const localCy = (headTopLocal + maxY) / 2;
+    const cosB = Math.cos(angleRad);
+    const sinB = Math.sin(angleRad);
+    const cx = pivot.x + localCx * cosB - localCy * sinB;
+    const cy = pivot.y + localCx * sinB + localCy * cosB;
+
+    const rx = Math.max(24, faceW * 0.6);
+    const ry = Math.max(30, headH * 0.55);
+
+    return {
+      cx,
+      cy,
+      rx,
+      ry,
+      angleRad,
+      left: cx - rx,
+      top: cy - ry,
+      right: cx + rx,
+      bottom: cy + ry,
+    };
+  }
+
+  if (fallbackBox && fallbackBox.width > 0 && fallbackBox.height > 0) {
+    const cx = fallbackBox.x + fallbackBox.width / 2;
+    const cy = fallbackBox.y + fallbackBox.height * 0.48;
+    const rx = Math.max(24, fallbackBox.width * 0.56);
+    const ry = Math.max(30, fallbackBox.height * 0.68);
+    return {
+      cx,
+      cy,
+      rx,
+      ry,
+      angleRad: 0,
+      left: cx - rx,
+      top: cy - ry,
+      right: cx + rx,
+      bottom: cy + ry,
+    };
+  }
+
+  return null;
+}
+
 export interface FaceIdProfileData {
   verified: boolean;
   detectedGender?: 'male' | 'female' | null;

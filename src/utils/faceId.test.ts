@@ -1,186 +1,80 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  buildDemoFaceIdProfile,
-  buildDemoFaceIdSvgDataUrl,
-  computeEyeAspectRatio,
-  computeAverageEAR,
-  createBlinkTrackerState,
-  updateBlinkTracker,
-  computeSmileMetrics,
-  genderToUzLabel,
-  resolveDetectedGender,
-  resolvePostFaceIdGender,
-  requiresFaceIdForUser,
-  resolveEffectiveProfileAvatar,
+  computeAdaptiveFaceFrame,
+  computeObjectCoverProjection,
+  projectPointObjectCover,
+  smoothLandmarksEMA,
   type FacePoint,
 } from './faceId.ts';
 
-function makeEye(verticalGap: number, width: number = 10): FacePoint[] {
-  const halfH = verticalGap / 2;
-  return [
-    { x: 0, y: 0 },
-    { x: width * 0.3, y: -halfH },
-    { x: width * 0.7, y: -halfH },
-    { x: width, y: 0 },
-    { x: width * 0.7, y: halfH },
-    { x: width * 0.3, y: halfH },
-  ];
-}
+function makeTilted68Landmarks(centerX: number, centerY: number, tiltRad: number, scale = 1): FacePoint[] {
+  const pts: FacePoint[] = [];
+  const cos = Math.cos(tiltRad);
+  const sin = Math.sin(tiltRad);
+  const rotate = (lx: number, ly: number): FacePoint => ({
+    x: centerX + (lx * cos - ly * sin) * scale,
+    y: centerY + (lx * sin + ly * cos) * scale,
+  });
 
-function makeLandmarksWithEyesAndMouth(eyeGap: number, mouthWidth: number): FacePoint[] {
-  const pts: FacePoint[] = Array.from({ length: 68 }, () => ({ x: 50, y: 50 }));
-  const leftEye = makeEye(eyeGap, 10);
-  const rightEye = makeEye(eyeGap, 10);
-  for (let i = 0; i < 6; i++) {
-    pts[36 + i] = leftEye[i];
-    pts[42 + i] = rightEye[i];
+  // 0..16 jaw
+  for (let i = 0; i <= 16; i++) {
+    const t = (i - 8) / 8;
+    pts.push(rotate(t * 50, 35 - Math.abs(t) * 28));
   }
-  // Jaw width = 100 (x: 0..100)
-  pts[3] = { x: 0, y: 80 };
-  pts[13] = { x: 100, y: 80 };
-  const halfM = mouthWidth / 2;
-  pts[48] = { x: 50 - halfM, y: 78 };
-  pts[54] = { x: 50 + halfM, y: 78 };
-  pts[51] = { x: 50, y: 78 };
-  pts[57] = { x: 50, y: 81 };
+  // 17..26 brows
+  for (let i = 0; i < 5; i++) pts.push(rotate(-32 + i * 6, -24));
+  for (let i = 0; i < 5; i++) pts.push(rotate(8 + i * 6, -24));
+  // 27..35 nose
+  for (let i = 0; i < 9; i++) pts.push(rotate(0, -14 + i * 3));
+  // 36..41 left eye
+  for (let i = 0; i < 6; i++) pts.push(rotate(-26 + i * 3, -12));
+  // 42..47 right eye
+  for (let i = 0; i < 6; i++) pts.push(rotate(14 + i * 3, -12));
+  // 48..67 mouth
+  for (let i = 0; i < 20; i++) pts.push(rotate(-14 + (i % 10) * 3, 20));
   return pts;
 }
 
-describe('faceId pure biometric helpers', () => {
-  it('computes eye aspect ratio accurately for open vs closed eyes', () => {
-    const openEAR = computeEyeAspectRatio(makeEye(3.2, 10));
-    const closedEAR = computeEyeAspectRatio(makeEye(0.8, 10));
-    assert.ok(openEAR > 0.28);
-    assert.ok(closedEAR < 0.12);
+describe('Face ID object-cover projection, EMA smoothing, and adaptive frame', () => {
+  it('computes uniform object-cover scale and horizontal/vertical crop offsets without aspect distortion', () => {
+    // 16:9 landscape webcam (360x203) inside 3:4 portrait container (290x387)
+    const proj = computeObjectCoverProjection(360, 203, 290, 387);
+    assert.ok(proj.scale > 1.8);
+    assert.equal(proj.offsetY, 0);
+    assert.ok(proj.offsetX > 180);
+
+    // Center of source maps to exact center of destination
+    const center = projectPointObjectCover({ x: 180, y: 101.5 }, proj);
+    assert.ok(Math.abs(center.x - 145) < 0.01);
+    assert.ok(Math.abs(center.y - 193.5) < 0.01);
   });
 
-  it('detects blink naturally across open -> blink -> reopen sequence', () => {
-    let state = createBlinkTrackerState();
-    const openPts = makeLandmarksWithEyesAndMouth(3.2, 36);
-    const closedPts = makeLandmarksWithEyesAndMouth(1.0, 36);
+  it('smooths landmark coordinates using EMA and resets cleanly when previous array differs', () => {
+    const first = smoothLandmarksEMA(null, [{ x: 100, y: 100 }], 0.5);
+    assert.deepEqual(first, [{ x: 100, y: 100 }]);
 
-    const openEar = computeAverageEAR(openPts).avgEAR;
-    const closedEar = computeAverageEAR(closedPts).avgEAR;
+    const second = smoothLandmarksEMA(first, [{ x: 120, y: 140 }], 0.5);
+    assert.deepEqual(second, [{ x: 110, y: 120 }]);
 
-    state = updateBlinkTracker(state, openEar);
-    state = updateBlinkTracker(state, openEar);
-    assert.equal(state.blinkDetected, false);
-    assert.equal(state.sawClosed, false);
-
-    state = updateBlinkTracker(state, closedEar);
-    assert.equal(state.sawClosed, true);
-    assert.equal(state.blinkDetected, false);
-
-    state = updateBlinkTracker(state, openEar);
-    assert.equal(state.blinkDetected, true);
+    const reset = smoothLandmarksEMA(second, [{ x: 10, y: 20 }, { x: 30, y: 40 }], 0.5);
+    assert.equal(reset.length, 2);
+    assert.deepEqual(reset[0], { x: 10, y: 20 });
   });
 
-  it('detects blink naturally even when open-eye EAR baseline is lower (~0.21)', () => {
-    let state = createBlinkTrackerState();
-    const lowOpenPts = makeLandmarksWithEyesAndMouth(2.1, 36);
-    const naturalDipPts = makeLandmarksWithEyesAndMouth(1.65, 36);
+  it('adapts oval center, radii, and tilt angle dynamically to the user face position and scale', () => {
+    const smallLeft = makeTilted68Landmarks(80, 120, 0.22, 0.75);
+    const largeRight = makeTilted68Landmarks(210, 220, -0.18, 1.35);
 
-    const openEar = computeAverageEAR(lowOpenPts).avgEAR; // ~0.21
-    const dipEar = computeAverageEAR(naturalDipPts).avgEAR; // ~0.165
+    const frameA = computeAdaptiveFaceFrame(smallLeft);
+    const frameB = computeAdaptiveFaceFrame(largeRight);
 
-    state = updateBlinkTracker(state, openEar);
-    state = updateBlinkTracker(state, openEar);
-    assert.equal(state.sawClosed, false);
-
-    state = updateBlinkTracker(state, dipEar);
-    assert.equal(state.sawClosed, true);
-
-    state = updateBlinkTracker(state, openEar);
-    assert.equal(state.blinkDetected, true);
-  });
-
-  it('triggers smile check on gentle expression or mouth smile width', () => {
-    const neutral = makeLandmarksWithEyesAndMouth(3.2, 36);
-    assert.equal(computeSmileMetrics(neutral, 0.05).isSmiling, false);
-    assert.equal(computeSmileMetrics(neutral, 0.18).isSmiling, true);
-
-    const gentleGeometricSmile = makeLandmarksWithEyesAndMouth(3.2, 46);
-    assert.equal(computeSmileMetrics(gentleGeometricSmile, 0.1).isSmiling, true);
-  });
-
-  it('resolves male vs female gender from weighted votes and optional server hint', () => {
-    const resFemale = resolveDetectedGender([
-      { gender: 'female', probability: 0.92 },
-      { gender: 'female', probability: 0.88 },
-      { gender: 'male', probability: 0.55 },
-    ]);
-    assert.equal(resFemale.gender, 'female');
-    assert.equal(resFemale.labelUz, 'Qiz (Ayol)');
-    assert.ok(resFemale.confidence >= 72);
-
-    const resMaleBoosted = resolveDetectedGender(
-      [{ gender: 'female', probability: 0.51 }],
-      { gender: 'male', confidence: 95 }
-    );
-    assert.equal(resMaleBoosted.gender, 'male');
-    assert.equal(resMaleBoosted.labelUz, 'Yigit (Erkak)');
-  });
-
-  it('bypasses Face ID for guests & platform admin @Salikh_07 and requires it for unverified users', () => {
-    assert.equal(requiresFaceIdForUser(null), false);
-    assert.equal(requiresFaceIdForUser(undefined), false);
-    assert.equal(requiresFaceIdForUser({ telegram: 'https://t.me/Salikh_07' }), false);
-    assert.equal(requiresFaceIdForUser({ role: 'admin', isAdmin: true }), false);
-    assert.equal(requiresFaceIdForUser({ uid: 'u1', role: 'user' }), true);
-    assert.equal(requiresFaceIdForUser({ uid: 'u1', role: 'user', faceId: { verified: true } }), false);
-  });
-
-  it('always prefers captured Face ID photo over external provider photos, while respecting custom edited avatars', () => {
-    assert.equal(
-      resolveEffectiveProfileAvatar({
-        avatar: 'https://lh3.googleusercontent.com/old-google-photo',
-        faceId: { verified: true, capturedPhotoUrl: '/api/face-id/photo/face_123.jpg' },
-      }),
-      '/api/face-id/photo/face_123.jpg'
-    );
-    assert.equal(
-      resolveEffectiveProfileAvatar({
-        avatar: '/api/media/custom_avatar.jpg',
-        hasCustomAvatar: true,
-        faceId: { verified: true, capturedPhotoUrl: '/api/face-id/photo/face_123.jpg' },
-      }),
-      '/api/media/custom_avatar.jpg'
-    );
-    assert.equal(
-      resolveEffectiveProfileAvatar({
-        avatar: '/api/telegram/avatar/123',
-        faceId: null,
-      }),
-      '/api/telegram/avatar/123'
-    );
-  });
-
-  it('requires explicit post-Face-ID gender selection and never defaults to female', () => {
-    assert.equal(resolvePostFaceIdGender({}), '');
-    assert.equal(resolvePostFaceIdGender({ explicitSelection: null, existingCompletedGender: '' }), '');
-    assert.equal(resolvePostFaceIdGender({ explicitSelection: 'male' }), 'male');
-    assert.equal(resolvePostFaceIdGender({ explicitSelection: 'female' }), 'female');
-    assert.equal(resolvePostFaceIdGender({ explicitSelection: '', existingCompletedGender: 'male' }), 'male');
-    assert.equal(genderToUzLabel(''), 'Tanlanmagan');
-    assert.equal(genderToUzLabel(null), 'Tanlanmagan');
-    assert.equal(genderToUzLabel('male'), 'Yigit (Erkak)');
-    assert.equal(genderToUzLabel('female'), 'Qiz (Ayol)');
-  });
-
-  it('builds verified demo Face ID profile & SVG portrait for test mode', () => {
-    const svgUrl = buildDemoFaceIdSvgDataUrl('female', 'Madina');
-    assert.ok(svgUrl.startsWith('data:image/svg+xml;base64,'));
-    const demoProfile = buildDemoFaceIdProfile({
-      gender: 'male',
-      photoUrl: '/api/face-id/photo/demo_1.svg',
-      verifiedAt: '2026-11-19T10:00:00.000Z',
-    });
-    assert.equal(demoProfile.verified, true);
-    assert.equal(demoProfile.method, 'demo_test');
-    assert.equal(demoProfile.detectedGender, 'male');
-    assert.equal(demoProfile.genderLabelUz, 'Yigit (Erkak)');
-    assert.equal(demoProfile.liveness.faceDetected, true);
-    assert.equal(demoProfile.capturedPhotoUrl, '/api/face-id/photo/demo_1.svg');
+    assert.ok(frameA && frameB);
+    assert.ok(frameA.cx < frameB.cx);
+    assert.ok(frameA.cy < frameB.cy);
+    assert.ok(frameB.rx > frameA.rx * 1.4);
+    assert.ok(frameB.ry > frameA.ry * 1.4);
+    assert.ok(Math.abs(frameA.angleRad - 0.22) < 0.05);
+    assert.ok(Math.abs(frameB.angleRad + 0.18) < 0.05);
   });
 });

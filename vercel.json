@@ -5,7 +5,7 @@
     { "source": "/chatroulette", "destination": "/index.html" },
     { "source": "/chatruletka", "destination": "/index.html" },
     { "source": "/chat", "destination": "/index.html" },
-    { "source": "/((?!assets/|api/).*)", "destination": "/index.html" }
+    { "source": "/((?!assets/|api/|face-models/|manifest\\.json|sw\\.js|favicon\\.ico|robots\\.txt|sitemap\\.xml|llms\\.txt|ai-catalog\\.json|trusted-types-bootstrap\\.js).*)", "destination": "/index.html" }
   ],
   "headers": [
     {

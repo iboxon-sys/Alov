@@ -717,6 +717,8 @@ export interface VersionCacheReconciliationResult {
 
 const STALE_SNAPSHOT_PREFIXES = [
   'alov_user_',
+  'alov_chats_',
+  'alov_msgs_',
 ];
 
 export function collectStaleCacheKeys(storage: StorageLike): string[] {
@@ -734,11 +736,29 @@ export function collectStaleCacheKeys(storage: StorageLike): string[] {
   return keysToRemove;
 }
 
+export function purgeLegacyLocalChatCaches(storage: StorageLike | null | undefined): string[] {
+  if (!storage) return [];
+  const removed: string[] = [];
+  try {
+    for (let i = storage.length - 1; i >= 0; i -= 1) {
+      const k = storage.key(i);
+      if (k && (k.startsWith('alov_chats_') || k.startsWith('alov_msgs_'))) {
+        storage.removeItem(k);
+        removed.push(k);
+      }
+    }
+  } catch {
+    // ignore storage errors
+  }
+  return removed;
+}
+
 /**
  * Compares stored `alov_app_version` with the running `currentVersion` BEFORE overwriting it.
- * Whenever the version changes, removes ONLY stale cached profile snapshots (`alov_current_user`,
- * `alov_user_*`) while STRICTLY preserving chat history (`alov_chats_*`, `alov_msgs_*`), posts
- * (`alov_posts_*`), and active auth session credentials (`alov_user_id`, `alov_auth_token`, `alov_tg_chat_*`).
+ * Whenever the version changes, removes stale cached profile snapshots (`alov_current_user`,
+ * `alov_user_*`) and any legacy browser chat caches (`alov_chats_*`, `alov_msgs_*`) since chats
+ * persist strictly on Render permanent storage, while preserving posts (`alov_posts_*`) and active
+ * auth session credentials (`alov_user_id`, `alov_auth_token`, `alov_tg_chat_*`).
  */
 export function reconcileAppVersionCache(
   storage: StorageLike | null | undefined,

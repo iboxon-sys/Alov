@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useRef, useCallback, Suspense, lazy } from 'react';
 import {
+  AlertCircle,
   ArrowDown,
   ArrowLeft,
   ArrowUpRight,
@@ -13,6 +14,7 @@ import {
   MessageCircle,
   Mic,
   Plus,
+  RefreshCw,
   Search,
   Send,
   ShieldCheck,
@@ -29,10 +31,11 @@ import {
   persistLocalAuthCredentials,
   resolveRealtimeBackendUrl,
 } from '../utils/microFrontendBridge';
-import { buildCanonicalChatId, mergeChatLists } from '../utils/chatList';
+import { buildCanonicalChatId, mergeChatLists, resolvePartnerUidForChat } from '../utils/chatList';
 import { getSafeUserDisplayName, pickPreferredAvatar } from '../utils/telegramProfile';
 import { resolveEffectiveProfileAvatar } from '../utils/faceId';
 import { isUserOnlineStrict, formatLastSeenUz } from '../utils/presence';
+import { purgeLegacyLocalChatCaches } from '../utils/profileSync';
 import {
   MESSAGE_COIN_COST,
   VOICE_MESSAGE_COIN_COST,
@@ -51,7 +54,6 @@ import {
   computeCountdownParts,
 } from '../utils/tokenomics';
 import {
-  capMessagesForLocalCache,
   evaluateStartGifGate,
   formatMediaDuration,
   generateUniqueMessageId,
@@ -65,7 +67,12 @@ import { VideoPlayer, VoiceMessage, AudioPlayer } from './ChatMedia';
 import { isGifMessage, type GiphyGifItem } from '../utils/giphy';
 import { ChatSkeleton } from './Skeleton';
 import { AdminBadge } from './AdminBadge';
-import { filterChatConversations, useVisualViewportLock } from '../utils/mobileViewport';
+import {
+  filterChatConversations,
+  resetViewportScrollOffsets,
+  shouldUseCompactKeyboardChrome,
+  useVisualViewportLock,
+} from '../utils/mobileViewport';
 
 const ChatMediaPicker = lazy(() =>
   import('./ChatMediaPicker').then((m) => ({ default: m.ChatMediaPicker }))
@@ -407,6 +414,13 @@ export const ChatView: React.FC<ChatViewProps> = ({
     return () => window.removeEventListener('message', handleMessage);
   }, []);
 
+  // Scrub any legacy browser chat caches on mount so chats persist strictly on Render server
+  useEffect(() => {
+    if (typeof window !== 'undefined' && window.localStorage) {
+      purgeLegacyLocalChatCaches(window.localStorage);
+    }
+  }, []);
+
   // Load users list for resolving partner avatars & statuses
   useEffect(() => {
     apiFetchJson('/api/users').then((res) => {
@@ -416,40 +430,60 @@ export const ChatView: React.FC<ChatViewProps> = ({
     });
   }, [apiFetchJson]);
 
-  // Load chats list directly from Render Backend + localStorage cache
-  useEffect(() => {
-    const myUid = effectiveUser?.uid || effectiveUser?.id;
-    if (!myUid) {
+  const refreshChatsFromServer = useCallback(async () => {
+    const myUidNow = activeUserRef.current?.uid || activeUserRef.current?.id;
+    if (!myUidNow) {
       setIsLoadingChats(false);
       return;
     }
+    const data = await apiFetchJson(`/api/chats/user/${encodeURIComponent(myUidNow)}`);
+    const serverChats = data?.success && Array.isArray(data.chats) ? data.chats : [];
+    const aliases = [myUidNow, activeUserRef.current?.id].filter(Boolean) as string[];
+    setChatsList((prev) =>
+      mergeChatLists([prev, serverChats], myUidNow, {
+        myAliases: aliases,
+        usersList: usersListRef.current,
+      })
+    );
+    setIsLoadingChats(false);
+  }, [apiFetchJson]);
 
+  // Re-hydrate partner snapshots in chatsList whenever usersList updates
+  useEffect(() => {
+    const myUidNow = effectiveUser?.uid || effectiveUser?.id;
+    if (!myUidNow || usersList.length === 0) return;
+    const aliases = [myUidNow, effectiveUser?.id].filter(Boolean) as string[];
+    setChatsList((prev) =>
+      prev.length === 0
+        ? prev
+        : mergeChatLists([prev], myUidNow, {
+            myAliases: aliases,
+            usersList,
+          })
+    );
+  }, [effectiveUser?.id, effectiveUser?.uid, usersList]);
+
+  // Load chats list strictly from Render Backend (no browser localStorage cache)
+  useEffect(() => {
+    const myUidNow = effectiveUser?.uid || effectiveUser?.id;
+    if (!myUidNow) {
+      setIsLoadingChats(false);
+      return;
+    }
     let cancelled = false;
-    const loadChats = async () => {
-      let localChats: any[] = [];
-      try {
-        const cached = localStorage.getItem('alov_chats_' + myUid);
-        if (cached) localChats = JSON.parse(cached);
-      } catch {}
-
-      const data = await apiFetchJson(`/api/chats/user/${encodeURIComponent(myUid)}`);
+    setIsLoadingChats(true);
+    apiFetchJson(`/api/chats/user/${encodeURIComponent(myUidNow)}`).then((data) => {
       if (cancelled) return;
       const serverChats = data?.success && Array.isArray(data.chats) ? data.chats : [];
-
-      setChatsList((prev) => {
-        const merged = mergeChatLists([prev, localChats, serverChats], myUid, {
-          myAliases: [myUid, effectiveUser?.id].filter(Boolean) as string[],
+      const aliases = [myUidNow, effectiveUser?.id].filter(Boolean) as string[];
+      setChatsList((prev) =>
+        mergeChatLists([prev, serverChats], myUidNow, {
+          myAliases: aliases,
           usersList: usersListRef.current,
-        });
-        try {
-          localStorage.setItem('alov_chats_' + myUid, JSON.stringify(merged));
-        } catch {}
-        return merged;
-      });
+        })
+      );
       setIsLoadingChats(false);
-    };
-
-    loadChats();
+    });
     return () => {
       cancelled = true;
     };
@@ -484,9 +518,19 @@ export const ChatView: React.FC<ChatViewProps> = ({
       if (uidNow && partner) {
         const otherUid = partner.uid || partner.id;
         if (otherUid) {
-          socket.emit('join_chat', buildCanonicalChatId(uidNow, otherUid));
+          const cid = buildCanonicalChatId(uidNow, otherUid);
+          socket.emit('join_chat', cid);
+          void apiFetchJson(`/api/chats/${encodeURIComponent(cid)}/messages?viewerUid=${encodeURIComponent(uidNow)}`).then((data) => {
+            if (data?.success && Array.isArray(data.messages)) {
+              setChatMessages((prev) => {
+                const merged = mergeUniqueChatMessages(data.messages, prev[cid], prev[otherUid]);
+                return { ...prev, [cid]: merged, [otherUid]: merged };
+              });
+            }
+          });
         }
       }
+      void refreshChatsFromServer();
     };
 
     socket.on('connect', registerAndJoin);
@@ -525,12 +569,16 @@ export const ChatView: React.FC<ChatViewProps> = ({
       const msg = payload?.message || payload;
       const chatId = payload?.chatId;
       const uidNow = activeUserRef.current?.uid || activeUserRef.current?.id;
+      const myAliasSet = new Set(
+        [activeUserRef.current?.uid, activeUserRef.current?.id, uidNow].filter(Boolean).map(String)
+      );
       const selUser = selectedChatUserRef.current;
 
-      let partnerId = payload?.senderId === uidNow ? payload?.recipientId : payload?.senderId;
-      if (!partnerId && msg?.senderId) {
-        partnerId = msg.senderId === uidNow ? payload?.recipientId : msg.senderId;
-      }
+      const senderStr = String(payload?.senderId || msg?.senderId || '');
+      const recipientStr = String(payload?.recipientId || '');
+      const senderIsSelf = Boolean(senderStr && myAliasSet.has(senderStr));
+
+      let partnerId = senderIsSelf ? recipientStr : senderStr;
       if (!partnerId && selUser) {
         partnerId = selUser.uid || selUser.id;
       }
@@ -538,7 +586,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
 
       const newMsg = {
         ...msg,
-        status: msg.status || (msg.senderId === uidNow ? 'sent' : 'read'),
+        status: msg.read ? 'read' : (msg.status || (senderIsSelf ? 'sent' : 'read')),
         time:
           msg.time ||
           new Date(msg.createdAt || Date.now()).toLocaleTimeString([], {
@@ -549,20 +597,21 @@ export const ChatView: React.FC<ChatViewProps> = ({
 
       setChatMessages((prev) => {
         const partnerKeys = [partnerId, selUser?.id, selUser?.uid].filter(
-          (k): k is string => Boolean(k) && k !== uidNow
+          (k): k is string => Boolean(k) && !myAliasSet.has(String(k))
         );
         const keys = Array.from(new Set([chatId, ...partnerKeys].filter(Boolean))) as string[];
         const next = { ...prev };
         keys.forEach((k) => {
           next[k] = mergeUniqueChatMessages(prev[k], [newMsg]);
         });
-        if (chatId && next[chatId]) {
-          try {
-            localStorage.setItem('alov_msgs_' + chatId, JSON.stringify(capMessagesForLocalCache(next[chatId])));
-          } catch {}
-        }
         return next;
       });
+
+      const isActiveConversationOpen = Boolean(
+        selUser &&
+          partnerId &&
+          (selUser.id === partnerId || selUser.uid === partnerId)
+      );
 
       if (chatId) {
         setChatsList((prev) => {
@@ -579,36 +628,46 @@ export const ChatView: React.FC<ChatViewProps> = ({
               ? '🎥 Video'
               : msg.text || 'Xabar';
           const partnerInfo =
-            payload?.message?.sender ||
+            (!senderIsSelf ? payload?.message?.sender : undefined) ||
             (partnerId
-              ? {
+              ? usersListRef.current.find((u) => u.uid === partnerId || u.id === partnerId) || {
                   uid: partnerId,
                   id: partnerId,
-                  name: msg.senderName || selUser?.name || 'Foydalanuvchi',
-                  avatar: msg.senderAvatar || selUser?.avatar || '',
+                  name: (!senderIsSelf ? msg.senderName : '') || selUser?.name || 'Foydalanuvchi',
+                  avatar: (!senderIsSelf ? msg.senderAvatar : '') || selUser?.avatar || '',
                 }
               : undefined);
+
+          const existingChat = prev.find(
+            (c) =>
+              c.id === chatId ||
+              resolvePartnerUidForChat(c, uidNow || '', Array.from(myAliasSet), usersListRef.current) === partnerId
+          );
+          const nextUnread = { ...(existingChat?.unreadCount || {}) };
+          if (uidNow) {
+            if (!senderIsSelf && !isActiveConversationOpen) {
+              nextUnread[uidNow] = Number(nextUnread[uidNow] || 0) + 1;
+            } else {
+              for (const alias of myAliasSet) nextUnread[alias] = 0;
+            }
+          }
+
           const incomingChat = {
             id: chatId,
             participants: [uidNow, partnerId].filter(Boolean),
             lastMessage: lastMsg,
+            unreadCount: nextUnread,
             updatedAt: msg.createdAt || new Date().toISOString(),
             partner: partnerInfo,
           };
-          const merged = mergeChatLists([prev, [incomingChat]], uidNow || '', {
-            myAliases: [uidNow, activeUserRef.current?.id].filter(Boolean) as string[],
+          return mergeChatLists([prev, [incomingChat]], uidNow || '', {
+            myAliases: Array.from(myAliasSet),
             usersList: usersListRef.current,
           });
-          if (uidNow) {
-            try {
-              localStorage.setItem('alov_chats_' + uidNow, JSON.stringify(merged));
-            } catch {}
-          }
-          return merged;
         });
       }
 
-      if (msg.senderId && msg.senderId !== uidNow && selUser && (selUser.id === partnerId || selUser.uid === partnerId)) {
+      if (!senderIsSelf && msg.senderId && isActiveConversationOpen) {
         socket.emit('mark_read', {
           chatId,
           messageIds: [msg.id],
@@ -625,7 +684,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
     socket.on('receive_message', handleIncomingMessage);
     socket.on('chat:message', handleIncomingMessage);
 
-    socket.on('message_ack', ({ chatId, messageId, status }: any) => {
+    socket.on('message_ack', ({ messageId, status }: any) => {
       setChatMessages((prev) => {
         const next = { ...prev };
         Object.keys(next).forEach((k) => {
@@ -633,16 +692,11 @@ export const ChatView: React.FC<ChatViewProps> = ({
             next[k] = next[k].map((m) => (m.id === messageId ? { ...m, status: status || 'sent' } : m));
           }
         });
-        if (chatId && next[chatId]) {
-          try {
-            localStorage.setItem('alov_msgs_' + chatId, JSON.stringify(capMessagesForLocalCache(next[chatId])));
-          } catch {}
-        }
         return next;
       });
     });
 
-    socket.on('message_read', ({ chatId, messageIds }: any) => {
+    socket.on('message_read', ({ messageIds }: any) => {
       setChatMessages((prev) => {
         const next = { ...prev };
         Object.keys(next).forEach((k) => {
@@ -652,11 +706,6 @@ export const ChatView: React.FC<ChatViewProps> = ({
             );
           }
         });
-        if (chatId && next[chatId]) {
-          try {
-            localStorage.setItem('alov_msgs_' + chatId, JSON.stringify(capMessagesForLocalCache(next[chatId])));
-          } catch {}
-        }
         return next;
       });
     });
@@ -694,9 +743,9 @@ export const ChatView: React.FC<ChatViewProps> = ({
       socket.disconnect();
       socketRef.current = null;
     };
-  }, [apiOrigin, bridgeToken, effectiveUser?.authToken, effectiveUser?.id, effectiveUser?.uid, notifyParentOrToast]);
+  }, [apiFetchJson, apiOrigin, bridgeToken, effectiveUser?.authToken, effectiveUser?.id, effectiveUser?.uid, notifyParentOrToast, refreshChatsFromServer]);
 
-  // Join conversation room & fetch message history ONLY when active conversation ID changes (never clobber optimistic GIFs)
+  // Join conversation room & fetch authoritative message history directly from Render backend
   const selectedOtherUid = selectedChatUser?.uid || selectedChatUser?.id || '';
   const myActiveUid = effectiveUser?.uid || effectiveUser?.id || '';
 
@@ -708,26 +757,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
     socketRef.current?.emit('mark_read', { chatId, senderId: selectedOtherUid, recipientId: myActiveUid });
 
     let cancelled = false;
-    let localMsgs: any[] = [];
-    try {
-      const cached = localStorage.getItem('alov_msgs_' + chatId);
-      if (cached) localMsgs = JSON.parse(cached);
-    } catch {}
-
-    const sanitizedLocal = (Array.isArray(localMsgs) ? localMsgs : []).map((m) => ({
-      ...m,
-      status: m.status === 'sending' || !m.status ? 'sent' : m.status,
-    }));
-
-    if (sanitizedLocal.length > 0) {
-      setLoadedMessagesByChat((prev) => ({ ...prev, [chatId]: true }));
-      setChatMessages((prev) => {
-        const merged = mergeUniqueChatMessages(sanitizedLocal, prev[chatId], prev[selectedOtherUid]);
-        return { ...prev, [chatId]: merged, [selectedOtherUid]: merged };
-      });
-    } else {
-      setLoadedMessagesByChat((prev) => ({ ...prev, [chatId]: false }));
-    }
+    setLoadedMessagesByChat((prev) => ({ ...prev, [chatId]: false }));
 
     apiFetchJson(`/api/chats/${encodeURIComponent(chatId)}/messages?viewerUid=${encodeURIComponent(myActiveUid)}`).then((data) => {
       if (cancelled) return;
@@ -741,16 +771,11 @@ export const ChatView: React.FC<ChatViewProps> = ({
         }
         if (Array.isArray(data.messages)) {
           setChatMessages((prev) => {
-            // Merge safely inside functional update so optimistically sent GIFs/messages are NEVER wiped!
             const merged = mergeUniqueChatMessages(
-              sanitizedLocal,
               data.messages,
               prev[chatId],
               prev[selectedOtherUid]
             );
-            try {
-              localStorage.setItem('alov_msgs_' + chatId, JSON.stringify(capMessagesForLocalCache(merged)));
-            } catch {}
             return { ...prev, [chatId]: merged, [selectedOtherUid]: merged };
           });
         }
@@ -771,6 +796,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
   }, [effectiveUser?.pendingDiamondBatches]);
 
   const myUid = effectiveUser?.uid || effectiveUser?.id;
+  const myAliases = Array.from(new Set([effectiveUser?.uid, effectiveUser?.id].filter(Boolean).map(String)));
   const otherUid = selectedChatUser?.uid || selectedChatUser?.id;
   const activeChatId = myUid && otherUid ? buildCanonicalChatId(myUid, otherUid) : '';
   const isFriendActive = Boolean(activeChatId && chatFriendships[activeChatId]);
@@ -782,11 +808,10 @@ export const ChatView: React.FC<ChatViewProps> = ({
     isAdminSender: isAdminTelegramUser(effectiveUser),
   });
 
-  const msgs =
-    (activeChatId && chatMessages[activeChatId]) ||
-    (otherUid && chatMessages[otherUid]) ||
-    [];
-  const sortedMessages = mergeUniqueChatMessages(msgs);
+  const sortedMessages = mergeUniqueChatMessages(
+    activeChatId ? chatMessages[activeChatId] : undefined,
+    otherUid ? chatMessages[otherUid] : undefined
+  );
 
   const partnerFromUsersList = otherUid
     ? usersList.find((u) => u.uid === otherUid || u.id === otherUid)
@@ -876,8 +901,18 @@ export const ChatView: React.FC<ChatViewProps> = ({
     if (uidNow && targetId) {
       const chatId = buildCanonicalChatId(uidNow, targetId);
       setChatsList((prev) =>
-        prev.map((c) => (c.id === chatId ? { ...c, unreadCount: { ...(c.unreadCount || {}), [uidNow]: 0 } } : c))
+        prev.map((c) => {
+          const pUid = resolvePartnerUidForChat(c, uidNow, myAliases, usersList);
+          if (c.id !== chatId && pUid !== targetId && pUid !== targetUser?.uid && pUid !== targetUser?.id) {
+            return c;
+          }
+          const clearedUnread = { ...(c.unreadCount || {}) };
+          for (const alias of myAliases) clearedUnread[alias] = 0;
+          clearedUnread[uidNow] = 0;
+          return { ...c, unreadCount: clearedUnread };
+        })
       );
+      socketRef.current?.emit('mark_read', { chatId, senderId: targetId, recipientId: uidNow });
       apiFetchJson('/api/chats/open', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -965,7 +1000,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
       ...(type === 'gif' && fileUrl ? { content: fileUrl } : {}),
       ...(extra?.durationSec ? { durationSec: extra.durationSec } : {}),
       ...(extra?.fileName ? { fileName: extra.fileName } : {}),
-      status: 'sending' as 'sending' | 'sent' | 'read',
+      status: 'sending' as 'sending' | 'sent' | 'read' | 'failed',
       read: false,
       createdAt: new Date().toISOString(),
       time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
@@ -974,79 +1009,19 @@ export const ChatView: React.FC<ChatViewProps> = ({
     if (typingTimeoutRef.current) clearTimeout(typingTimeoutRef.current);
     socketRef.current?.emit('typing', { chatId, uid: uidNow, isTyping: false });
 
-    // Optimistically add via unique-ID merge BEFORE socket ack so consecutive GIFs always stay separate and visible
+    // Optimistically add in memory BEFORE server ACK so consecutive messages/GIFs appear immediately
     setChatMessages((prev) => {
+      const myAliasSet = new Set(myAliases);
       const partnerKeys = [selectedChatUser.id, selectedChatUser.uid, targetId].filter(
-        (k): k is string => Boolean(k) && k !== uidNow
+        (k): k is string => Boolean(k) && !myAliasSet.has(String(k))
       );
       const keys = Array.from(new Set([chatId, ...partnerKeys].filter(Boolean))) as string[];
       const next = { ...prev };
       keys.forEach((k) => {
         next[k] = mergeUniqueChatMessages(prev[k], [msgObj]);
       });
-      try {
-        localStorage.setItem('alov_msgs_' + chatId, JSON.stringify(capMessagesForLocalCache(next[chatId])));
-      } catch {}
       return next;
     });
-
-    const coinCost = getMessageCoinCost(type);
-
-    socketRef.current?.emit(
-      'send_message',
-      { chatId, senderId: uidNow, recipientId: targetId, message: msgObj },
-      (ack: any) => {
-        if (ack && ack.success === false) {
-          setChatMessages((prev) => {
-            const next = { ...prev };
-            Object.keys(next).forEach((k) => {
-              if (next[k]) next[k] = next[k].filter((m) => m.id !== msgObj.id);
-            });
-            try {
-              localStorage.setItem('alov_msgs_' + chatId, JSON.stringify(capMessagesForLocalCache(next[chatId] || [])));
-            } catch {}
-            return next;
-          });
-          if (ack.error === 'insufficient_coins') {
-            const notice = ack.message || `Monetalaringiz yetarli emas! Ushbu xabar narxi ${coinCost} moneta.`;
-            if (onOpenTopUp) {
-              onOpenTopUp(notice);
-            } else if (typeof window !== 'undefined' && window.self !== window.top) {
-              window.parent.postMessage({ type: 'ALOV_EMBED_OPEN_TOPUP', message: notice }, '*');
-            }
-          } else if (ack.message) {
-            notifyParentOrToast(ack.message);
-          }
-          return;
-        }
-        if (ack && (ack.status === 'sent' || ack.success)) {
-          setChatMessages((prev) => {
-            const next = { ...prev };
-            Object.keys(next).forEach((k) => {
-              if (next[k]) {
-                next[k] = next[k].map((m) => (m.id === msgObj.id ? { ...m, status: 'sent' } : m));
-              }
-            });
-            try {
-              localStorage.setItem('alov_msgs_' + chatId, JSON.stringify(capMessagesForLocalCache(next[chatId] || [])));
-            } catch {}
-            return next;
-          });
-        }
-      }
-    );
-
-    setTimeout(() => {
-      setChatMessages((prev) => {
-        const next = { ...prev };
-        Object.keys(next).forEach((k) => {
-          if (next[k]) {
-            next[k] = next[k].map((m) => (m.id === msgObj.id && m.status === 'sending' ? { ...m, status: 'sent' } : m));
-          }
-        });
-        return next;
-      });
-    }, 350);
 
     setChatsList((prev) => {
       const entry = {
@@ -1063,19 +1038,147 @@ export const ChatView: React.FC<ChatViewProps> = ({
         updatedAt: msgObj.createdAt,
         partner: selectedChatUser,
       };
-      const merged = mergeChatLists([prev, [entry]], uidNow, {
-        myAliases: [uidNow, effectiveUser?.id].filter(Boolean) as string[],
+      return mergeChatLists([prev, [entry]], uidNow, {
+        myAliases,
         usersList: usersListRef.current,
       });
-      try {
-        localStorage.setItem('alov_chats_' + uidNow, JSON.stringify(merged));
-      } catch {}
-      return merged;
     });
 
     if (isAIBot && type === 'text') {
       setIsAiTyping(true);
     }
+
+    await deliverMessageToServer(msgObj, chatId, uidNow, targetId, isAIBot);
+  };
+
+  const deliverMessageToServer = async (
+    msgObj: any,
+    chatId: string,
+    uidNow: string,
+    targetId: string,
+    isAIBot: boolean
+  ) => {
+    const coinCost = getMessageCoinCost(msgObj?.type);
+    const updateStatusForId = (nextStatus: 'sending' | 'sent' | 'failed') => {
+      setChatMessages((prev) => {
+        const next = { ...prev };
+        Object.keys(next).forEach((k) => {
+          if (next[k]) {
+            next[k] = next[k].map((m) => (m.id === msgObj.id ? { ...m, status: nextStatus } : m));
+          }
+        });
+        return next;
+      });
+    };
+
+    const removeOptimisticMsg = () => {
+      setChatMessages((prev) => {
+        const next = { ...prev };
+        Object.keys(next).forEach((k) => {
+          if (next[k]) next[k] = next[k].filter((m) => m.id !== msgObj.id);
+        });
+        return next;
+      });
+      if (isAIBot) setIsAiTyping(false);
+    };
+
+    const handleServerRejection = (errPayload: any) => {
+      removeOptimisticMsg();
+      if (errPayload?.error === 'insufficient_coins') {
+        const notice = errPayload.message || `Monetalaringiz yetarli emas! Ushbu xabar narxi ${coinCost} moneta.`;
+        if (onOpenTopUpRef.current) {
+          onOpenTopUpRef.current(notice);
+        } else if (typeof window !== 'undefined' && window.self !== window.top) {
+          window.parent.postMessage({ type: 'ALOV_EMBED_OPEN_TOPUP', message: notice }, '*');
+        } else {
+          notifyParentOrToast(notice);
+        }
+      } else if (errPayload?.message) {
+        notifyParentOrToast(errPayload.message);
+      }
+    };
+
+    const sendViaHttpFallback = async () => {
+      const httpRes = await apiFetchJson('/api/chats/send', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          chatId,
+          senderId: uidNow,
+          recipientId: targetId,
+          message: msgObj,
+        }),
+      });
+      if (httpRes?.success) {
+        updateStatusForId('sent');
+        if (httpRes.sender) {
+          setBridgeUser((prev: any) => ({ ...(prev || {}), ...httpRes.sender }));
+        }
+        return true;
+      }
+      if (
+        httpRes?.error === 'insufficient_coins' ||
+        httpRes?.error === 'start_gif_required' ||
+        httpRes?.error === 'user_banned'
+      ) {
+        handleServerRejection(httpRes);
+        return false;
+      }
+      updateStatusForId('failed');
+      if (isAIBot) setIsAiTyping(false);
+      notifyParentOrToast("Xabar yuborilmadi. Qayta urinib ko'ring.");
+      return false;
+    };
+
+    if (!socketRef.current?.connected || (typeof navigator !== 'undefined' && navigator.onLine === false)) {
+      await sendViaHttpFallback();
+      return;
+    }
+
+    let settled = false;
+    const fallbackTimer = window.setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      void sendViaHttpFallback();
+    }, 2500);
+
+    socketRef.current.emit(
+      'send_message',
+      { chatId, senderId: uidNow, recipientId: targetId, message: msgObj },
+      (ack: any) => {
+        if (settled) return;
+        settled = true;
+        window.clearTimeout(fallbackTimer);
+        if (ack && ack.success === false) {
+          handleServerRejection(ack);
+          return;
+        }
+        if (ack && (ack.status === 'sent' || ack.success)) {
+          updateStatusForId('sent');
+        } else {
+          void sendViaHttpFallback();
+        }
+      }
+    );
+  };
+
+  const handleRetryMessage = async (failedMsg: any) => {
+    const uidNow = effectiveUser?.uid || effectiveUser?.id;
+    const targetId = selectedChatUser?.uid || selectedChatUser?.id;
+    if (!uidNow || !targetId || !failedMsg?.id) return;
+    const chatId = buildCanonicalChatId(uidNow, targetId);
+    const isAIBot = targetId === ALOV_AI_USER.uid;
+    setChatMessages((prev) => {
+      const next = { ...prev };
+      Object.keys(next).forEach((k) => {
+        if (next[k]) {
+          next[k] = next[k].map((m) => (m.id === failedMsg.id ? { ...m, status: 'sending' } : m));
+        }
+      });
+      return next;
+    });
+    if (isAIBot && failedMsg.type === 'text') setIsAiTyping(true);
+    await deliverMessageToServer({ ...failedMsg, status: 'sending' }, chatId, uidNow, targetId, isAIBot);
   };
 
   const handleSendGif = async (gif: GiphyGifItem) => {
@@ -1327,11 +1430,10 @@ export const ChatView: React.FC<ChatViewProps> = ({
   };
 
   if (chatView === 'list') {
-    const filteredChats = filterChatConversations(chatsList, chatSearchQuery, myUid, usersList);
+    const filteredChats = filterChatConversations(chatsList, chatSearchQuery, myUid, usersList, myAliases);
     const hasAiInChats = chatsList.some((c) => {
       const uidNow = effectiveUser?.uid || effectiveUser?.id;
-      const partnerUid =
-        c.participants?.find((p: string) => p !== uidNow) || c.partner?.uid || c.partner?.id;
+      const partnerUid = resolvePartnerUidForChat(c, uidNow || '', myAliases, usersList);
       return partnerUid === ALOV_AI_USER.uid || c.id?.includes(ALOV_AI_USER.uid);
     });
     const showPinnedAiCard =
@@ -1340,14 +1442,27 @@ export const ChatView: React.FC<ChatViewProps> = ({
         'alov ai'.includes(chatSearchQuery.trim().toLowerCase()) ||
         'suhbatdosh'.includes(chatSearchQuery.trim().toLowerCase()));
 
+    const compactKeyboardList = shouldUseCompactKeyboardChrome({
+      isCompactViewport: isCompactMobile,
+      isKeyboardOpen: viewportMetrics.isKeyboardOpen,
+      heightPx: viewportMetrics.heightPx,
+    });
+
     return (
       <div
         data-testid="chat-view-list"
-        className="flex-1 min-h-0 h-full w-full flex flex-col bg-[#09090D] text-zinc-100 p-0 sm:p-4 overflow-hidden"
+        data-viewport-scroll-lock="true"
+        className="flex-1 min-h-0 h-full w-full flex flex-col bg-[#09090D] text-zinc-100 p-0 sm:p-4 overflow-clip"
       >
-        <div className="bg-[#0D0F17] sm:bg-[#11131C] sm:rounded-[24px] sm:border sm:border-white/[0.08] overflow-hidden flex flex-col flex-1 min-h-0">
+        <div className="bg-[#0D0F17] sm:bg-[#11131C] sm:rounded-[24px] sm:border sm:border-white/[0.08] overflow-clip flex flex-col flex-1 min-h-0">
           {/* Modern List Header + Search */}
-          <div className="px-4 pt-3.5 pb-3 border-b border-white/[0.07] shrink-0 space-y-3 bg-[#0F111A]/95 backdrop-blur-xl">
+          <div
+            className={`px-4 border-b border-white/[0.07] shrink-0 bg-[#0F111A]/95 backdrop-blur-xl ${
+              compactKeyboardList
+                ? 'pt-[max(0.75rem,var(--alov-safe-top,env(safe-area-inset-top,0px)))] pb-2.5 space-y-2'
+                : 'pt-[max(0.875rem,var(--alov-safe-top,env(safe-area-inset-top,0px)))] pb-3 space-y-3'
+            }`}
+          >
             <div className="flex items-baseline justify-between gap-2">
               <h2 className="font-editorial text-[26px] sm:text-[28px] font-bold text-white tracking-tight leading-none">
                 Xabarlar
@@ -1447,13 +1562,15 @@ export const ChatView: React.FC<ChatViewProps> = ({
                 ) : (
                   filteredChats.map((chat, idx) => {
                     const uidNow = effectiveUser?.uid || effectiveUser?.id;
-                    const partnerUid =
-                      chat.participants?.find((p: string) => p !== uidNow) || chat.partner?.uid || chat.partner?.id;
+                    const partnerUid = resolvePartnerUidForChat(chat, uidNow || '', myAliases, usersList);
                     const otherUser =
                       usersList.find((u) => u.uid === partnerUid || u.id === partnerUid) ||
                       (partnerUid === ALOV_AI_USER.uid ? ALOV_AI_USER : null) ||
                       chat.partner || { uid: partnerUid, name: 'Foydalanuvchi' };
-                    const unread = chat.unreadCount?.[uidNow || ''] || 0;
+                    const unread = myAliases.reduce(
+                      (acc, alias) => Math.max(acc, Number(chat.unreadCount?.[alias] || 0)),
+                      Number(chat.unreadCount?.[uidNow || ''] || 0)
+                    );
                     const chatAvatar = resolveMediaOrAvatar(resolveEffectiveProfileAvatar(otherUser));
 
                     return (
@@ -1540,31 +1657,40 @@ export const ChatView: React.FC<ChatViewProps> = ({
   const countdown = computeCountdownParts(nextUnlockAt, countdownNow);
 
   const isTypingActive = isOtherTyping || (otherUid === ALOV_AI_USER.uid && isAiTyping);
+  const compactKeyboardChrome = shouldUseCompactKeyboardChrome({
+    isCompactViewport: isCompactMobile,
+    isKeyboardOpen: viewportMetrics.isKeyboardOpen,
+    heightPx: viewportMetrics.heightPx,
+  });
 
   return (
     <div
       data-testid="chat-view-conversation"
+      data-viewport-scroll-lock="true"
       style={
         isCompactMobile
-          ? { maxHeight: `${viewportMetrics.heightPx}px` }
+          ? { height: '100%', maxHeight: `${viewportMetrics.heightPx}px` }
           : undefined
       }
-      className="flex-1 min-h-0 h-full w-full bg-[#09090D] flex flex-col overflow-hidden text-zinc-100 relative"
+      className="flex-1 min-h-0 h-full w-full bg-[#09090D] flex flex-col overflow-clip text-zinc-100 relative"
     >
       {/* Subtle Ambient Header Aura */}
       <div className="pointer-events-none absolute top-0 inset-x-0 h-36 bg-[radial-gradient(ellipse_at_top,rgba(225,29,72,0.08),transparent_70%)]" />
 
-      {/* Sticky Locked Top Bar (Avatar, Name, Status, Gift, Video Call) */}
+      {/* Pinned Top Bar (Avatar, Name, Status, Gift, Video Call) */}
       <div
         data-testid="chat-conversation-header"
-        className="shrink-0 sticky top-0 z-30 px-2 sm:px-4 pt-[max(0.45rem,var(--alov-safe-top,env(safe-area-inset-top,0px)))] pb-2 border-b border-white/[0.08] flex items-center justify-between gap-1.5 sm:gap-3 bg-[#0F111A]/95 backdrop-blur-xl"
+        className="relative shrink-0 z-30 px-2.5 sm:px-4 pt-[max(0.625rem,var(--alov-safe-top,env(safe-area-inset-top,0px)))] pb-2.5 min-h-[calc(4rem+var(--alov-safe-top,env(safe-area-inset-top,0px)))] border-b border-white/[0.08] flex items-center justify-between gap-1.5 sm:gap-3 bg-[#0F111A]/95 backdrop-blur-xl"
       >
         <div className="flex items-center gap-1 sm:gap-2 min-w-0 flex-1">
           <button
             type="button"
             aria-label="Suhbatlar ro'yxatiga qaytish"
             data-testid="chat-header-back-btn"
-            onClick={() => setChatView('list')}
+            onClick={() => {
+              setChatView('list');
+              void refreshChatsFromServer();
+            }}
             className="min-w-[44px] min-h-[44px] rounded-full hover:bg-white/[0.08] active:bg-white/[0.12] text-zinc-200 flex items-center justify-center transition active:scale-95 shrink-0 cursor-pointer"
           >
             <ArrowLeft className="w-5 h-5" />
@@ -1667,7 +1793,9 @@ export const ChatView: React.FC<ChatViewProps> = ({
       {isFriendActive && !isAIBotChat ? (
         <div
           data-testid="chat-pricing-strip"
-          className="bg-emerald-500/10 border-b border-emerald-500/20 text-emerald-200 px-3.5 py-1.5 text-[11px] font-semibold flex items-center justify-between gap-2 shrink-0"
+          className={`bg-emerald-500/10 border-b border-emerald-500/20 text-emerald-200 px-3.5 font-semibold flex items-center justify-between gap-2 shrink-0 ${
+            compactKeyboardChrome ? 'py-1 text-[10.5px]' : 'py-1.5 text-[11px]'
+          }`}
         >
           <span className="truncate">Do&apos;stlashish faol — Yigitdan moneta yechilmaydi</span>
           <span className="text-emerald-300 font-bold whitespace-nowrap shrink-0">Bepul</span>
@@ -1675,7 +1803,9 @@ export const ChatView: React.FC<ChatViewProps> = ({
       ) : effectiveUser?.gender === 'female' ? (
         <div
           data-testid="chat-pricing-strip"
-          className="bg-cyan-500/10 border-b border-cyan-500/20 text-cyan-200 px-3.5 py-1.5 text-[11px] font-semibold flex items-center justify-between gap-2 shrink-0"
+          className={`bg-cyan-500/10 border-b border-cyan-500/20 text-cyan-200 px-3.5 font-semibold flex items-center justify-between gap-2 shrink-0 ${
+            compactKeyboardChrome ? 'py-1 text-[10.5px]' : 'py-1.5 text-[11px]'
+          }`}
         >
           <span className="truncate">💎 Har bir javob uchun +{MESSAGE_DIAMOND_REWARD} Almaz</span>
           <span className="font-mono text-cyan-300 font-bold whitespace-nowrap tabular-nums shrink-0">
@@ -1685,7 +1815,9 @@ export const ChatView: React.FC<ChatViewProps> = ({
       ) : !isAIBotChat ? (
         <div
           data-testid="chat-pricing-strip"
-          className="bg-amber-500/[0.08] border-b border-amber-500/20 text-amber-200 px-3.5 py-1.5 text-[11px] font-semibold flex items-center justify-between gap-2 shrink-0"
+          className={`bg-amber-500/[0.08] border-b border-amber-500/20 text-amber-200 px-3.5 font-semibold flex items-center justify-between gap-2 shrink-0 ${
+            compactKeyboardChrome ? 'py-1 text-[10.5px]' : 'py-1.5 text-[11px]'
+          }`}
         >
           <span className="truncate">
             🪙 Xabar/GIF: {MESSAGE_COIN_COST} · Golos: {VOICE_MESSAGE_COIN_COST} · Video/Audio: {MEDIA_FILE_COIN_COST}
@@ -1702,21 +1834,31 @@ export const ChatView: React.FC<ChatViewProps> = ({
         onScroll={handleMessagesScroll}
         data-testid="chat-messages-scroll-area"
         style={{ WebkitOverflowScrolling: 'touch' }}
-        className="flex-1 min-h-0 px-3 sm:px-4 py-3.5 overflow-y-auto overscroll-y-contain touch-pan-y space-y-2 bg-[#09090D] relative z-10 flex flex-col"
+        className={`flex-1 min-h-0 px-3 sm:px-4 overflow-y-auto overscroll-y-contain touch-pan-y space-y-2 bg-[#09090D] relative z-10 flex flex-col ${
+          compactKeyboardChrome ? 'py-2' : 'py-3.5'
+        }`}
       >
         {sortedMessages.length === 0 && !isStartGifLocked && (
           <div
             data-testid="chat-empty-starter"
-            className="my-auto mx-auto max-w-xs w-full py-6 px-4 text-center space-y-3"
+            className={
+              compactKeyboardChrome
+                ? 'mx-auto my-1 max-w-xs w-full py-2 px-4 text-center space-y-2 shrink-0'
+                : 'my-auto mx-auto max-w-xs w-full py-6 px-4 text-center space-y-3 shrink-0'
+            }
           >
             {partnerAvatar ? (
               <img
                 src={partnerAvatar}
                 alt={resolvedChatPartner?.name || ''}
-                className="w-16 h-16 rounded-full object-cover mx-auto ring-2 ring-white/15"
+                className={`${compactKeyboardChrome ? 'w-11 h-11' : 'w-16 h-16'} rounded-full object-cover mx-auto ring-2 ring-white/15`}
               />
             ) : (
-              <div className="w-16 h-16 rounded-full bg-rose-500/20 text-rose-300 font-bold text-xl flex items-center justify-center mx-auto ring-2 ring-rose-500/30">
+              <div
+                className={`${
+                  compactKeyboardChrome ? 'w-11 h-11 text-base' : 'w-16 h-16 text-xl'
+                } rounded-full bg-rose-500/20 text-rose-300 font-bold flex items-center justify-center mx-auto ring-2 ring-rose-500/30`}
+              >
                 {getSafeUserDisplayName(resolvedChatPartner, 'F').charAt(0).toUpperCase()}
               </div>
             )}
@@ -1762,7 +1904,10 @@ export const ChatView: React.FC<ChatViewProps> = ({
           </div>
         )}
         {sortedMessages.map((msg, idx) => {
-          const isMe = msg.senderId === 'me' || (myUid && (msg.senderId === myUid || msg.userId === myUid));
+          const isMe =
+            msg.senderId === 'me' ||
+            myAliases.includes(String(msg.senderId || '')) ||
+            myAliases.includes(String(msg.userId || ''));
           const rawMediaUrl = msg.fileUrl || (msg.type === 'gif' ? msg.content : '') || '';
           const resolvedUrl = rawMediaUrl.startsWith('/api/') ? `${apiOrigin}${rawMediaUrl}` : rawMediaUrl;
           const frameless = isFramelessChatMediaType(msg);
@@ -1796,7 +1941,9 @@ export const ChatView: React.FC<ChatViewProps> = ({
                         <span className="text-[9.5px] tabular-nums">{msg.time}</span>
                         {isMe && (
                           <span className="flex items-center shrink-0">
-                            {msg.status === 'sending' ? (
+                            {msg.status === 'failed' ? (
+                              <AlertCircle className="w-3.5 h-3.5 text-amber-300" />
+                            ) : msg.status === 'sending' ? (
                               <Clock className="w-3 h-3 text-white/80 animate-pulse" />
                             ) : msg.status === 'read' || msg.read ? (
                               <CheckCheck className="w-3.5 h-3.5 text-cyan-300" />
@@ -1823,7 +1970,9 @@ export const ChatView: React.FC<ChatViewProps> = ({
                         <span className="text-[9.5px] tabular-nums">{msg.time}</span>
                         {isMe && (
                           <span className="flex items-center shrink-0">
-                            {msg.status === 'sending' ? (
+                            {msg.status === 'failed' ? (
+                              <AlertCircle className="w-3.5 h-3.5 text-amber-300" />
+                            ) : msg.status === 'sending' ? (
                               <Clock className="w-3 h-3 text-white/80 animate-pulse" />
                             ) : msg.status === 'read' || msg.read ? (
                               <CheckCheck className="w-3.5 h-3.5 text-cyan-300" />
@@ -1834,6 +1983,18 @@ export const ChatView: React.FC<ChatViewProps> = ({
                         )}
                       </div>
                     </div>
+                  )}
+
+                  {isMe && msg.status === 'failed' && (
+                    <button
+                      type="button"
+                      data-testid="chat-retry-message-btn"
+                      onClick={() => void handleRetryMessage(msg)}
+                      className="mt-1 ml-auto px-2.5 py-1 rounded-lg bg-amber-500/20 border border-amber-400/40 text-amber-200 text-[11px] font-bold flex items-center gap-1 hover:bg-amber-500/30 transition cursor-pointer"
+                    >
+                      <RefreshCw className="w-3 h-3" />
+                      <span>Qayta yuborish</span>
+                    </button>
                   )}
 
                   {!isDefaultMediaText && (
@@ -1900,7 +2061,9 @@ export const ChatView: React.FC<ChatViewProps> = ({
                     </span>
                     {isMe && (
                       <span className="flex items-center ml-1 shrink-0">
-                        {msg.status === 'sending' ? (
+                        {msg.status === 'failed' ? (
+                          <AlertCircle className="w-3.5 h-3.5 text-amber-200" />
+                        ) : msg.status === 'sending' ? (
                           <Clock className="w-3 h-3 text-rose-200/90 animate-pulse" />
                         ) : msg.status === 'read' || msg.read ? (
                           <CheckCheck className="w-3.5 h-3.5 text-cyan-200" />
@@ -1910,6 +2073,17 @@ export const ChatView: React.FC<ChatViewProps> = ({
                       </span>
                     )}
                   </div>
+                  {isMe && msg.status === 'failed' && (
+                    <button
+                      type="button"
+                      data-testid="chat-retry-message-btn"
+                      onClick={() => void handleRetryMessage(msg)}
+                      className="mt-1.5 w-full px-2.5 py-1 rounded-lg bg-black/30 border border-amber-300/40 text-amber-200 text-[11px] font-bold flex items-center justify-center gap-1 hover:bg-black/45 transition cursor-pointer"
+                    >
+                      <RefreshCw className="w-3 h-3" />
+                      <span>Yuborilmadi — Qayta yuborish</span>
+                    </button>
+                  )}
 
                   {!isMe && Array.isArray(msg.recommendedProfiles) && msg.recommendedProfiles.length > 0 && (
                     <div
@@ -2087,7 +2261,11 @@ export const ChatView: React.FC<ChatViewProps> = ({
       {/* Modern Unified Bottom Composer / Media Picker / GIF Bar / Dictaphone */}
       <div
         data-testid="chat-composer-bar"
-        className="shrink-0 z-20 px-2.5 sm:px-4 pt-2 pb-[max(0.625rem,env(safe-area-inset-bottom))] bg-[#0F111A]/95 backdrop-blur-xl border-t border-white/[0.08] flex flex-col"
+        className={`shrink-0 z-20 px-2.5 sm:px-4 bg-[#0F111A]/95 backdrop-blur-xl border-t border-white/[0.08] flex flex-col ${
+          compactKeyboardChrome
+            ? 'pt-1.5 pb-1.5'
+            : 'pt-2 pb-[max(0.625rem,env(safe-area-inset-bottom))]'
+        }`}
       >
         {isStartGifLocked ? (
           <div
@@ -2193,14 +2371,16 @@ export const ChatView: React.FC<ChatViewProps> = ({
                     rows={1}
                     value={inputMessage}
                     onFocus={() => {
-                      if (typeof window !== 'undefined' && window.scrollY !== 0) {
-                        window.scrollTo(0, 0);
-                      }
+                      setShowChatMediaPicker(false);
+                      resetViewportScrollOffsets();
                       if (isUserNearBottomRef.current) {
-                        setTimeout(() => {
-                          const el = chatMessagesContainerRef.current;
-                          if (el) el.scrollTop = el.scrollHeight;
-                        }, 120);
+                        [120, 280].forEach((delay) => {
+                          setTimeout(() => {
+                            resetViewportScrollOffsets();
+                            const el = chatMessagesContainerRef.current;
+                            if (el) el.scrollTop = el.scrollHeight;
+                          }, delay);
+                        });
                       }
                     }}
                     onChange={(e) => {

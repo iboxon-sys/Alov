@@ -6,6 +6,7 @@ import {
   filterChatConversations,
   shouldHideMobileBottomDock,
   shouldShowOuterAppHeader,
+  shouldUseCompactKeyboardChrome,
 } from './mobileViewport';
 
 test('computeEffectiveViewportMetrics handles Android interactive-widget=resizes-content', () => {
@@ -109,6 +110,42 @@ test('shouldShowOuterAppHeader hides redundant global header on mobile chat conv
       chatView: 'list',
     }),
     true
+  );
+  assert.equal(
+    shouldShowOuterAppHeader({
+      isMobileViewport: true,
+      activeTab: 'chats',
+      chatView: 'list',
+      isKeyboardOpen: true,
+    }),
+    false
+  );
+});
+
+test('shouldUseCompactKeyboardChrome activates when compact mobile keyboard opens or height is constrained', () => {
+  assert.equal(
+    shouldUseCompactKeyboardChrome({
+      isCompactViewport: true,
+      isKeyboardOpen: true,
+      heightPx: 440,
+    }),
+    true
+  );
+  assert.equal(
+    shouldUseCompactKeyboardChrome({
+      isCompactViewport: true,
+      isKeyboardOpen: false,
+      heightPx: 844,
+    }),
+    false
+  );
+  assert.equal(
+    shouldUseCompactKeyboardChrome({
+      isCompactViewport: false,
+      isKeyboardOpen: true,
+      heightPx: 440,
+    }),
+    false
   );
 });
 

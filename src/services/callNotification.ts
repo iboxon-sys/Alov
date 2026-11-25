@@ -19,7 +19,7 @@ class CallNotificationService {
   public async registerServiceWorker() {
     if ('serviceWorker' in navigator) {
       try {
-        const reg = await navigator.serviceWorker.register('/sw.js');
+        const reg = await navigator.serviceWorker.register('/sw.js', { updateViaCache: 'none' });
         this.swRegistration = reg;
         console.log('Service Worker registered for Android PWA:', reg.scope);
       } catch (err) {
@@ -73,8 +73,8 @@ class CallNotificationService {
         const title = "Kiruvchi video qo'ng'iroq 📞";
         const options: any = {
           body: `${callerName} sizga video qo'ng'iroq qilmoqda...`,
-          icon: avatarUrl || '/favicon.ico',
-          badge: '/favicon.ico',
+          icon: avatarUrl || '/assets/images/icon-192.png',
+          badge: '/assets/images/icon-192.png',
           vibrate: [500, 200, 500, 200, 500],
           tag: 'incoming-call',
           renotify: true,

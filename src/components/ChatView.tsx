@@ -430,6 +430,36 @@ export const ChatView: React.FC<ChatViewProps> = ({
     });
   }, [apiFetchJson]);
 
+  const aiReplyPollTimerRef = useRef<number | null>(null);
+  const aiReplyTimeoutRef = useRef<number | null>(null);
+
+  const isAiBotIdentifier = useCallback((id?: string | null) => {
+    const clean = String(id || '').trim();
+    return (
+      clean === ALOV_AI_USER.uid ||
+      clean === 'ALOV-AI' ||
+      clean === 'user_kamola_006' ||
+      clean === 'ALOV-006'
+    );
+  }, []);
+
+  const stopAiReplyPolling = useCallback(() => {
+    if (aiReplyPollTimerRef.current !== null) {
+      window.clearInterval(aiReplyPollTimerRef.current);
+      aiReplyPollTimerRef.current = null;
+    }
+    if (aiReplyTimeoutRef.current !== null) {
+      window.clearTimeout(aiReplyTimeoutRef.current);
+      aiReplyTimeoutRef.current = null;
+    }
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      stopAiReplyPolling();
+    };
+  }, [stopAiReplyPolling]);
+
   const refreshChatsFromServer = useCallback(async () => {
     const myUidNow = activeUserRef.current?.uid || activeUserRef.current?.id;
     if (!myUidNow) {
@@ -463,7 +493,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
     );
   }, [effectiveUser?.id, effectiveUser?.uid, usersList]);
 
-  // Load chats list strictly from Render Backend (no browser localStorage cache)
+  // Load chats list strictly from Render Backend (no browser localStorage cache), retrying once on cold wake
   useEffect(() => {
     const myUidNow = effectiveUser?.uid || effectiveUser?.id;
     if (!myUidNow) {
@@ -471,21 +501,32 @@ export const ChatView: React.FC<ChatViewProps> = ({
       return;
     }
     let cancelled = false;
+    let retryTimer: number | null = null;
     setIsLoadingChats(true);
-    apiFetchJson(`/api/chats/user/${encodeURIComponent(myUidNow)}`).then((data) => {
+    const loadChats = async (attempt: number) => {
+      const data = await apiFetchJson(`/api/chats/user/${encodeURIComponent(myUidNow)}`);
       if (cancelled) return;
-      const serverChats = data?.success && Array.isArray(data.chats) ? data.chats : [];
-      const aliases = [myUidNow, effectiveUser?.id].filter(Boolean) as string[];
-      setChatsList((prev) =>
-        mergeChatLists([prev, serverChats], myUidNow, {
-          myAliases: aliases,
-          usersList: usersListRef.current,
-        })
-      );
-      setIsLoadingChats(false);
-    });
+      if (data?.success && Array.isArray(data.chats)) {
+        const aliases = [myUidNow, effectiveUser?.id].filter(Boolean) as string[];
+        setChatsList((prev) =>
+          mergeChatLists([prev, data.chats], myUidNow, {
+            myAliases: aliases,
+            usersList: usersListRef.current,
+          })
+        );
+        setIsLoadingChats(false);
+      } else if (attempt === 0) {
+        retryTimer = window.setTimeout(() => {
+          if (!cancelled) void loadChats(1);
+        }, 1200);
+      } else {
+        setIsLoadingChats(false);
+      }
+    };
+    void loadChats(0);
     return () => {
       cancelled = true;
+      if (retryTimer !== null) window.clearTimeout(retryTimer);
     };
   }, [apiFetchJson, effectiveUser?.id, effectiveUser?.uid]);
 
@@ -676,7 +717,8 @@ export const ChatView: React.FC<ChatViewProps> = ({
         });
       }
 
-      if (msg.senderId === ALOV_AI_USER.uid || msg.senderId === 'user_kamola_006' || msg.senderId === 'ALOV-006') {
+      if (isAiBotIdentifier(msg.senderId)) {
+        stopAiReplyPolling();
         setIsAiTyping(false);
       }
     };
@@ -757,12 +799,14 @@ export const ChatView: React.FC<ChatViewProps> = ({
     socketRef.current?.emit('mark_read', { chatId, senderId: selectedOtherUid, recipientId: myActiveUid });
 
     let cancelled = false;
+    let retryTimer: number | null = null;
     setLoadedMessagesByChat((prev) => ({ ...prev, [chatId]: false }));
 
-    apiFetchJson(`/api/chats/${encodeURIComponent(chatId)}/messages?viewerUid=${encodeURIComponent(myActiveUid)}`).then((data) => {
+    const loadConversationMessages = async (attempt: number) => {
+      const data = await apiFetchJson(`/api/chats/${encodeURIComponent(chatId)}/messages?viewerUid=${encodeURIComponent(myActiveUid)}`);
       if (cancelled) return;
-      setLoadedMessagesByChat((prev) => ({ ...prev, [chatId]: true }));
       if (data?.success) {
+        setLoadedMessagesByChat((prev) => ({ ...prev, [chatId]: true }));
         if (typeof data.partnerStartGifUrl === 'string') {
           setPartnerStartGifByChat((prev) => ({ ...prev, [chatId]: data.partnerStartGifUrl }));
         }
@@ -779,13 +823,23 @@ export const ChatView: React.FC<ChatViewProps> = ({
             return { ...prev, [chatId]: merged, [selectedOtherUid]: merged };
           });
         }
+      } else if (attempt === 0) {
+        retryTimer = window.setTimeout(() => {
+          if (!cancelled) void loadConversationMessages(1);
+        }, 1200);
+      } else {
+        setLoadedMessagesByChat((prev) => ({ ...prev, [chatId]: true }));
       }
-    });
+    };
+
+    void loadConversationMessages(0);
 
     return () => {
       cancelled = true;
+      if (retryTimer !== null) window.clearTimeout(retryTimer);
+      stopAiReplyPolling();
     };
-  }, [apiFetchJson, chatView, myActiveUid, selectedOtherUid]);
+  }, [apiFetchJson, chatView, myActiveUid, selectedOtherUid, stopAiReplyPolling]);
 
   // Countdown tick for female diamond unlock timer
   useEffect(() => {
@@ -800,7 +854,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
   const otherUid = selectedChatUser?.uid || selectedChatUser?.id;
   const activeChatId = myUid && otherUid ? buildCanonicalChatId(myUid, otherUid) : '';
   const isFriendActive = Boolean(activeChatId && chatFriendships[activeChatId]);
-  const isAIBotChat = otherUid === ALOV_AI_USER.uid || otherUid === 'user_kamola_006' || otherUid === 'ALOV-006';
+  const isAIBotChat = isAiBotIdentifier(otherUid);
   const isSenderCharged = canChargeForMessage({
     senderGender: effectiveUser?.gender,
     isAIBot: isAIBotChat,
@@ -986,7 +1040,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
     forceScrollToBottomRef.current = true;
 
     const targetId = selectedChatUser.uid || selectedChatUser.id;
-    const isAIBot = targetId === ALOV_AI_USER.uid;
+    const isAIBot = isAiBotIdentifier(targetId);
     const chatId = buildCanonicalChatId(uidNow, targetId);
     const msgId = generateUniqueMessageId('msg');
 
@@ -1098,6 +1152,49 @@ export const ChatView: React.FC<ChatViewProps> = ({
       }
     };
 
+    const startAiReplyPolling = () => {
+      if (!isAIBot || (msgObj?.type && msgObj.type !== 'text')) return;
+      stopAiReplyPolling();
+      const sentAtMs = new Date(msgObj.createdAt || Date.now()).getTime() || Date.now();
+      let attempts = 0;
+
+      const pollOnce = async () => {
+        attempts += 1;
+        const data = await apiFetchJson(
+          `/api/chats/${encodeURIComponent(chatId)}/messages?viewerUid=${encodeURIComponent(uidNow)}`
+        );
+        if (data?.success && Array.isArray(data.messages)) {
+          setChatMessages((prev) => {
+            const merged = mergeUniqueChatMessages(data.messages, prev[chatId], prev[targetId]);
+            return { ...prev, [chatId]: merged, [targetId]: merged };
+          });
+          const hasAiReply = data.messages.some((m: any) => {
+            if (!m || !isAiBotIdentifier(m.senderId)) return false;
+            const t = new Date(m.createdAt || 0).getTime() || 0;
+            return t >= sentAtMs - 1000 || String(m.id || '').startsWith('ai_');
+          });
+          if (hasAiReply) {
+            stopAiReplyPolling();
+            setIsAiTyping(false);
+            void refreshChatsFromServer();
+            return;
+          }
+        }
+        if (attempts >= 12) {
+          stopAiReplyPolling();
+          setIsAiTyping(false);
+        }
+      };
+
+      aiReplyPollTimerRef.current = window.setInterval(() => {
+        void pollOnce();
+      }, 1000);
+      aiReplyTimeoutRef.current = window.setTimeout(() => {
+        stopAiReplyPolling();
+        setIsAiTyping(false);
+      }, 15000);
+    };
+
     const sendViaHttpFallback = async () => {
       const httpRes = await apiFetchJson('/api/chats/send', {
         method: 'POST',
@@ -1114,6 +1211,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
         if (httpRes.sender) {
           setBridgeUser((prev: any) => ({ ...(prev || {}), ...httpRes.sender }));
         }
+        startAiReplyPolling();
         return true;
       }
       if (
@@ -1125,7 +1223,10 @@ export const ChatView: React.FC<ChatViewProps> = ({
         return false;
       }
       updateStatusForId('failed');
-      if (isAIBot) setIsAiTyping(false);
+      if (isAIBot) {
+        stopAiReplyPolling();
+        setIsAiTyping(false);
+      }
       notifyParentOrToast("Xabar yuborilmadi. Qayta urinib ko'ring.");
       return false;
     };
@@ -1155,6 +1256,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
         }
         if (ack && (ack.status === 'sent' || ack.success)) {
           updateStatusForId('sent');
+          startAiReplyPolling();
         } else {
           void sendViaHttpFallback();
         }
@@ -1167,7 +1269,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
     const targetId = selectedChatUser?.uid || selectedChatUser?.id;
     if (!uidNow || !targetId || !failedMsg?.id) return;
     const chatId = buildCanonicalChatId(uidNow, targetId);
-    const isAIBot = targetId === ALOV_AI_USER.uid;
+    const isAIBot = isAiBotIdentifier(targetId);
     setChatMessages((prev) => {
       const next = { ...prev };
       Object.keys(next).forEach((k) => {
@@ -1177,7 +1279,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
       });
       return next;
     });
-    if (isAIBot && failedMsg.type === 'text') setIsAiTyping(true);
+    if (isAIBot && (!failedMsg.type || failedMsg.type === 'text')) setIsAiTyping(true);
     await deliverMessageToServer({ ...failedMsg, status: 'sending' }, chatId, uidNow, targetId, isAIBot);
   };
 

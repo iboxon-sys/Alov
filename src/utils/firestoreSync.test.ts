@@ -239,5 +239,41 @@ describe('Firestore persistent sync & non-destructive merge helpers', () => {
     assert.equal(adminPatch.privatePatch.email, 'aliyax@example.com');
     assert.equal(adminPatch.privatePatch.bankCard, '8600 1111 2222 3333');
   });
-});
 
+  it('omits unchanged fields and redundant isProfileCompleted while preserving relative media URLs with query params', () => {
+    const existing = {
+      uid: 'u_diff_1',
+      name: 'Dilnoza',
+      username: 'dilnoza_uz',
+      bio: 'Eski bio',
+      avatar: '/api/media/avatar.jpg?v=2',
+      banner: '/api/media/banner.jpg?v=1',
+      videoUrl: '/api/media/video.mp4',
+      startGifUrl: 'https://static.klipy.com/wave.gif',
+      isProfileCompleted: true,
+      gender: 'female',
+      age: 23,
+      birthDate: '2003-01-01',
+    };
+
+    const patch = buildFirestoreProfilePatch(existing, {
+      name: 'Dilnoza',
+      username: 'dilnoza_uz',
+      bio: 'Yangi bio',
+      avatar: '/api/media/avatar.jpg?v=2',
+      banner: '/api/media/banner.jpg?v=3',
+      videoUrl: '/api/media/video.mp4',
+      startGifUrl: 'https://static.klipy.com/wave.gif',
+      isProfileCompleted: true,
+    });
+
+    assert.equal('name' in patch.userPatch, false);
+    assert.equal('username' in patch.userPatch, false);
+    assert.equal('avatar' in patch.userPatch, false);
+    assert.equal('videoUrl' in patch.userPatch, false);
+    assert.equal('startGifUrl' in patch.userPatch, false);
+    assert.equal('isProfileCompleted' in patch.userPatch, false);
+    assert.equal(patch.userPatch.bio, 'Yangi bio');
+    assert.equal(patch.userPatch.banner, '/api/media/banner.jpg?v=3');
+  });
+});

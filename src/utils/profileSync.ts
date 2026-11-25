@@ -875,3 +875,93 @@ export function writeAuthoritativeUserCache(
   }
 }
 
+function normalizeComparableProfileValue(key: string, val: unknown): unknown {
+  if (val === undefined || val === null) return '';
+  if (typeof val === 'string') return val.trim();
+  if (typeof val === 'boolean' || typeof val === 'number') return val;
+  if (key === 'location' && typeof val === 'object') {
+    const lat = Number((val as any).lat);
+    const lng = Number((val as any).lng);
+    if (!Number.isFinite(lat) || !Number.isFinite(lng)) return '';
+    return `${lat.toFixed(6)},${lng.toFixed(6)}`;
+  }
+  try {
+    return JSON.stringify(val);
+  } catch {
+    return String(val);
+  }
+}
+
+export function buildIncrementalProfilePatch(
+  existingUser: Record<string, any> | null | undefined,
+  nextValues: Record<string, any>,
+  options: { isAdminActor?: boolean; replaceInitialAvatar?: boolean } = {}
+): Record<string, any> {
+  const existing = existingUser && typeof existingUser === 'object' ? existingUser : {};
+  const next = nextValues && typeof nextValues === 'object' ? nextValues : {};
+  const patch: Record<string, any> = {};
+
+  const isLocked = Boolean(existing.isProfileCompleted === true) && !options.isAdminActor;
+
+  const candidateKeys = [
+    'name',
+    'username',
+    'region',
+    'district',
+    'neighborhood',
+    'phone',
+    'telegram',
+    'instagram',
+    'bio',
+    'avatar',
+    'banner',
+    'videoUrl',
+    'startGifUrl',
+    'hasCustomAvatar',
+    'locationVisibility',
+    'isLocationEnabled',
+    'location',
+    'faceId',
+    'isOnline',
+  ];
+
+  if (!isLocked) {
+    candidateKeys.push('gender', 'birthDate', 'age');
+  }
+
+  for (const key of candidateKeys) {
+    if (next[key] === undefined) continue;
+    const prevNorm = normalizeComparableProfileValue(key, existing[key]);
+    const nextNorm = normalizeComparableProfileValue(key, next[key]);
+    if (prevNorm !== nextNorm) {
+      patch[key] = next[key] === null ? '' : next[key];
+    }
+  }
+
+  if (patch.name !== undefined && isExplicitProfileDisplayName(String(patch.name))) {
+    const cleanName = String(patch.name).trim();
+    patch.name = cleanName;
+    patch.firstName = cleanName;
+    patch.first_name = cleanName;
+    patch.lastName = '';
+    patch.last_name = '';
+  }
+
+  if (patch.avatar !== undefined && !isPlaceholderAvatar(patch.avatar)) {
+    const cleanAvatar = String(patch.avatar || '').trim();
+    patch.photoURL = cleanAvatar && !cleanAvatar.startsWith('data:') ? cleanAvatar : '';
+  }
+
+  if (!existing.isProfileCompleted && next.isProfileCompleted === true) {
+    patch.isProfileCompleted = true;
+  }
+
+  if (options.replaceInitialAvatar) {
+    patch.replaceInitialAvatar = true;
+  }
+
+  patch.isProfileEdit = true;
+  patch.hasEditedProfile = true;
+
+  return patch;
+}

@@ -84,13 +84,13 @@ export function enterTelegramMiniAppFullscreen(
 ): { expanded: boolean; fullscreenRequested: boolean } {
   if (!tg) return { expanded: false, fullscreenRequested: false };
   let expanded = false;
-  let fullscreenRequested = false;
   const canSwipeLock =
     typeof tg.isVersionAtLeast === 'function' ? tg.isVersionAtLeast('7.7') : true;
-  const canFullscreen =
-    typeof tg.isVersionAtLeast === 'function' ? tg.isVersionAtLeast('8.0') : true;
   try {
     tg.ready?.();
+    if (tg.isFullscreen && typeof tg.exitFullscreen === 'function') {
+      tg.exitFullscreen();
+    }
     if (typeof tg.expand === 'function') {
       tg.expand();
       expanded = true;
@@ -98,14 +98,10 @@ export function enterTelegramMiniAppFullscreen(
     if (canSwipeLock && typeof tg.disableVerticalSwipes === 'function') {
       tg.disableVerticalSwipes();
     }
-    if (canFullscreen && typeof tg.requestFullscreen === 'function' && !tg.isFullscreen) {
-      tg.requestFullscreen();
-      fullscreenRequested = true;
-    }
   } catch {
-    // Older Telegram clients may throw on requestFullscreen/disableVerticalSwipes
+    // Older Telegram clients may throw on exitFullscreen/disableVerticalSwipes
   }
-  return { expanded, fullscreenRequested };
+  return { expanded, fullscreenRequested: false };
 }
 
 export function applyTelegramWebAppTheme(
@@ -115,16 +111,14 @@ export function applyTelegramWebAppTheme(
   if (!tg) return false;
   const canSwipeLock =
     typeof tg.isVersionAtLeast === 'function' ? tg.isVersionAtLeast('7.7') : true;
-  const canFullscreen =
-    typeof tg.isVersionAtLeast === 'function' ? tg.isVersionAtLeast('8.0') : true;
   try {
     tg.ready?.();
+    if (tg.isFullscreen && typeof tg.exitFullscreen === 'function') {
+      tg.exitFullscreen();
+    }
     tg.expand?.();
     if (canSwipeLock && typeof tg.disableVerticalSwipes === 'function') {
       tg.disableVerticalSwipes();
-    }
-    if (canFullscreen && typeof tg.requestFullscreen === 'function' && !tg.isFullscreen) {
-      tg.requestFullscreen();
     }
     const bgHex = isDark ? '#09090D' : '#FDFBF9';
     const bottomHex = isDark ? '#111218' : '#FFFFFF';

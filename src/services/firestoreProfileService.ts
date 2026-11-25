@@ -280,6 +280,36 @@ export async function updateExistingUserInFirestore(
     { isInitialCreate: false }
   );
 
+  // Backfill any newer required schema keys missing on older Firestore documents so isValidUser passes
+  if (splitFull) {
+    const backfillAllowedKeys = [
+      'name',
+      'username',
+      'region',
+      'district',
+      'neighborhood',
+      'telegram',
+      'instagram',
+      'bio',
+      'avatar',
+      'banner',
+      'videoUrl',
+      'startGifUrl',
+      'hasCustomAvatar',
+      'hasEditedProfile',
+      'isVerified',
+      'locationVisibility',
+      'isLocationEnabled',
+      'isOnline',
+      'status',
+    ] as const;
+    for (const k of backfillAllowedKeys) {
+      if (resolvedExisting[k] === undefined && (splitFull.userDoc as any)[k] !== undefined) {
+        userPatch[k] = (splitFull.userDoc as any)[k];
+      }
+    }
+  }
+
   const ops: Promise<any>[] = [];
 
   if (Object.keys(userPatch).length > 0) {
@@ -302,15 +332,23 @@ export async function updateExistingUserInFirestore(
     const pubRef = doc(db, 'public_profiles', uid);
     ops.push(
       getDoc(pubRef)
-        .then((snap) =>
-          snap.exists()
-            ? updateDoc(pubRef, { ...publicPatch, updatedAt: serverTimestamp() })
-            : setDoc(pubRef, {
-                ...splitFull.publicProfileDoc,
-                createdAt: serverTimestamp(),
-                updatedAt: serverTimestamp(),
-              })
-        )
+        .then((snap) => {
+          if (!snap.exists()) {
+            return setDoc(pubRef, {
+              ...splitFull.publicProfileDoc,
+              createdAt: serverTimestamp(),
+              updatedAt: serverTimestamp(),
+            });
+          }
+          const existingPub = snap.data() || {};
+          const mergedPublicPatch: Record<string, any> = { ...publicPatch };
+          for (const [pk, pv] of Object.entries(splitFull.publicProfileDoc)) {
+            if (pk !== 'uid' && pk !== 'id' && existingPub[pk] === undefined && pv !== undefined) {
+              mergedPublicPatch[pk] = pv;
+            }
+          }
+          return updateDoc(pubRef, { ...mergedPublicPatch, updatedAt: serverTimestamp() });
+        })
         .catch((err) => {
           if (isPermissionDeniedError(err)) handleFirestoreError(err, OperationType.WRITE, `public_profiles/${uid}`);
         })

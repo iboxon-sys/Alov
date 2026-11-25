@@ -90,6 +90,7 @@ import { validateUsername, isUsernameUnique, formatUsernameDisplay } from './uti
 import { formatPhoneNumberPretty } from './utils/phone';
 import { shouldEnableCaptureProtection, isCaptureShortcutEvent } from './utils/captureProtection';
 import {
+  buildIncrementalProfilePatch,
   calculateAgeFromBirthDate,
   deriveBirthDateFromAge,
   mergeAuthoritativeUserState,
@@ -371,6 +372,10 @@ export default function App() {
   const [isLoggingIn, setIsLoggingIn] = useState<boolean>(false);
   const [showAuthModal, setShowAuthModal] = useState(false);
   const [showProfileModal, setShowProfileModal] = useState(false);
+  const showProfileModalRef = useRef(false);
+  useEffect(() => {
+    showProfileModalRef.current = showProfileModal;
+  }, [showProfileModal]);
   const [errorMsg, setErrorMsg] = useState('');
   const [authMode, setAuthMode] = useState<'login' | 'register' | 'register_face_id' | 'google_face_id' | 'google_setup' | 'telegram'>('login');
   const [authOrigin, setAuthOrigin] = useState<'google' | 'telegram' | 'email'>('email');
@@ -938,29 +943,34 @@ export default function App() {
     );
     if (!syncedUser) return null;
 
-    const userBdate = syncedUser.birthDate || '2002-05-15';
-    setRegBirthDate(userBdate);
-    setRegName(getSafeUserDisplayName(syncedUser, syncedUser.name || ''));
-    setRegUsername(syncedUser.username || '');
-    setRegAge(String(calculateAge(userBdate, syncedUser.age || 22)));
-    setRegGender(
-      syncedUser.isProfileCompleted && (syncedUser.gender === 'male' || syncedUser.gender === 'female')
-        ? syncedUser.gender
-        : ''
+    const isEditingSameProfile = Boolean(
+      showProfileModalRef.current && currentUserRef.current?.uid === syncedUser.uid
     );
-    setRegRegion(syncedUser.region || 'Toshkent shahri');
-    setRegDistrict(syncedUser.district || 'Yunusobod tumani');
-    setRegNeighborhood(syncedUser.neighborhood || '');
-    setRegPhone(formatPhoneNumberPretty(syncedUser.phone || '+998 '));
-    setRegTelegram(syncedUser.telegram || '');
-    setRegInstagram(syncedUser.instagram || '');
-    setRegBio(syncedUser.bio || '');
-    setRegAvatar(resolveEffectiveProfileAvatar(syncedUser));
-    setRegBanner(syncedUser.banner || '');
-    setRegVideoUrl(syncedUser.videoUrl || '');
-    setRegStartGifUrl(syncedUser.startGifUrl || '');
-    setRegLocationVisibility(syncedUser.locationVisibility || 'everyone');
-    setIsLocationEnabled(syncedUser.isLocationEnabled !== false && syncedUser.locationVisibility !== 'ghost');
+    if (!isEditingSameProfile) {
+      const userBdate = syncedUser.birthDate || '2002-05-15';
+      setRegBirthDate(userBdate);
+      setRegName(getSafeUserDisplayName(syncedUser, syncedUser.name || ''));
+      setRegUsername(syncedUser.username || '');
+      setRegAge(String(calculateAge(userBdate, syncedUser.age || 22)));
+      setRegGender(
+        syncedUser.isProfileCompleted && (syncedUser.gender === 'male' || syncedUser.gender === 'female')
+          ? syncedUser.gender
+          : ''
+      );
+      setRegRegion(syncedUser.region || 'Toshkent shahri');
+      setRegDistrict(syncedUser.district || 'Yunusobod tumani');
+      setRegNeighborhood(syncedUser.neighborhood || '');
+      setRegPhone(formatPhoneNumberPretty(syncedUser.phone || '+998 '));
+      setRegTelegram(syncedUser.telegram || '');
+      setRegInstagram(syncedUser.instagram || '');
+      setRegBio(syncedUser.bio || '');
+      setRegAvatar(resolveEffectiveProfileAvatar(syncedUser));
+      setRegBanner(syncedUser.banner || '');
+      setRegVideoUrl(syncedUser.videoUrl || '');
+      setRegStartGifUrl(syncedUser.startGifUrl || '');
+      setRegLocationVisibility(syncedUser.locationVisibility || 'everyone');
+      setIsLocationEnabled(syncedUser.isLocationEnabled !== false && syncedUser.locationVisibility !== 'ghost');
+    }
 
     isProfileHydratedRef.current = true;
     setCurrentUser(syncedUser);
@@ -974,11 +984,35 @@ export default function App() {
     return syncedUser;
   }, []);
 
-  // Version-aware Session Restore on App Mount: clears stale caches on version bump while loading DB before rendering state
+  // Version-aware Session Restore on App Mount: clears stale caches on version bump while recovering from Render & Firestore
   useEffect(() => {
     let cancelled = false;
     const restoreSession = async () => {
       try {
+        // Read backup profile BEFORE version reconciliation removes stale alov_current_user cache
+        let preBumpCached: any = null;
+        try {
+          const preservedIdPre = String(
+            localStorage.getItem('alov_user_id') || localStorage.getItem('userId') || ''
+          ).trim();
+          const rawBackup =
+            localStorage.getItem('alov_current_user') ||
+            (preservedIdPre ? localStorage.getItem(`alov_user_${preservedIdPre}`) : null);
+          if (rawBackup) {
+            const parsedBackup = JSON.parse(rawBackup);
+            if (parsedBackup && canPersistUserProfile(parsedBackup) && !requiresFaceIdForUser(parsedBackup)) {
+              const isTg = Boolean(parsedBackup.uid?.startsWith('tg_') || parsedBackup.telegramChatId || parsedBackup.telegram);
+              preBumpCached = isTg
+                ? {
+                    ...parsedBackup,
+                    name: getSafeUserDisplayName(parsedBackup, ''),
+                    avatar: resolveEffectiveProfileAvatar(parsedBackup),
+                  }
+                : parsedBackup;
+            }
+          }
+        } catch {}
+
         const versionState = reconcileAppVersionCache(localStorage, APP_VERSION);
         if (versionState.versionChanged && typeof window !== 'undefined') {
           if ('caches' in window && window.caches) {
@@ -993,7 +1027,7 @@ export default function App() {
           }
         }
 
-        let parsedCached: any = null;
+        let parsedCached: any = preBumpCached;
         try {
           const cached = localStorage.getItem('alov_current_user');
           if (cached) {
@@ -1053,8 +1087,8 @@ export default function App() {
         const [firestoreUser, backendOutcome] = await Promise.all([firestorePromise, backendPromise]);
         if (cancelled) return;
 
-        const backendRes = backendOutcome.res;
-        const backendUser = backendRes?.success && (backendRes?.exists || backendRes?.user) ? backendRes.user : null;
+        let backendRes = backendOutcome.res;
+        let backendUser = backendRes?.success && (backendRes?.exists || backendRes?.user) ? backendRes.user : null;
 
         let mergedUser = mergeDbAuthoritativeProfile({
           firestoreUser,
@@ -1062,17 +1096,26 @@ export default function App() {
           cachedUser: parsedCached,
         });
 
-        // Re-hydrate Express backend from Firestore if backend restarted clean on deploy while Firestore has the user
-        if (firestoreUser && canPersistUserProfile(firestoreUser) && !backendUser && !backendOutcome.networkFailed) {
+        // Re-hydrate Express backend from Firestore (or pre-bump completed backup if Render restarted clean)
+        const rehydrateSource =
+          firestoreUser && canPersistUserProfile(firestoreUser)
+            ? (mergedUser || firestoreUser)
+            : !backendUser && !backendOutcome.networkFailed && backendRes?.deleted !== true && parsedCached && canPersistUserProfile(parsedCached)
+              ? parsedCached
+              : null;
+
+        if (rehydrateSource && !backendUser && !backendOutcome.networkFailed && backendRes?.deleted !== true) {
           try {
             const rehydrateRes = await safeFetchJson(getApiUrl('/api/users/sync'), {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({
-                user: { ...(mergedUser || firestoreUser), rehydrateFromExternalDb: true },
+                user: { ...rehydrateSource, rehydrateFromExternalDb: true },
               }),
             });
             if (rehydrateRes?.success && rehydrateRes?.user) {
+              backendRes = rehydrateRes;
+              backendUser = rehydrateRes.user;
               mergedUser = mergeDbAuthoritativeProfile({
                 firestoreUser,
                 backendUser: rehydrateRes.user,
@@ -1082,9 +1125,10 @@ export default function App() {
           } catch {}
         }
 
-        // Backfill Firestore once if backend has user and Firestore didn't yet
-        if (backendUser && canPersistUserProfile(backendUser) && !firestoreUser && targetUid && auth.currentUser?.uid === targetUid) {
-          void saveOrBackfillUserInFirestore(mergedUser || backendUser);
+        // Backfill Firestore once if backend/rehydrated user exists and Firestore didn't yet
+        const authoritativeForBackfill = mergedUser || backendUser;
+        if (authoritativeForBackfill && canPersistUserProfile(authoritativeForBackfill) && !firestoreUser && targetUid && auth.currentUser?.uid === targetUid) {
+          void saveOrBackfillUserInFirestore(authoritativeForBackfill);
         }
 
         const preservation = shouldPreserveLocalSessionOnSyncResult({
@@ -1109,8 +1153,8 @@ export default function App() {
           isProfileHydratedRef.current = false;
           setCurrentUser(null);
           setActiveTab('landing');
-        } else if (!auth.currentUser) {
-          // Backend has no record and no Firestore user — clear stale snapshot only if not Firebase-authenticated
+        } else if (!auth.currentUser && !(parsedCached && canPersistUserProfile(parsedCached) && !requiresFaceIdForUser(parsedCached))) {
+          // Only clear if there is truly no valid completed session
           try {
             localStorage.removeItem('alov_current_user');
             if (targetUid) localStorage.removeItem('alov_user_' + targetUid);
@@ -1118,6 +1162,9 @@ export default function App() {
           } catch {}
           isProfileHydratedRef.current = false;
           setCurrentUser(null);
+        } else if (parsedCached && canPersistUserProfile(parsedCached) && !requiresFaceIdForUser(parsedCached)) {
+          applyAuthoritativeUserSession(parsedCached, versionState.preservedToken);
+          setActiveTab((prev) => (prev === 'landing' ? 'discover' : prev));
         }
       } catch (e) {
         // Resilient fallback
@@ -2629,12 +2676,8 @@ export default function App() {
           })()
         : currentUser?.faceId;
 
-      const profileEditPayload = {
+      const profileEditValues = {
         name: trimmedName,
-        firstName: trimmedName,
-        first_name: trimmedName,
-        lastName: '',
-        last_name: '',
         username: finalUsername,
         birthDate: lockedBirthDate,
         age: computedAge,
@@ -2648,7 +2691,6 @@ export default function App() {
         bio: regBio.trim(),
         hasCustomAvatar,
         avatar: resolvedSavedAvatar,
-        photoURL: resolvedSavedAvatar && !resolvedSavedAvatar.startsWith('data:') ? resolvedSavedAvatar : '',
         banner: resolvedBannerValue,
         videoUrl: resolvedVideoValue,
         startGifUrl: resolvedStartGifValue,
@@ -2658,27 +2700,45 @@ export default function App() {
         locationVisibility: regLocationVisibility,
         location: userCoords,
         isProfileCompleted: true,
-        isProfileEdit: true,
-        replaceInitialAvatar,
-        hasEditedProfile: true,
       };
+
+      const incrementalPatch = currentUser?.isProfileCompleted
+        ? buildIncrementalProfilePatch(currentUser, profileEditValues, {
+            isAdminActor: isCurrentUserAdmin,
+            replaceInitialAvatar,
+          })
+        : {
+            ...profileEditValues,
+            firstName: trimmedName,
+            first_name: trimmedName,
+            lastName: '',
+            last_name: '',
+            photoURL: resolvedSavedAvatar && !resolvedSavedAvatar.startsWith('data:') ? resolvedSavedAvatar : '',
+            isProfileEdit: true,
+            replaceInitialAvatar,
+            hasEditedProfile: true,
+          };
 
       const newUserData = {
         ...currentUser,
         id: currentUser?.id || `ALOV-${activeUid.slice(0, 5).toUpperCase()}`,
         uid: activeUid,
-        ...profileEditPayload,
+        ...incrementalPatch,
         followersCount: currentUser?.followersCount ?? 0,
         followingCount: currentUser?.followingCount ?? 0,
         likesCount: currentUser?.likesCount ?? 0,
       };
 
-      // Update the existing account strictly in-place first (never creating a duplicate account)
+      // Update ONLY changed fields in-place on Render (never overwriting full profile structure)
       let data = currentUser?.isProfileCompleted
         ? await safeFetchJson(getApiUrl('/api/users/update'), {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ uid: activeUid, updates: profileEditPayload }),
+            body: JSON.stringify({
+              uid: activeUid,
+              updates: incrementalPatch,
+              fallbackProfile: newUserData,
+            }),
           }).catch(() => null)
         : null;
 
@@ -2686,7 +2746,12 @@ export default function App() {
         data = await safeFetchJson(getApiUrl('/api/users/sync'), {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ user: newUserData }),
+          body: JSON.stringify({
+            user: {
+              ...newUserData,
+              ...(currentUser?.isProfileCompleted ? { rehydrateFromExternalDb: true } : {}),
+            },
+          }),
         });
       }
 
@@ -2710,23 +2775,27 @@ export default function App() {
         }).catch(() => {});
       }
 
-      // Persist to Firestore (non-destructive merge/update only for changed profile fields)
+      // Persist ONLY changed fields to Firestore (non-destructive partial patch)
       if (!currentUser?.isProfileCompleted) {
-        await saveOrBackfillUserInFirestore(savedUser, { isAdminActor: isCurrentUserAdmin }).catch(() => {});
+        await saveOrBackfillUserInFirestore(savedUser, { isAdminActor: isCurrentUserAdmin }).catch((err) => {
+          console.warn('Firestore initial profile save warning:', err);
+        });
       } else {
         await updateExistingUserInFirestore(
           activeUid,
           {
-            ...profileEditPayload,
-            avatar: savedUser.avatar,
-            banner: savedUser.banner,
-            videoUrl: savedUser.videoUrl,
-            startGifUrl: savedUser.startGifUrl,
-            ...(savedUser.faceId ? { faceId: savedUser.faceId } : {}),
+            ...incrementalPatch,
+            ...(incrementalPatch.avatar !== undefined ? { avatar: savedUser.avatar } : {}),
+            ...(incrementalPatch.banner !== undefined ? { banner: savedUser.banner } : {}),
+            ...(incrementalPatch.videoUrl !== undefined ? { videoUrl: savedUser.videoUrl } : {}),
+            ...(incrementalPatch.startGifUrl !== undefined ? { startGifUrl: savedUser.startGifUrl } : {}),
+            ...(incrementalPatch.faceId !== undefined && savedUser.faceId ? { faceId: savedUser.faceId } : {}),
           },
           currentUser,
           { isAdminActor: isCurrentUserAdmin }
-        ).catch(() => {});
+        ).catch((err) => {
+          console.warn('Firestore incremental profile update warning:', err);
+        });
       }
 
       isProfileHydratedRef.current = true;

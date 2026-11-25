@@ -68,7 +68,7 @@ describe('Telegram WebApp & Web dual-mode helpers', () => {
     assert.equal(extractTelegramWebAppProfile(null), null);
   });
 
-  it('requests Telegram Mini App fullscreen automatically when supported', () => {
+  it('never requests Telegram Mini App fullscreen and exits fullscreen if already active', () => {
     const calls: string[] = [];
     const res = enterTelegramMiniAppFullscreen({
       isFullscreen: false,
@@ -76,17 +76,33 @@ describe('Telegram WebApp & Web dual-mode helpers', () => {
       expand: () => calls.push('expand'),
       disableVerticalSwipes: () => calls.push('disableVerticalSwipes'),
       requestFullscreen: () => calls.push('requestFullscreen'),
+      exitFullscreen: () => calls.push('exitFullscreen'),
     });
 
-    assert.deepEqual(res, { expanded: true, fullscreenRequested: true });
-    assert.deepEqual(calls, ['ready', 'expand', 'disableVerticalSwipes', 'requestFullscreen']);
+    assert.deepEqual(res, { expanded: true, fullscreenRequested: false });
+    assert.deepEqual(calls, ['ready', 'expand', 'disableVerticalSwipes']);
+    assert.equal(calls.includes('requestFullscreen'), false);
+
+    const activeCalls: string[] = [];
+    const themeOk = applyTelegramWebAppTheme({
+      isFullscreen: true,
+      ready: () => activeCalls.push('ready'),
+      expand: () => activeCalls.push('expand'),
+      disableVerticalSwipes: () => activeCalls.push('disableVerticalSwipes'),
+      requestFullscreen: () => activeCalls.push('requestFullscreen'),
+      exitFullscreen: () => activeCalls.push('exitFullscreen'),
+    }, true);
+    assert.equal(themeOk, true);
+    assert.deepEqual(activeCalls, ['ready', 'exitFullscreen', 'expand', 'disableVerticalSwipes']);
+    assert.equal(activeCalls.includes('requestFullscreen'), false);
+
     assert.deepEqual(enterTelegramMiniAppFullscreen(null), {
       expanded: false,
       fullscreenRequested: false,
     });
   });
 
-  it('skips requestFullscreen and disableVerticalSwipes on older Telegram SDK versions (e.g. 6.0)', () => {
+  it('skips disableVerticalSwipes on older Telegram SDK versions (e.g. 6.0) without requesting fullscreen', () => {
     const calls: string[] = [];
     const res = enterTelegramMiniAppFullscreen({
       version: '6.0',

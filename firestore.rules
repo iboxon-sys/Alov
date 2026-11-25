@@ -46,7 +46,7 @@ service cloud.firestore {
     function isValidMediaUrl(val) {
       return val is string
         && val.size() <= 1000
-        && (val.size() == 0 || val.matches('^https://.*') || val.matches('^http://localhost(:[0-9]+)?/.*') || val.matches('^/[a-zA-Z0-9_\\-./]+$'));
+        && (val.size() == 0 || val.matches('^https://.*') || val.matches('^http://(localhost|127\\.0\\.0\\.1)(:[0-9]+)?/.*') || val.matches('^/[a-zA-Z0-9_\\-./]+(\\?[a-zA-Z0-9_\\-=&.%]+)?$'));
     }
 
     function isValidLocationMap(loc) {
@@ -371,7 +371,7 @@ service cloud.firestore {
             && incoming().diff(existing()).affectedKeys().hasOnly([
               'name', 'username', 'region', 'district', 'neighborhood',
               'telegram', 'instagram', 'bio', 'avatar', 'banner', 'videoUrl', 'startGifUrl',
-              'hasCustomAvatar', 'hasEditedProfile', 'isVerified',
+              'hasCustomAvatar', 'hasEditedProfile', 'isProfileCompleted', 'isVerified',
               'locationVisibility', 'isLocationEnabled', 'location', 'faceId',
               'isOnline', 'status', 'updatedAt'
             ])

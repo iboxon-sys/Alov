@@ -1,6 +1,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import {
+  buildIncrementalProfilePatch,
   buildUpdatedUserSnapshot,
   calculateAgeFromBirthDate,
   collectReplacedUserMediaUrls,
@@ -441,6 +442,62 @@ describe('Profile persistence, identity deduplication & DB propagation', () => {
     assert.equal(stores.userChats.c1.partner.gender, 'female');
     assert.equal(stores.userChats.c1.partner.age, 27);
   });
+
+  it('builds incremental profile patches containing only changed fields while preserving untouched media, coins, and locked fields', () => {
+    const existing = {
+      uid: 'u_inc_1',
+      name: 'Jasur',
+      username: 'jasur_01',
+      bio: 'Eski bio',
+      avatar: '/api/media/avatar.jpg',
+      banner: '/api/media/banner.jpg',
+      videoUrl: '/api/media/video.mp4',
+      startGifUrl: 'https://static.klipy.com/hi.gif',
+      region: 'Toshkent shahri',
+      district: 'Yunusobod tumani',
+      gender: 'male',
+      age: 25,
+      birthDate: '2001-01-01',
+      coins: 500,
+      diamonds: 12,
+      isProfileCompleted: true,
+    };
+
+    const patch = buildIncrementalProfilePatch(existing, {
+      name: 'Jasur',
+      username: 'jasur_01',
+      bio: 'Yangi bio',
+      avatar: '/api/media/avatar.jpg',
+      banner: '/api/media/banner.jpg',
+      videoUrl: '/api/media/video.mp4',
+      startGifUrl: 'https://static.klipy.com/hi.gif',
+      region: 'Toshkent shahri',
+      district: 'Yunusobod tumani',
+      gender: 'female',
+      age: 30,
+      birthDate: '1996-01-01',
+      isProfileCompleted: true,
+    });
+
+    assert.equal(patch.bio, 'Yangi bio');
+    assert.equal(patch.isProfileEdit, true);
+    assert.equal(patch.hasEditedProfile, true);
+    assert.equal('name' in patch, false);
+    assert.equal('avatar' in patch, false);
+    assert.equal('banner' in patch, false);
+    assert.equal('videoUrl' in patch, false);
+    assert.equal('gender' in patch, false);
+    assert.equal('age' in patch, false);
+    assert.equal('coins' in patch, false);
+    assert.equal('isProfileCompleted' in patch, false);
+
+    const applied = buildUpdatedUserSnapshot(existing, patch, { isProfileEdit: true });
+    assert.equal(applied.bio, 'Yangi bio');
+    assert.equal(applied.avatar, '/api/media/avatar.jpg');
+    assert.equal(applied.banner, '/api/media/banner.jpg');
+    assert.equal(applied.videoUrl, '/api/media/video.mp4');
+    assert.equal(applied.coins, 500);
+    assert.equal(applied.diamonds, 12);
+    assert.equal(applied.gender, 'male');
+  });
 });
-
-

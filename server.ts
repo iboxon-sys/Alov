@@ -2819,11 +2819,83 @@ async function startServer() {
     }
   });
 
-  // Alov AI - Romantic and Friendly Persona API
+  const callGroqWithFallbacks = async (params: {
+    apiKey: string;
+    systemInstruction: string;
+    messages: Array<{ role: 'user' | 'assistant'; content: string }>;
+    jsonMode: boolean;
+    fewShotMessages?: Array<{ role: 'user' | 'assistant'; content: string }>;
+  }): Promise<string> => {
+    const preferredModel = String(process.env.GROQ_MODEL || 'openai/gpt-oss-120b').trim();
+    const candidateModels = Array.from(
+      new Set(
+        [preferredModel, 'openai/gpt-oss-120b', 'openai/gpt-oss-20b', 'qwen/qwen3.8-27b'].filter(Boolean)
+      )
+    );
+    let lastErr: any = null;
+
+    const sendGroqRequest = async (modelId: string, useJsonMode: boolean, useLowReasoning: boolean) => {
+      const bodyPayload: Record<string, any> = {
+        model: modelId,
+        temperature: 0.85,
+        top_p: 0.92,
+        max_tokens: 1800,
+        messages: [
+          { role: 'system', content: params.systemInstruction },
+          ...(params.fewShotMessages || []),
+          ...params.messages,
+        ],
+      };
+      if (useLowReasoning && (modelId.includes('gpt-oss') || modelId.includes('qwen'))) {
+        bodyPayload.reasoning_effort = 'low';
+      }
+      if (useJsonMode) {
+        bodyPayload.response_format = { type: 'json_object' };
+      }
+      const groqRes = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${params.apiKey}`,
+        },
+        body: JSON.stringify(bodyPayload),
+      });
+      const groqData = await groqRes.json().catch(() => null);
+      const textOut = groqData?.choices?.[0]?.message?.content;
+      return {
+        ok: groqRes.ok,
+        status: groqRes.status,
+        textOut: typeof textOut === 'string' ? stripReasoningTags(textOut) : '',
+        errorMessage: groqData?.error?.message || `Groq HTTP ${groqRes.status}`,
+      };
+    };
+
+    for (const modelId of candidateModels) {
+      try {
+        let attempt = await sendGroqRequest(modelId, params.jsonMode, true);
+        if (!attempt.ok && attempt.status === 400) {
+          // Retry without reasoning_effort and/or without strict response_format if the model rejected them
+          attempt = await sendGroqRequest(modelId, false, false);
+        } else if ((!attempt.ok || !attempt.textOut) && params.jsonMode) {
+          attempt = await sendGroqRequest(modelId, false, true);
+        }
+        if (attempt.ok && attempt.textOut) {
+          return attempt.textOut;
+        }
+        lastErr = new Error(attempt.errorMessage);
+      } catch (e: any) {
+        lastErr = e;
+      }
+    }
+    throw lastErr || new Error("Groq AI bo'sh javob qaytardi");
+  };
+
+  // Alov AI - Human-like Conversational Persona API (Groq first, Gemini fallback)
   app.post('/api/ai/alov-respond', async (req, res) => {
     try {
       const { messages } = req.body;
-      
+      const safeMessages = Array.isArray(messages) ? messages : [];
+
       const systemInstruction = `Siz "Alov.uz" ilovasidagi Kamola Saidova ismli 24 yoshli, Andijon viloyati Asaka tumanidan bo'lgan ingliz tili o'qituvchisi, samimiy, tirishqoq va do'stona qizsiz.
 
 Suhbatlashish qoidalaringiz:
@@ -2834,9 +2906,28 @@ Suhbatlashish qoidalaringiz:
 2. TABIIY MULOQOT:
    - Xuddi Telegram yoki Instagram'da do'stingiz bilan gaplashayotgandek yengil, jonli va o'zbek tilidagi oddiy so'zlashuv uslubida javob bering.
    - Ketma-ket kelgan savollarga mantiqan to'g'ri bog'liq holda javob qaytaring, chatbot ekanligingiz umuman sezilib qolmasin.
-   - Hech qachon "Gemini", "AI" yoki "sun'iy intellekt" demang! Ismingiz so'ralsa: "Ismim Kamola Saidova, 24 yoshdaman, Andijon Asakadanman. Ingliz tili o'qituvchisiman 😊" deb javob bering.`;
+   - Hech qachon "Gemini", "Groq", "AI" yoki "sun'iy intellekt" demang! Ismingiz so'ralsa: "Ismim Kamola Saidova, 24 yoshdaman, Andijon Asakadanman. Ingliz tili o'qituvchisiman 😊" deb javob bering.`;
 
-      const contents = messages.map((m: any) => ({
+      const activeGroqKey = String(process.env.GROQ_API_KEY || '').trim();
+      if (activeGroqKey) {
+        const openAiMsgs = safeMessages.map((m: any) => ({
+          role: m.role === 'user' ? ('user' as const) : ('assistant' as const),
+          content: String(m.text || m.content || '').trim() || 'Salom',
+        }));
+        const groqReply = sanitizeHumanBotPhrases(
+          await callGroqWithFallbacks({
+            apiKey: activeGroqKey,
+            systemInstruction,
+            messages: openAiMsgs.length > 0 ? openAiMsgs : [{ role: 'user', content: 'Salom' }],
+            jsonMode: false,
+          })
+        );
+        if (groqReply) {
+          return res.json({ success: true, reply: groqReply });
+        }
+      }
+
+      const contents = safeMessages.map((m: any) => ({
         role: m.role === 'user' ? 'user' : 'model',
         parts: [{ text: m.text || m.content }]
       }));
@@ -2851,7 +2942,7 @@ Suhbatlashish qoidalaringiz:
 
       res.json({
         success: true,
-        reply: response.text || 'Salom! Yaxshi, rahmat. O\'zingizda nima gaplar? 😊'
+        reply: sanitizeHumanBotPhrases(response.text || '') || "Salom! Yaxshi, rahmat. O'zingizda nima gaplar? 😊"
       });
     } catch (err: any) {
       console.warn('Alov AI fallback active:', err.message);
@@ -3984,6 +4075,7 @@ Suhbatlashish qoidalaringiz:
         }
       }
 
+      const isRehydratingProfile = Boolean(user.rehydrateFromExternalDb === true);
       const incomingFaceIdUrl = user.faceId?.capturedPhotoUrl || '';
       const existingFaceIdUrl = existing.faceId?.capturedPhotoUrl || '';
       const faceIdAvatar = incomingFaceIdUrl || existingFaceIdUrl || '';
@@ -4176,7 +4268,9 @@ Suhbatlashish qoidalaringiz:
         : (
             customAvatarResolved ||
             faceIdAvatar ||
-            (isTelegramAccount && !isAdminAccount && !isAlreadyCompleted ? '' : fetchedAvatar) ||
+            (isTelegramAccount && !isAdminAccount && !isAlreadyCompleted && !isRehydratingProfile && user.isProfileCompleted !== true
+              ? ''
+              : fetchedAvatar) ||
             fallbackAvatar
           );
 
@@ -4269,11 +4363,21 @@ Suhbatlashish qoidalaringiz:
 
   app.post('/api/users/update', async (req, res) => {
     try {
-      const { uid, updates } = req.body;
+      const { uid, updates, fallbackProfile } = req.body;
       if (!uid || !updates) {
         return res.status(400).json({ error: 'uid and updates required' });
       }
-      const existing = findUserByUidOrId(String(uid));
+      let existing = findUserByUidOrId(String(uid));
+      if (!existing && fallbackProfile && typeof fallbackProfile === 'object') {
+        const candidateRehydrate = sanitizeUserProfileCollections({
+          ...fallbackProfile,
+          uid: String(fallbackProfile.uid || uid),
+        });
+        if (canPersistUserProfile(candidateRehydrate)) {
+          existing = candidateRehydrate;
+          usersStore.set(candidateRehydrate.uid, candidateRehydrate);
+        }
+      }
       if (existing) {
         const canonicalUid = existing.uid;
         const IMMUTABLE_OR_WALLET_UPDATE_KEYS = new Set([
@@ -6612,7 +6716,9 @@ Suhbatlashish qoidalaringiz:
       chatId.includes('ALOV-006') ||
       recipientId === 'ALOV-006' ||
       chatId.includes('alov_ai_bot') ||
-      recipientId === 'alov_ai_bot';
+      recipientId === 'alov_ai_bot' ||
+      chatId.includes('ALOV-AI') ||
+      recipientId === 'ALOV-AI';
 
     if (senderUser?.isBanned) {
       return {
@@ -6853,7 +6959,7 @@ Suhbatlashish qoidalaringiz:
     }
 
     const isKamolaChat = chatId.includes('user_kamola_006') || recipientId === 'user_kamola_006' || chatId.includes('ALOV-006') || recipientId === 'ALOV-006';
-    const isAlovAiBot = chatId.includes('alov_ai_bot') || recipientId === 'alov_ai_bot';
+    const isAlovAiBot = chatId.includes('alov_ai_bot') || recipientId === 'alov_ai_bot' || chatId.includes('ALOV-AI') || recipientId === 'ALOV-AI';
 
     if (!isKamolaChat && !isAlovAiBot && recipientUser) {
       void sendChatSpoilerTelegramNotification({
@@ -6864,7 +6970,7 @@ Suhbatlashish qoidalaringiz:
       });
     }
 
-    if ((isKamolaChat || isAlovAiBot) && message.type === 'text') {
+    if ((isKamolaChat || isAlovAiBot) && (!message.type || message.type === 'text')) {
       void (async () => {
         const botUid = isKamolaChat ? 'user_kamola_006' : 'alov_ai_bot';
         const botName = isKamolaChat ? 'Kamola Saidova' : 'Alov AI';
@@ -6877,7 +6983,9 @@ Suhbatlashish qoidalaringiz:
             throw new Error('GROQ_API_KEY yoki GEMINI_API_KEY sozlanmagan');
           }
 
-          const chatHistory = (chatMessagesStore[chatId] || []).slice(-12);
+          const chatHistory = (chatMessagesStore[chatId] || [])
+            .filter((m: any) => m && m.isError !== true)
+            .slice(-12);
           const openAiMessages = chatHistory.map((m: any) => ({
             role: m.senderId === botUid ? ('assistant' as const) : ('user' as const),
             content: String(m.text || '').trim() || 'Salom',
@@ -6885,53 +6993,6 @@ Suhbatlashish qoidalaringiz:
           if (openAiMessages.length === 0) {
             openAiMessages.push({ role: 'user', content: String(message.text || 'Salom') });
           }
-
-          const callGroqCompletion = async (params: {
-            systemInstruction: string;
-            jsonMode: boolean;
-            fewShotMessages?: Array<{ role: 'user' | 'assistant'; content: string }>;
-          }): Promise<string> => {
-            const preferredModel = String(process.env.GROQ_MODEL || 'openai/gpt-oss-120b').trim();
-            const candidateModels = Array.from(
-              new Set([preferredModel, 'openai/gpt-oss-120b', 'qwen/qwen3.8-27b', 'openai/gpt-oss-20b'])
-            );
-            let lastErr: any = null;
-            for (const modelId of candidateModels) {
-              try {
-                const bodyPayload: Record<string, any> = {
-                  model: modelId,
-                  temperature: 0.85,
-                  top_p: 0.92,
-                  max_tokens: 900,
-                  messages: [
-                    { role: 'system', content: params.systemInstruction },
-                    ...(params.fewShotMessages || []),
-                    ...openAiMessages,
-                  ],
-                };
-                if (params.jsonMode) {
-                  bodyPayload.response_format = { type: 'json_object' };
-                }
-                const groqRes = await fetch('https://api.groq.com/openai/v1/chat/completions', {
-                  method: 'POST',
-                  headers: {
-                    'Content-Type': 'application/json',
-                    Authorization: `Bearer ${activeGroqKey}`,
-                  },
-                  body: JSON.stringify(bodyPayload),
-                });
-                const groqData = await groqRes.json().catch(() => null);
-                const textOut = groqData?.choices?.[0]?.message?.content;
-                if (groqRes.ok && typeof textOut === 'string' && textOut.trim()) {
-                  return stripReasoningTags(textOut);
-                }
-                lastErr = new Error(groqData?.error?.message || `Groq HTTP ${groqRes.status}`);
-              } catch (e: any) {
-                lastErr = e;
-              }
-            }
-            throw lastErr || new Error("Groq AI bo'sh javob qaytardi");
-          };
 
           let replyText = '';
           let recommendedProfiles: any[] = [];
@@ -6951,14 +7012,22 @@ Suhbatlashish qoidalaringiz:
             ];
 
             if (activeGroqKey) {
-              replyText = sanitizeHumanBotPhrases(
-                await callGroqCompletion({
-                  systemInstruction: kamolaInstruction,
-                  jsonMode: false,
-                  fewShotMessages: kamolaFewShot,
-                })
-              );
-            } else {
+              try {
+                replyText = sanitizeHumanBotPhrases(
+                  await callGroqWithFallbacks({
+                    apiKey: activeGroqKey,
+                    systemInstruction: kamolaInstruction,
+                    messages: openAiMessages,
+                    jsonMode: false,
+                    fewShotMessages: kamolaFewShot,
+                  })
+                );
+              } catch (groqErr) {
+                if (!activeGeminiKey) throw groqErr;
+                console.warn('Groq Kamola fallback to Gemini:', (groqErr as any)?.message || groqErr);
+              }
+            }
+            if (!replyText && activeGeminiKey) {
               const geminiClient = new GoogleGenAI({
                 apiKey: activeGeminiKey,
                 httpOptions: { headers: { 'User-Agent': 'aistudio-build' } },
@@ -7002,12 +7071,20 @@ Suhbatlashish qoidalaringiz:
 
             let rawModelText = '';
             if (activeGroqKey) {
-              rawModelText = await callGroqCompletion({
-                systemInstruction,
-                jsonMode: true,
-                fewShotMessages,
-              });
-            } else {
+              try {
+                rawModelText = await callGroqWithFallbacks({
+                  apiKey: activeGroqKey,
+                  systemInstruction,
+                  messages: openAiMessages,
+                  jsonMode: true,
+                  fewShotMessages,
+                });
+              } catch (groqErr) {
+                if (!activeGeminiKey) throw groqErr;
+                console.warn('Groq Alov AI fallback to Gemini:', (groqErr as any)?.message || groqErr);
+              }
+            }
+            if (!rawModelText && activeGeminiKey) {
               const geminiClient = new GoogleGenAI({
                 apiKey: activeGeminiKey,
                 httpOptions: { headers: { 'User-Agent': 'aistudio-build' } },

@@ -145,8 +145,8 @@ function sanitizeSafeUrl(raw: unknown): string {
   if (!s || s.startsWith('data:') || s.startsWith('blob:')) return '';
   if (
     !s.startsWith('https://') &&
-    !/^http:\/\/localhost(:[0-9]+)?\//.test(s) &&
-    !/^\/[a-zA-Z0-9_\-./]+$/.test(s)
+    !/^http:\/\/(localhost|127\.0\.0\.1)(:[0-9]+)?\//.test(s) &&
+    !/^\/[a-zA-Z0-9_\-./]+(\?[a-zA-Z0-9_\-=&.%]+)?$/.test(s)
   ) {
     return '';
   }
@@ -357,6 +357,18 @@ export function splitUserToFirestoreDocs(
   };
 }
 
+function isSameNormalizedValue(existingVal: unknown, nextVal: unknown): boolean {
+  if (existingVal === nextVal) return true;
+  if (typeof existingVal === 'object' && existingVal !== null && typeof nextVal === 'object' && nextVal !== null) {
+    try {
+      return JSON.stringify(existingVal) === JSON.stringify(nextVal);
+    } catch {
+      return false;
+    }
+  }
+  return false;
+}
+
 /**
  * Builds ONLY the changed fields when updating an existing Firestore user profile.
  * Never overwrites createdAt, role, isAdmin, coins, diamonds, or untouched fields with defaults.
@@ -380,7 +392,18 @@ export function buildFirestoreProfilePatch(
     return { userPatch, publicPatch, privatePatch, settingsPatch };
   }
 
-  const isLocked = Boolean(existingUser?.isProfileCompleted === true) && !options.isAdminActor;
+  const existing = existingUser && typeof existingUser === 'object' ? existingUser : {};
+  const isLocked = Boolean(existing?.isProfileCompleted === true) && !options.isAdminActor;
+
+  const setIfChanged = (key: string, nextVal: unknown, targets: Array<Record<string, any>>) => {
+    const existingDefined = existing[key] !== undefined;
+    if (existingDefined && isSameNormalizedValue(existing[key], nextVal)) {
+      return;
+    }
+    for (const target of targets) {
+      target[key] = nextVal;
+    }
+  };
 
   const setTextIfProvided = (
     key: string,
@@ -389,9 +412,7 @@ export function buildFirestoreProfilePatch(
   ) => {
     if (changes[key] === undefined) return;
     const nextVal = changes[key] === null ? '' : clampText(String(changes[key]), maxLen);
-    for (const target of targets) {
-      target[key] = nextVal;
-    }
+    setIfChanged(key, nextVal, targets);
   };
 
   const setUrlIfProvided = (key: string, targets: Array<Record<string, any>>) => {
@@ -399,9 +420,7 @@ export function buildFirestoreProfilePatch(
     const raw = changes[key] === null ? '' : String(changes[key]);
     if (raw.startsWith('data:')) return;
     const nextVal = sanitizeSafeUrl(raw);
-    for (const target of targets) {
-      target[key] = nextVal;
-    }
+    setIfChanged(key, nextVal, targets);
   };
 
   setTextIfProvided('name', FIRESTORE_LIMITS.NAME_MAX, [userPatch, publicPatch]);
@@ -419,29 +438,29 @@ export function buildFirestoreProfilePatch(
   setUrlIfProvided('startGifUrl', [userPatch, publicPatch, settingsPatch]);
 
   if (changes.hasCustomAvatar !== undefined) {
-    userPatch.hasCustomAvatar = Boolean(changes.hasCustomAvatar);
+    setIfChanged('hasCustomAvatar', Boolean(changes.hasCustomAvatar), [userPatch]);
   }
   if (changes.hasEditedProfile !== undefined) {
-    userPatch.hasEditedProfile = Boolean(changes.hasEditedProfile);
+    setIfChanged('hasEditedProfile', Boolean(changes.hasEditedProfile), [userPatch]);
   }
   if (changes.isProfileCompleted !== undefined) {
     const val = Boolean(changes.isProfileCompleted);
-    userPatch.isProfileCompleted = val;
-    publicPatch.isProfileCompleted = val;
+    // Avoid sending redundant isProfileCompleted: true when already completed
+    if (!(existing.isProfileCompleted === true && val === true)) {
+      setIfChanged('isProfileCompleted', val, [userPatch, publicPatch]);
+    }
   }
 
   if (!isLocked) {
     if (changes.gender === 'male' || changes.gender === 'female') {
-      userPatch.gender = changes.gender;
-      publicPatch.gender = changes.gender;
+      setIfChanged('gender', changes.gender, [userPatch, publicPatch]);
     }
     if (typeof changes.birthDate === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(changes.birthDate.trim())) {
-      userPatch.birthDate = changes.birthDate.trim();
+      setIfChanged('birthDate', changes.birthDate.trim(), [userPatch]);
     }
     if (changes.age !== undefined && Number.isFinite(Number(changes.age))) {
       const clamped = Math.max(18, Math.min(99, Math.round(Number(changes.age))));
-      userPatch.age = clamped;
-      publicPatch.age = clamped;
+      setIfChanged('age', clamped, [userPatch, publicPatch]);
     }
   }
 
@@ -450,41 +469,40 @@ export function buildFirestoreProfilePatch(
     changes.locationVisibility === 'mutual' ||
     changes.locationVisibility === 'ghost'
   ) {
-    userPatch.locationVisibility = changes.locationVisibility;
-    publicPatch.locationVisibility = changes.locationVisibility;
-    settingsPatch.locationVisibility = changes.locationVisibility;
+    setIfChanged('locationVisibility', changes.locationVisibility, [userPatch, publicPatch, settingsPatch]);
   }
   if (changes.isLocationEnabled !== undefined) {
-    const enabled = Boolean(changes.isLocationEnabled);
-    userPatch.isLocationEnabled = enabled;
-    publicPatch.isLocationEnabled = enabled;
-    settingsPatch.isLocationEnabled = enabled;
+    setIfChanged('isLocationEnabled', Boolean(changes.isLocationEnabled), [userPatch, publicPatch, settingsPatch]);
   }
   if (changes.location !== undefined) {
     const loc = sanitizeLocation(changes.location);
     if (loc) {
-      userPatch.location = loc;
-      publicPatch.location = loc;
+      setIfChanged('location', loc, [userPatch, publicPatch]);
     }
   }
 
   if (typeof changes.isVerified === 'boolean' && (options.isAdminActor || changes.isVerified === true)) {
-    userPatch.isVerified = changes.isVerified;
-    publicPatch.isVerified = changes.isVerified;
+    setIfChanged('isVerified', changes.isVerified, [userPatch, publicPatch]);
   }
 
   if (typeof changes.isOnline === 'boolean') {
-    userPatch.isOnline = changes.isOnline;
-    userPatch.status = changes.isOnline ? 'online' : 'offline';
-    publicPatch.isOnline = changes.isOnline;
-    publicPatch.status = userPatch.status;
+    const nextOnline = changes.isOnline;
+    const nextStatus = nextOnline ? 'online' : 'offline';
+    if (existing.isOnline !== nextOnline) {
+      userPatch.isOnline = nextOnline;
+      publicPatch.isOnline = nextOnline;
+    }
+    if (existing.status !== nextStatus) {
+      userPatch.status = nextStatus;
+      publicPatch.status = nextStatus;
+    }
   }
 
   if (changes.faceId && typeof changes.faceId === 'object') {
     const sanitizedFace = sanitizeFaceId(changes.faceId);
     if (sanitizedFace) {
-      userPatch.faceId = sanitizedFace;
-      if (sanitizedFace.verified) {
+      setIfChanged('faceId', sanitizedFace, [userPatch]);
+      if (sanitizedFace.verified && existing.isVerified !== true) {
         userPatch.isVerified = true;
         publicPatch.isVerified = true;
       }
@@ -492,16 +510,16 @@ export function buildFirestoreProfilePatch(
   }
 
   if (changes.email !== undefined) {
-    privatePatch.email = clampText(changes.email, FIRESTORE_LIMITS.EMAIL_MAX);
+    setIfChanged('email', clampText(changes.email, FIRESTORE_LIMITS.EMAIL_MAX), [privatePatch]);
   }
   if (changes.phone !== undefined) {
-    privatePatch.phone = clampText(changes.phone, FIRESTORE_LIMITS.PHONE_MAX);
+    setIfChanged('phone', clampText(changes.phone, FIRESTORE_LIMITS.PHONE_MAX), [privatePatch]);
   }
   if (changes.bankCard !== undefined) {
-    privatePatch.bankCard = clampText(changes.bankCard, FIRESTORE_LIMITS.CARD_MAX);
+    setIfChanged('bankCard', clampText(changes.bankCard, FIRESTORE_LIMITS.CARD_MAX), [privatePatch]);
   }
   if (typeof changes.telegramChatId === 'number' && Number.isFinite(changes.telegramChatId)) {
-    privatePatch.telegramChatId = Math.trunc(changes.telegramChatId);
+    setIfChanged('telegramChatId', Math.trunc(changes.telegramChatId), [privatePatch]);
   }
 
   return { userPatch, publicPatch, privatePatch, settingsPatch };

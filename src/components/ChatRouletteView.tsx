@@ -315,10 +315,6 @@ export const ChatRouletteView: React.FC<ChatRouletteViewProps> = ({
     };
   }, [authToken, authUserId, cleanupPeer, createPeerForPartner, onNotify, signalingUrl, stopLocalMedia]);
 
-  useEffect(() => {
-    ensureLocalMedia().catch(() => {});
-  }, [ensureLocalMedia]);
-
   const handleStart = async () => {
     if (!currentUser?.uid) {
       onOpenAuth?.();

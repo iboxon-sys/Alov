@@ -431,7 +431,7 @@ export const ChatGifBar: React.FC<ChatGifBarProps> = ({
 
             <div
               data-testid="gif-drawer-grid-scroll"
-              className="flex-1 min-h-0 overflow-y-auto p-3"
+              className="flex-1 min-h-0 overflow-y-auto overscroll-y-contain touch-pan-y p-3"
             >
               {drawerLoading ? (
                 <div className="grid grid-cols-3 sm:grid-cols-4 gap-2">

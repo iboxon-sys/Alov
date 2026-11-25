@@ -5263,10 +5263,7 @@ Suhbatlashish qoidalaringiz:
     const sorted = [...filtered]
       .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
       .map(enrichPost)
-      .filter((p) => {
-        if (!viewerUser) return true;
-        return isPostVisibleToViewer(p, viewerUser, p.authorGender, { allowSelf: true });
-      });
+      .filter((p) => isPostVisibleToViewer(p, viewerUser, p.authorGender, { allowSelf: true }));
     res.json({ success: true, posts: sorted, storageMode: contentRepository.getMode() });
   });
 

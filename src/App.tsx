@@ -1271,6 +1271,7 @@ export default function App() {
     try {
       const tg = (window as any).Telegram?.WebApp;
       if (tg) {
+        enterTelegramMiniAppFullscreen(tg);
         applyTelegramWebAppTheme(tg, true);
         const tgUser = tg.initDataUnsafe?.user;
         if (tgUser?.id) {
@@ -4047,7 +4048,7 @@ export default function App() {
         }
 
         return (
-      <div className={`flex-1 min-h-0 relative z-10 ${(activeTab === 'reels' || activeTab === 'map' || activeTab === 'chatruletka' || activeTab === 'chats') ? 'overflow-hidden flex flex-col p-0' : 'overflow-y-auto p-3 sm:p-5 space-y-4 pb-24'}`}>
+      <div className={`flex-1 min-h-0 relative z-10 ${(activeTab === 'reels' || activeTab === 'map' || activeTab === 'chatruletka' || activeTab === 'chats') ? 'overflow-hidden flex flex-col p-0' : 'overflow-y-auto overscroll-y-contain p-3 sm:p-5 space-y-4 pb-24'}`}>
         {/* --- LANDING TAB --- */}
         {activeTab === 'landing' && <LandingPage onLogin={() => openAuthModalClean('login')} />}
 
@@ -5636,7 +5637,7 @@ export default function App() {
               </>
             )}
 
-            <div className="flex-1 min-h-0 overflow-y-auto p-6 sm:p-7 space-y-4 relative z-10">
+            <div className="flex-1 min-h-0 overflow-y-auto overscroll-y-contain p-6 sm:p-7 space-y-4 relative z-10">
 
             {inlinePolicyReturnMode !== null ? (
               <Suspense fallback={<div className="py-10 text-center text-xs text-zinc-400">Yuklanmoqda...</div>}>
@@ -7864,7 +7865,7 @@ export default function App() {
               </button>
             </div>
 
-            <div className="flex-1 min-h-0 overflow-y-auto p-5 sm:p-6 pt-4 space-y-4">
+            <div className="flex-1 min-h-0 overflow-y-auto overscroll-y-contain p-5 sm:p-6 pt-4 space-y-4">
               <p className="text-xs text-zinc-400">
                 Paketni tanlang va Telegram username yoki telefon raqamingizni qoldiring — admin bog'lanib to'lovdan so'ng monetani hisobingizga o'tkazib beradi.
               </p>
@@ -8057,7 +8058,7 @@ export default function App() {
               </button>
             </div>
 
-            <div className="flex-1 min-h-0 overflow-y-auto p-5 sm:p-6 pt-4 space-y-4">
+            <div className="flex-1 min-h-0 overflow-y-auto overscroll-y-contain p-5 sm:p-6 pt-4 space-y-4">
               <p className="text-xs text-zinc-400 font-medium">
                 Karta va Telegram/telefon ma'lumotingizni qoldiring — admin bog'lanib pulni kartangizga qo'lda o'tkazib beradi:
               </p>

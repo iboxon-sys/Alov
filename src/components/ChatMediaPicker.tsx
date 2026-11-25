@@ -413,6 +413,7 @@ export const ChatMediaPicker: React.FC<ChatMediaPickerProps> = ({
         ref={folderFallbackInputRef}
         type="file"
         multiple
+        // @ts-expect-error webkitdirectory is supported on Chromium/WebKit browsers
         webkitdirectory=""
         accept="image/*,video/*,audio/*"
         className="hidden"
@@ -641,7 +642,7 @@ export const ChatMediaPicker: React.FC<ChatMediaPickerProps> = ({
           ) : filteredGallery.length > 0 ? (
             <div
               data-testid="inapp-gallery-grid"
-              className="grid grid-cols-4 sm:grid-cols-5 gap-1.5 max-h-44 overflow-y-auto mb-2.5 pr-0.5"
+              className="grid grid-cols-4 sm:grid-cols-5 gap-1.5 max-h-44 overflow-y-auto overscroll-y-contain touch-pan-y mb-2.5 pr-0.5"
             >
               {filteredGallery.map((item) => (
                 <GalleryThumb key={item.id} item={item} onSelect={stageGalleryItem} />

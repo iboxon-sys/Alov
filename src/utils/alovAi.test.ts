@@ -5,6 +5,8 @@ import {
   detectMatchmakingIntent,
   filterCandidateMatches,
   buildAlovAiSystemInstruction,
+  buildAlovAiFewShotMessages,
+  sanitizeHumanBotPhrases,
   parseAlovAiStructuredOutput,
 } from './alovAi.ts';
 
@@ -13,6 +15,24 @@ describe('Alov AI persona, matchmaking gating & structured DB profile matching',
     assert.equal(resolveAlovAiPersona('male'), 'female_friend');
     assert.equal(resolveAlovAiPersona('female'), 'male_friend');
     assert.equal(resolveAlovAiPersona(''), 'neutral_friend');
+  });
+
+  it('provides human-like few-shot turns and strips robotic assistant closings', () => {
+    const maleFewShot = buildAlovAiFewShotMessages('male');
+    assert.equal(maleFewShot.length >= 2, true);
+    assert.equal(maleFewShot[0].role, 'user');
+    assert.equal(maleFewShot[1].role, 'assistant');
+    assert.ok(maleFewShot[1].content.includes('matchedUserUids'));
+
+    const cleaned = sanitizeHumanBotPhrases(
+      "Yaxshi rahmat! Bugun ob-havo juda zo'r ekan. Hozir esa sizga yordam berishga tayyorman."
+    );
+    assert.equal(cleaned, "Yaxshi rahmat! Bugun ob-havo juda zo'r ekan.");
+
+    const cleanedAiTag = sanitizeHumanBotPhrases(
+      "Salom, yaxshi o'tiribman. Sizga qanday yordam bera olaman?"
+    );
+    assert.equal(cleanedAiTag, "Salom, yaxshi o'tiribman.");
   });
 
   it('does NOT trigger matchmaking during casual small talk', () => {

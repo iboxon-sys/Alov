@@ -1528,12 +1528,12 @@ export const ChatView: React.FC<ChatViewProps> = ({
                       <div className="flex items-center justify-between gap-2">
                         <div className="flex items-center gap-1.5 min-w-0">
                           <h3 className="font-bold text-[15px] text-white truncate">{ALOV_AI_USER.name}</h3>
-                          <span className="text-[11px] font-semibold text-rose-400 shrink-0">· AI Yordamchi</span>
+                          <span className="text-[11px] font-semibold text-rose-400 shrink-0">· Suhbatdosh</span>
                         </div>
                         <span className="text-[11px] text-emerald-400 font-semibold shrink-0">Onlayn</span>
                       </div>
                       <p className="text-[13px] text-zinc-400 truncate mt-0.5">
-                        Samimiy suhbatdosh · O&apos;zbekcha jonli muloqot va tanishuv
+                        Samimiy do&apos;st · Jonli suhbat va mos juft topish
                       </p>
                     </div>
                   </button>
@@ -1868,7 +1868,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
               </h4>
               <p className="text-xs text-zinc-400 leading-relaxed">
                 {isAIBotChat
-                  ? "O'zbekcha samimiy suhbat va mos juft tanlashda yordamchi"
+                  ? "Samimiy suhbatdosh · O'zbekcha jonli muloqot"
                   : [resolvedChatPartner?.region, resolvedChatPartner?.district].filter(Boolean).join(', ') ||
                     "Suhbatni samimiy salomdan boshlang"}
               </p>
@@ -1885,7 +1885,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
                   </button>
                   <button
                     type="button"
-                    onClick={() => void handleSendMessage('text', undefined, 'Salom Alov AI, kayfiyatlar qalay?')}
+                    onClick={() => void handleSendMessage('text', undefined, "Qalaysan, bugun kuning qanday o'tdi?")}
                     className="min-h-[44px] px-3.5 py-2 rounded-2xl bg-[#161925] hover:bg-[#1E2233] border border-white/[0.1] text-xs font-semibold text-zinc-200 transition active:scale-95 cursor-pointer"
                   >
                     Salomlashish

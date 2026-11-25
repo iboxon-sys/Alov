@@ -133,9 +133,11 @@ import { isAllowedCorsOrigin } from './src/utils/microFrontendBridge';
 import { createTurnstileReplayGuard, verifyTurnstileWithSiteverify } from './src/utils/turnstile';
 import {
   buildAlovAiSystemInstruction,
+  buildAlovAiFewShotMessages,
   detectMatchmakingIntent,
   filterCandidateMatches,
   parseAlovAiStructuredOutput,
+  sanitizeHumanBotPhrases,
   stripReasoningTags,
 } from './src/utils/alovAi';
 import {
@@ -146,7 +148,7 @@ import {
   mergeTelegramBotUserMaps,
 } from './src/utils/persistenceMerge';
 
-dotenv.config();
+dotenv.config({ override: true });
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const isProduction = process.env.NODE_ENV === 'production';
@@ -6887,6 +6889,7 @@ Suhbatlashish qoidalaringiz:
           const callGroqCompletion = async (params: {
             systemInstruction: string;
             jsonMode: boolean;
+            fewShotMessages?: Array<{ role: 'user' | 'assistant'; content: string }>;
           }): Promise<string> => {
             const preferredModel = String(process.env.GROQ_MODEL || 'openai/gpt-oss-120b').trim();
             const candidateModels = Array.from(
@@ -6897,10 +6900,12 @@ Suhbatlashish qoidalaringiz:
               try {
                 const bodyPayload: Record<string, any> = {
                   model: modelId,
-                  temperature: 0.8,
+                  temperature: 0.85,
+                  top_p: 0.92,
                   max_tokens: 900,
                   messages: [
                     { role: 'system', content: params.systemInstruction },
+                    ...(params.fewShotMessages || []),
                     ...openAiMessages,
                   ],
                 };
@@ -6933,16 +6938,26 @@ Suhbatlashish qoidalaringiz:
 
           if (isKamolaChat) {
             const kamolaInstruction = `Siz "Alov.uz" ilovasidagi Kamola Saidova ismli 24 yoshli, Andijon viloyati Asaka tumanidan bo'lgan, ingliz tili o'qituvchisi, samimiy, tirishqoq va hayotiy qizsiz!
-ISMINGIZ: Kamola Saidova (yaqinlaringiz sizni Kamola deyishadi). Agarda ismingiz yoki kimsiz deb so'ralsa, "Ismim Kamola Saidova, 24 yoshdaman, Andijon Asakadanman. Ingliz tili o'qituvchisiman 😊" deb javob bering. Hech qachon "Gemini", "Groq", "AI" yoki "sun'iy intellekt" demang!
+ISMINGIZ: Kamola Saidova (yaqinlaringiz sizni Kamola deyishadi). Agarda ismingiz yoki kimsiz deb so'ralsa, "Ismim Kamola Saidova, 24 yoshdaman, Andijon Asakadanman. Ingliz tili o'qituvchisiman 😊" deb javob bering. Hech qachon "Gemini", "Groq", "AI", "bot" yoki "sun'iy intellekt" demang!
 Suhbatlashish qoidalaringiz:
-1. Foydalanuvchi bilan Telegram/Instagramdagi haqiqiy tirik do'stdek tabiiy, jonli o'zbek tilida gaplashing.
-2. Yo'q joydan shablon va robotcha balandparvoz gaplar ishlatmang.`;
+1. Foydalanuvchi bilan Telegram/Instagramdagi haqiqiy tirik do'stdek tabiiy, jonli o'zbek tilida gaplashing (1-2 ta iliq, samimiy gap).
+2. Yo'q joydan shablon va robotcha balandparvoz ("sizga qanday yordam bera olaman", "yordam berishga tayyorman") gaplar ishlatmang.`;
+            const kamolaFewShot: Array<{ role: 'user' | 'assistant'; content: string }> = [
+              { role: 'user', content: 'Qalaysiz Kamola, nima qilyapsiz?' },
+              {
+                role: 'assistant',
+                content: "Yaxshi rahmat 😊 Hozirgina darsdan chiqib choy ichib o'tirgandim, o'zingiz qalaysiz?",
+              },
+            ];
 
             if (activeGroqKey) {
-              replyText = await callGroqCompletion({
-                systemInstruction: kamolaInstruction,
-                jsonMode: false,
-              });
+              replyText = sanitizeHumanBotPhrases(
+                await callGroqCompletion({
+                  systemInstruction: kamolaInstruction,
+                  jsonMode: false,
+                  fewShotMessages: kamolaFewShot,
+                })
+              );
             } else {
               const geminiClient = new GoogleGenAI({
                 apiKey: activeGeminiKey,
@@ -6960,7 +6975,7 @@ Suhbatlashish qoidalaringiz:
                   thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
                 },
               });
-              replyText = stripReasoningTags(String(response.text || ''));
+              replyText = sanitizeHumanBotPhrases(String(response.text || ''));
             }
             if (!replyText) {
               throw new Error("Kamola bo'sh javob qaytardi");
@@ -6983,12 +6998,14 @@ Suhbatlashish qoidalaringiz:
               candidatePool,
               includeMatchmakingDatabase: intent.wantsMatchmaking,
             });
+            const fewShotMessages = buildAlovAiFewShotMessages(senderUser?.gender);
 
             let rawModelText = '';
             if (activeGroqKey) {
               rawModelText = await callGroqCompletion({
                 systemInstruction,
                 jsonMode: true,
+                fewShotMessages,
               });
             } else {
               const geminiClient = new GoogleGenAI({

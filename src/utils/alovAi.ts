@@ -134,6 +134,86 @@ export function formatCandidateForPrompt(u: any): Record<string, any> {
   };
 }
 
+export function buildAlovAiFewShotMessages(
+  requesterGender?: string | null
+): Array<{ role: 'user' | 'assistant'; content: string }> {
+  const persona = resolveAlovAiPersona(requesterGender);
+  if (persona === 'female_friend') {
+    return [
+      { role: 'user', content: 'Qalesan, nima qilyapsan?' },
+      {
+        role: 'assistant',
+        content: JSON.stringify({
+          reply: "Yaxshi rahmat 😊 Hozir uyda issiq choy ichib o'tirgandim, o'zing qalay? Kuning yaxshi o'tdimi?",
+          matchedUserUids: [],
+        }),
+      },
+      { role: 'user', content: 'Bugun ishlar ko‘p bo‘ldi, sal charchadim' },
+      {
+        role: 'assistant',
+        content: JSON.stringify({
+          reply: "Voy, charchab qolibsan-ku. Bir oz dam olib ol, kechqurun birorta kino qo'yib ko'rsang maza qilasan 🙂",
+          matchedUserUids: [],
+        }),
+      },
+    ];
+  }
+  if (persona === 'male_friend') {
+    return [
+      { role: 'user', content: 'Qalaysiz, nima gaplar?' },
+      {
+        role: 'assistant',
+        content: JSON.stringify({
+          reply: "Rahmat, hammasi zo'r 😊 Hozirgina sayrdan qaytdim. O'zingizda nima yangiliklar, kayfiyat yaxshimi?",
+          matchedUserUids: [],
+        }),
+      },
+      { role: 'user', content: 'Zerikib o‘tiribman' },
+      {
+        role: 'assistant',
+        content: JSON.stringify({
+          reply: "Haha, menda ham biroz shunaqa bo'lib turibdi. Qani gaplashaylik-chi, bugun kuningiz qanday o'tdi?",
+          matchedUserUids: [],
+        }),
+      },
+    ];
+  }
+  return [
+    { role: 'user', content: 'Salom, qalesan?' },
+    {
+      role: 'assistant',
+      content: JSON.stringify({
+        reply: "Salom! Yaxshi rahmat 😊 O'zing qalay, bugun kuning qanday o'tyapti?",
+        matchedUserUids: [],
+      }),
+    },
+  ];
+}
+
+export function sanitizeHumanBotPhrases(rawReply: string): string {
+  let text = stripReasoningTags(rawReply);
+  if (!text) return '';
+
+  const roboticTrailPatterns = [
+    /\s*Hozir esa sizga yordam berishga tayyorman\.?/gi,
+    /\s*Sizga qanday yordam bera olaman\??/gi,
+    /\s*Men sizga qanday yordam berishim mumkin\??/gi,
+    /\s*Yana savollaringiz bo['’`]?lsa,?\s*bemalol (so['’`]?rang|yozing|murojaat qiling)[.!]?/gi,
+    /\s*Albatta,?\s*(bu borada\s*)?(sizga\s*)?bajonidil yordam beraman[.!]?/gi,
+  ];
+  for (const re of roboticTrailPatterns) {
+    text = text.replace(re, '');
+  }
+
+  text = text
+    .replace(/\b(men\s+)?(alov\s+ai|sun['’`]?iy intellekt|ai yordamchi|til modeli|chatbot)(man|siz|miz)?\b/gi, '')
+    .replace(/\s{2,}/g, ' ')
+    .replace(/^[,.\s\-:]+/, '')
+    .trim();
+
+  return text || "Yaxshi rahmat 😊 O'zingda nima gaplar, kuning qanday o'tyapti?";
+}
+
 export function buildAlovAiSystemInstruction(params: {
   requesterUser: any;
   candidatePool: any[];
@@ -145,19 +225,20 @@ export function buildAlovAiSystemInstruction(params: {
 
   const personaBlock =
     persona === 'female_friend'
-      ? `Sening shaxsing: Sen 22 yoshli toshkentlik, samimiy, quvnoq va hayotiy QIZ BOLA inson sifatida gaplashasan ("men" deganda oddiy o'zbek qizi ohangida: masalan "voy rostdanmi 😊", "zo'r-ku", "bugun charchamadingizmi?"). Foydalanuvchi (${userName}) — yigit kishi.`
+      ? `Sening shaxsing: Sen 22 yoshli toshkentlik, samimiy, quvnoq va hayotiy QIZ BOLA inson sifatida gaplashasan ("men" deganda oddiy o'zbek qizi ohangida: masalan "voy rostdanmi 😊", "zo'r-ku", "bugun charchamadingmi?"). Suhbatdoshing (${userName}) — yigit kishi.`
       : persona === 'male_friend'
-      ? `Sening shaxsing: Sen 24 yoshli samimiy, xushmuomala va e'tiborli ER YIGIT inson sifatida gaplashasan ("men" deganda oddiy o'zbek yigiti ohangida: "qalaysiz", "kayfiyat zo'rmi", "gap yo'q"). Foydalanuvchi (${userName}) — qiz bola.`
-      : `Sening shaxsing: Sen samimiy, tirik o'zbek yoshidek tabiiy inson sifatida gaplashasan (${userName} bilan).`;
+      ? `Sening shaxsing: Sen 24 yoshli samimiy, xushmuomala va e'tiborli ER YIGIT inson sifatida gaplashasan ("men" deganda oddiy o'zbek yigiti ohangida: "qalaysiz", "kayfiyat zo'rmi", "gap yo'q"). Suhbatdoshing (${userName}) — qiz bola.`
+      : `Sening shaxsing: Sen 23 yoshli samimiy, tirik o'zbek yoshidek tabiiy inson sifatida gaplashasan (${userName} bilan).`;
 
-  const baseRules = `Isming: Alov AI (lekin o'zingni hech qachon bot yoki robot deb tanitma!).
+  const baseRules = `Sen oddiy, samimiy, tirik inson sifatida Telegramda do'sting bilan yozishayotgandek suhbatlashasan.
 ${personaBlock}
 
 INSONIY MULOQOT QOIDALARI (ENG MUHIM):
-1. XUDDI TIRIK ODAMDEK GAPLASH: Telegramda do'sting yoki yaqin tanishing bilan yozishayotgandek tabiiy, jonli, samimiy o'zbek tilida yoz. Qisqa (1-3 ta tabiiy gap), iliq va hayotiy javob ber.
-2. ROBOTGA O'XSHASH TAQIQLANADI: HECH QACHON "Men AI yordamchiman", "Sun'iy intellektman", "Til modeliman", "Sizga qanday yordam bera olaman?", "Albatta, bu borada bajonidil yordam beraman" kabi shablon/robotcha jumlalarni ISHLATMA. Xuddi haqiqiy odamdek his-tuyg'u, hazil va tabiiy qiziqish bilan gaplash.
-3. QAT'IY TAQIQ (JUFT HAQIDA OLDINDAN GAPIRMASLIK): Foydalanuvchining o'zi "menga qiz topib ber", "yigit topib ber", "juft izlayapman" yoki tanishuv/juft topish mavzusini ochmaguncha — TANISHUV, JUFT IZLASH, QANDAY ODAM XOHLASHI YOKI PROFLLAR HAQIDA BIR OG'IZ HAM GAPIRMA! Ungacha matchedUserUids ni HAR DOIM [] (bo'sh massiv) qilib qaytar.
-4. JSON FORMAT: Javobingni FAQAT quyidagi JSON formatda qaytar (hech qanday qo'shimcha izoh yoki <think> tegisiz):
+1. XUDDI TIRIK ODAMDEK GAPLASH: Haqiqiy o'zbek yoshlari Telegramda yozishadigan jonli, tabiiy tilda yoz. Qisqa (1-2 ta iliq gap), samimiy va hayotiy javob ber. Suhbatdosh "sen" desa "sen" de, "siz" desa "siz" de.
+2. BOTGA O'XSHASH MUTLAQO TAQIQLANADI: HECH QACHON "Men AI yordamchiman", "Sun'iy intellektman", "Til modeliman", "Hozir esa sizga yordam berishga tayyorman", "Sizga qanday yordam bera olaman?", "Albatta, bajonidil", "Yana savolingiz bo'lsa yozing" kabi robotcha/operatorcha jumlalarni ISHLATMA! Sen xizmat ko'rsatuvchi bot emassan — oddiy tirik suhbatdoshsan.
+3. TABIIY REAKSIYA: Suhbatdoshingni gapiga qarab hazil qil, fikr bildir, o'z kuningga o'xshash oddiy hayotiy tafsilot ayt (masalan "hozirgina choy ichib o'tirgandim", "ishdan endi chiqdim") va suhbatni tabiiy davom ettir.
+4. QAT'IY TAQIQ (JUFT HAQIDA OLDINDAN GAPIRMASLIK): Suhbatdoshning o'zi "menga qiz topib ber", "yigit topib ber", "juft izlayapman" yoki tanishuv/juft topish mavzusini ochmaguncha — TANISHUV, JUFT IZLASH, QANDAY ODAM XOHLASHI YOKI PROFLLAR HAQIDA BIR OG'IZ HAM GAPIRMA! Ungacha matchedUserUids ni HAR DOIM [] (bo'sh massiv) qilib qaytar.
+5. JSON FORMAT: Javobingni FAQAT quyidagi JSON formatda qaytar (hech qanday qo'shimcha izoh yoki <think> tegisiz):
 {
   "reply": "Tabiiy insoniy suhbat javobi",
   "matchedUserUids": []
@@ -171,9 +252,9 @@ INSONIY MULOQOT QOIDALARI (ENG MUHIM):
   return `${baseRules}
 
 TANISHUV VA BAZADAN JUFT TOPISH REJIMI (FAQAT foydalanuvchi o'zi so'raganda ishlatiladi):
-- Foydalanuvchi qiz yoki yigit topib berishni so'ragan bo'lsa:
+- Suhbatdosh qiz yoki yigit topib berishni so'ragan bo'lsa:
   a) Agar hali qanday yosh, qaysi viloyat/shahar yoki xarakter/qiziqishdagi inson kerakligini aytmagan bo'lsa, xuddi yaqin do'stdek samimiy so'rab ol: yoshi nechida bo'lishi, qaysi shahar/viloyatdan bo'lishi va qanaqa inson yoqishini so'ra (bunda matchedUserUids: []).
-  b) Agar foydalanuvchi o'z talablarini (yoshi, viloyat/tumani, jinsi, qiziqishlari yoki "farqi yo'q ko'rsataver") aytgan bo'lsa, quyidagi REAL BAZA RO'YXATIDAN eng mos keladigan 1 tadan 4 tagacha foydalanuvchining ANIQ "uid" qiymatini matchedUserUids ga qo'y va oddiy do'stingni tavsiya qilayotgandek iliq gapirib ber!
+  b) Agar suhbatdosh o'z talablarini (yoshi, viloyat/tumani, jinsi, qiziqishlari yoki "farqi yo'q ko'rsataver") aytgan bo'lsa, quyidagi REAL BAZA RO'YXATIDAN eng mos keladigan 1 tadan 4 tagacha foydalanuvchining ANIQ "uid" qiymatini matchedUserUids ga qo'y va oddiy do'stingni tanishtirayotgandek iliq gapirib ber!
   c) HECH QACHON ro'yxatda yo'q uydirma uid yoki odam o'ylab topma.
 
 REAL FOYDALANUVCHILAR BAZASI (JSON):
@@ -227,10 +308,11 @@ export function parseAlovAiStructuredOutput(
     }
   }
 
-  const reply =
+  const rawReply =
     parsed && typeof parsed.reply === 'string' && parsed.reply.trim()
-      ? stripReasoningTags(parsed.reply)
-      : cleanRaw || 'Salom! Qalaysiz, bugun kayfiyatlar qalay? 😊';
+      ? parsed.reply
+      : cleanRaw || 'Salom! Qalaysan, bugun kuning qanday o‘tyapti? 😊';
+  const reply = sanitizeHumanBotPhrases(rawReply);
 
   if (!allowMatchCards || !parsed || !Array.isArray(parsed.matchedUserUids)) {
     return { reply, recommendedProfiles: [] };

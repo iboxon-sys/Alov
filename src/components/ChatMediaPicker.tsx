@@ -413,7 +413,6 @@ export const ChatMediaPicker: React.FC<ChatMediaPickerProps> = ({
         ref={folderFallbackInputRef}
         type="file"
         multiple
-        // @ts-expect-error webkitdirectory is supported on Chromium/WebKit browsers
         webkitdirectory=""
         accept="image/*,video/*,audio/*"
         className="hidden"

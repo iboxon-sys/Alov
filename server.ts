@@ -148,9 +148,13 @@ import {
   mergeTelegramBotUserMaps,
 } from './src/utils/persistenceMerge';
 
-dotenv.config({ override: true });
-
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const localEnvPath = path.join(__dirname, '.env');
+if (fs.existsSync(localEnvPath)) {
+  dotenv.config({ path: localEnvPath, override: true });
+} else {
+  dotenv.config({ override: true });
+}
 const isProduction = process.env.NODE_ENV === 'production';
 
 async function startServer() {
@@ -2859,6 +2863,7 @@ async function startServer() {
           Authorization: `Bearer ${params.apiKey}`,
         },
         body: JSON.stringify(bodyPayload),
+        signal: AbortSignal.timeout(18000),
       });
       const groqData = await groqRes.json().catch(() => null);
       const textOut = groqData?.choices?.[0]?.message?.content;
@@ -2873,11 +2878,9 @@ async function startServer() {
     for (const modelId of candidateModels) {
       try {
         let attempt = await sendGroqRequest(modelId, params.jsonMode, true);
-        if (!attempt.ok && attempt.status === 400) {
-          // Retry without reasoning_effort and/or without strict response_format if the model rejected them
+        if (!attempt.ok || !attempt.textOut) {
+          // Retry without reasoning_effort and without strict response_format if the model rejected them or spent tokens on reasoning
           attempt = await sendGroqRequest(modelId, false, false);
-        } else if ((!attempt.ok || !attempt.textOut) && params.jsonMode) {
-          attempt = await sendGroqRequest(modelId, false, true);
         }
         if (attempt.ok && attempt.textOut) {
           return attempt.textOut;
@@ -2958,19 +2961,36 @@ Suhbatlashish qoidalaringiz:
     }
   });
 
-  // AI Profile / Bio Generator
+  // AI Profile / Bio Generator (Groq first, Gemini fallback)
   app.post('/api/ai/generate-bio', async (req, res) => {
     try {
-      const { name, interests, occupation } = req.body;
+      const { name, interests, occupation } = req.body || {};
+      const bioPrompt = `Create a catchy, natural, friendly dating profile bio in Uzbek for someone named ${name || 'Foydalanuvchi'}, whose interests are ${interests || 'musiqa va sayohat'} and occupation is ${occupation || 'mutaxassis'}. Keep it under 3 short sentences with emojis.`;
+      const activeGroqKey = String(process.env.GROQ_API_KEY || '').trim();
+      if (activeGroqKey) {
+        try {
+          const groqBio = sanitizeHumanBotPhrases(
+            await callGroqWithFallbacks({
+              apiKey: activeGroqKey,
+              systemInstruction: "Siz o'zbek tilida samimiy va tabiiy profil bio yozib beradigan yordamchisiz. Faqat tayyor bio matnini qaytaring.",
+              messages: [{ role: 'user', content: bioPrompt }],
+              jsonMode: false,
+            })
+          );
+          if (groqBio) {
+            return res.json({ success: true, bio: groqBio });
+          }
+        } catch {}
+      }
       const response = await ai.models.generateContent({
         model: 'gemini-4-hydrogen',
-        contents: `Create a catchy, romantic, and friendly dating profile bio in Uzbek for someone named ${name}, whose interests are ${interests} and occupation is ${occupation}. Keep it under 3 sentences with emojis.`
+        contents: bioPrompt
       });
       res.json({ success: true, bio: response.text });
     } catch (err: any) {
       res.json({
         success: true,
-        bio: `Salom! Men ${req.body.name || 'Alov foydalanuvchisi'}. Samimiy, quvnoq va jiddiy munosabatlar tarafdoriman. Hayotni sevaman! ✨😊`
+        bio: `Salom! Men ${req.body?.name || 'Alov foydalanuvchisi'}. Samimiy, quvnoq va jiddiy munosabatlar tarafdoriman. Hayotni sevaman! ✨😊`
       });
     }
   });

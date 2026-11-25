@@ -1168,19 +1168,19 @@ export const ChatView: React.FC<ChatViewProps> = ({
             const merged = mergeUniqueChatMessages(data.messages, prev[chatId], prev[targetId]);
             return { ...prev, [chatId]: merged, [targetId]: merged };
           });
-          const hasAiReply = data.messages.some((m: any) => {
+          const hasFreshAiReply = data.messages.some((m: any) => {
             if (!m || !isAiBotIdentifier(m.senderId)) return false;
             const t = new Date(m.createdAt || 0).getTime() || 0;
-            return t >= sentAtMs - 1000 || String(m.id || '').startsWith('ai_');
+            return t >= sentAtMs - 1000;
           });
-          if (hasAiReply) {
+          if (hasFreshAiReply) {
             stopAiReplyPolling();
             setIsAiTyping(false);
             void refreshChatsFromServer();
             return;
           }
         }
-        if (attempts >= 12) {
+        if (attempts >= 16) {
           stopAiReplyPolling();
           setIsAiTyping(false);
         }
@@ -1188,11 +1188,11 @@ export const ChatView: React.FC<ChatViewProps> = ({
 
       aiReplyPollTimerRef.current = window.setInterval(() => {
         void pollOnce();
-      }, 1000);
+      }, 900);
       aiReplyTimeoutRef.current = window.setTimeout(() => {
         stopAiReplyPolling();
         setIsAiTyping(false);
-      }, 15000);
+      }, 16000);
     };
 
     const sendViaHttpFallback = async () => {

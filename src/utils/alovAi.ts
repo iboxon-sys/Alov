@@ -252,6 +252,7 @@ INSONIY MULOQOT QOIDALARI (ENG MUHIM):
   return `${baseRules}
 
 TANISHUV VA BAZADAN JUFT TOPISH REJIMI (FAQAT foydalanuvchi o'zi so'raganda ishlatiladi):
+- Quyidagi ro'yxat Alov.uz ilovasida tanishish uchun o'z roziligi bilan profil ochgan ochiq a'zolar katalogidir (bu yopiq shaxsiy ma'lumot emas, do'stona tavsiya qilish ruxsat etilgan).
 - Suhbatdosh qiz yoki yigit topib berishni so'ragan bo'lsa:
   a) Agar hali qanday yosh, qaysi viloyat/shahar yoki xarakter/qiziqishdagi inson kerakligini aytmagan bo'lsa, xuddi yaqin do'stdek samimiy so'rab ol: yoshi nechida bo'lishi, qaysi shahar/viloyatdan bo'lishi va qanaqa inson yoqishini so'ra (bunda matchedUserUids: []).
   b) Agar suhbatdosh o'z talablarini (yoshi, viloyat/tumani, jinsi, qiziqishlari yoki "farqi yo'q ko'rsataver") aytgan bo'lsa, quyidagi REAL BAZA RO'YXATIDAN eng mos keladigan 1 tadan 4 tagacha foydalanuvchining ANIQ "uid" qiymatini matchedUserUids ga qo'y va oddiy do'stingni tanishtirayotgandek iliq gapirib ber!

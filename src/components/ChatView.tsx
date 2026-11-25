@@ -1497,7 +1497,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
           </div>
 
           <div
-            className="flex-1 min-h-0 divide-y divide-white/[0.05] overflow-y-auto overscroll-y-contain touch-pan-y pb-24 sm:pb-6"
+            className="flex-1 min-h-0 divide-y divide-white/[0.05] overflow-y-auto pb-24 sm:pb-6"
             style={{ WebkitOverflowScrolling: 'touch' }}
             data-testid="chats-list-scroll-area"
           >
@@ -1834,7 +1834,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
         onScroll={handleMessagesScroll}
         data-testid="chat-messages-scroll-area"
         style={{ WebkitOverflowScrolling: 'touch' }}
-        className={`flex-1 min-h-0 px-3 sm:px-4 overflow-y-auto overscroll-y-contain touch-pan-y space-y-2 bg-[#09090D] relative z-10 flex flex-col ${
+        className={`flex-1 min-h-0 px-3 sm:px-4 overflow-y-auto space-y-2 bg-[#09090D] relative z-10 flex flex-col ${
           compactKeyboardChrome ? 'py-2' : 'py-3.5'
         }`}
       >
